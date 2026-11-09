@@ -1,0 +1,20 @@
+[package]
+name = "skagent"
+description = "ssh-agent for FIDO2 (sk) keys that caches the PIN and still requires a touch per signature"
+edition.workspace = true
+publish.workspace = true
+version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "skagent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true

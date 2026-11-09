@@ -1,0 +1,7 @@
+# Resolved by nci through rust-overlay and pinned by flake.lock. rust-src and
+# rust-analyzer come from the same toolchain, so the editor never sees a
+# standard library that differs from the one the compiler uses.
+[toolchain]
+channel = "stable"
+components = ["clippy", "rust-analyzer", "rust-src", "rustfmt"]
+profile = "minimal"
