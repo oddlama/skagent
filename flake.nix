@@ -67,10 +67,17 @@
             mainProgram = "skagent";
           } config.nci.outputs.skagent.packages.release;
 
-          # Every crate contributes its test suite and its clippy run.
+          # Every crate contributes its test suite and its clippy run. The VM
+          # tests drive the release binary with stock OpenSSH tools.
           checks =
             lib.mapAttrs' (name: output: lib.nameValuePair "tests-${name}" output.check) crateOutputs
-            // lib.mapAttrs' (name: output: lib.nameValuePair "clippy-${name}" output.clippy) crateOutputs;
+            // lib.mapAttrs' (name: output: lib.nameValuePair "clippy-${name}" output.clippy) crateOutputs
+            // {
+              vm-agent = import ./nix/tests/agent.nix {
+                inherit pkgs;
+                package = config.packages.default;
+              };
+            };
 
           devshells.default = {
             packages = [
