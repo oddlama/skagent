@@ -45,7 +45,7 @@ where
     );
 
     let served = tokio::select! {
-        result = ssh_agent_lib::agent::listen(PeerCheckedListener::new(listener), SkAgent::default()) => {
+        result = ssh_agent_lib::agent::listen(PeerCheckedListener::new(listener, bound.path()), SkAgent::default()) => {
             result.with_context(|| {
                 format!("serving the ssh-agent protocol on {}", socket_path.display())
             })

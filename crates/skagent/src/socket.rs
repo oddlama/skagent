@@ -2,6 +2,7 @@
 //! handling, peer credential checks and cleanup.
 
 use std::ffi::OsStr;
+use std::fmt;
 use std::fs::{self, Permissions};
 use std::io;
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
@@ -10,9 +11,9 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use async_trait::async_trait;
-use rustix::fs::Mode;
+use rustix::fs::{CWD, RenameFlags, renameat_with};
 use rustix::io::Errno;
-use rustix::process::{geteuid, umask};
+use rustix::process::geteuid;
 use ssh_agent_lib::agent::ListeningSocket;
 use tokio::net::{UnixListener, UnixStream};
 
@@ -49,8 +50,27 @@ pub fn default_socket_path(runtime_dir: Option<&OsStr>) -> Result<PathBuf> {
 #[derive(Debug)]
 pub struct BoundSocket {
     path: PathBuf,
+    identity: FileIdentity,
+}
+
+/// Device and inode identify a file, but filesystems reuse inode numbers once
+/// a file is deleted. The inode change time (nanosecond resolution) tells a
+/// later file with a recycled inode apart from ours.
+#[derive(Debug, PartialEq, Eq)]
+struct FileIdentity {
     device: u64,
     inode: u64,
+    change_time: (i64, i64),
+}
+
+impl FileIdentity {
+    fn of(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            change_time: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
 }
 
 impl BoundSocket {
@@ -80,7 +100,7 @@ impl BoundSocket {
                 });
             }
         };
-        if metadata.dev() != self.device || metadata.ino() != self.inode {
+        if FileIdentity::of(&metadata) != self.identity {
             tracing::warn!(
                 socket = %self.path.display(),
                 "socket file was replaced by someone else, leaving it in place"
@@ -98,25 +118,51 @@ impl BoundSocket {
 /// (the leftover of an agent that didn't shut down cleanly). Anything else at
 /// `path` is an error.
 ///
-/// Must be called from within a tokio runtime, and during startup: it narrows
-/// the process-wide umask for the duration of the `bind` call.
+/// The socket is never reachable with a wider mode: it is bound inside a
+/// fresh `0700` directory next to `path`, restricted to `0600`, and only then
+/// renamed into place. The rename refuses to overwrite, so an agent that
+/// appears at `path` in the meantime is never replaced. No process-wide state
+/// such as the umask is touched, so this is safe to call at any time.
+///
+/// Must be called from within a tokio runtime.
 ///
 /// # Errors
 ///
 /// Returns an error if `path` is occupied by a live agent or a non-socket
-/// file, or if binding or setting permissions fails.
+/// file, or if creating, restricting or moving the socket fails.
 pub fn bind(path: &Path) -> Result<(UnixListener, BoundSocket)> {
     remove_stale_socket(path)?;
 
-    // The socket file must never exist with a wider mode, not even briefly.
-    let previous_umask = umask(Mode::from_bits_truncate(0o177));
-    let bound = UnixListener::bind(path);
-    umask(previous_umask);
-    let listener = bound.with_context(|| format!("binding agent socket {}", path.display()))?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let staging = tempfile::Builder::new()
+        .prefix(".skagent-bind-")
+        .tempdir_in(parent)
+        .with_context(|| {
+            format!(
+                "creating a private staging directory in {}",
+                parent.display()
+            )
+        })?;
+    let staged = staging.path().join("agent.sock");
 
-    // Explicit, so the mode doesn't depend on how the platform applies the umask to sockets.
-    fs::set_permissions(path, Permissions::from_mode(0o600))
-        .with_context(|| format!("restricting agent socket {} to mode 0600", path.display()))?;
+    let listener = UnixListener::bind(&staged)
+        .with_context(|| format!("binding agent socket in {}", staging.path().display()))?;
+    fs::set_permissions(&staged, Permissions::from_mode(0o600))
+        .with_context(|| format!("restricting agent socket {} to mode 0600", staged.display()))?;
+    renameat_with(CWD, &staged, CWD, path, RenameFlags::NOREPLACE).with_context(|| {
+        format!(
+            "moving agent socket into place at {} (fails if something appeared there meanwhile)",
+            path.display()
+        )
+    })?;
+    staging
+        .close()
+        .with_context(|| format!("removing staging directory next to {}", path.display()))?;
+
+    // After the rename: renaming updates the inode change time.
     let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("inspecting freshly bound agent socket {}", path.display()))?;
 
@@ -124,8 +170,7 @@ pub fn bind(path: &Path) -> Result<(UnixListener, BoundSocket)> {
         listener,
         BoundSocket {
             path: path.to_owned(),
-            device: metadata.dev(),
-            inode: metadata.ino(),
+            identity: FileIdentity::of(&metadata),
         },
     ))
 }
@@ -188,20 +233,34 @@ pub fn is_transient_accept_error(error: &io::Error) -> bool {
 ///
 /// Refused connections are closed and logged. The listener keeps accepting
 /// after transient errors, so it only stops on conditions that won't go away.
-#[derive(Debug)]
 pub struct PeerCheckedListener {
     listener: UnixListener,
+    path: PathBuf,
     own_uid: u32,
 }
 
 impl PeerCheckedListener {
-    /// Wraps `listener`, allowing peers with the effective uid of this process.
+    /// Wraps `listener`, which serves the socket at `path`, allowing peers
+    /// with the effective uid of this process.
     #[must_use]
-    pub fn new(listener: UnixListener) -> Self {
+    pub fn new(listener: UnixListener, path: &Path) -> Self {
         Self {
             listener,
+            path: path.to_owned(),
             own_uid: geteuid().as_raw(),
         }
+    }
+}
+
+// Manual, because the listener's own address is the staging path it was
+// bound at before being renamed into place (see [`bind`]).
+impl fmt::Debug for PeerCheckedListener {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PeerCheckedListener")
+            .field("path", &self.path)
+            .field("own_uid", &self.own_uid)
+            .finish_non_exhaustive()
     }
 }
 
