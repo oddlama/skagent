@@ -98,7 +98,7 @@ Key loading: `ssh-add -K` with stock tooling works from day one, but it asks for
 
 ## milestones
 
-1. Agent skeleton: socket handling (`0600`, stale socket, peer uid), process hardening, safe logging, empty `REQUEST_IDENTITIES`. VM test with `ssh-add`.
+1. ~~Agent skeleton: socket handling (`0600`, stale socket, peer uid), process hardening, safe logging, empty `REQUEST_IDENTITIES`. VM test with `ssh-add`.~~ Done.
 2. Identity store: sk keys via `ssh-add -K`/stub, lifetime, remove, lock/unlock.
 3. `skagent-fido`: libfido2 wrapper, assertion with UV + PIN, retry counter.
 4. PIN cache + pinentry.

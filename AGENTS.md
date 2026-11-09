@@ -40,6 +40,18 @@ nix build                # release binary
 - `unsafe` is forbidden workspace-wide. The only planned exception is the libfido2 FFI wrapper crate, which must keep every `unsafe` block small, documented (`// SAFETY:`) and behind a safe API.
 - Terminal output must respect the user's terminal colors: use the `colored` crate with the basic ANSI colors only (no truecolor/256-color, no backgrounds), honor `NO_COLOR`, and disable color when the stream isn't a terminal. Don't over-color. Use color to highlight what matters, consistently: red = error, yellow = warning, bold = the value the user has to act on.
 
+## tests
+
+- `crates/skagent/tests/*.rs`: Rust tests, which also run inside every nix package build (a failing test fails `nix build`).
+- `nix/tests/agent.nix` (`checks.vm-agent`): the release binary as a transient systemd unit in a NixOS VM, driven by stock `ssh-add`. Build one VM test alone with `nix build -L .#checks.x86_64-linux.vm-agent`.
+- When adding a safety property, check that a test fails without it. Break the code, watch the test fail, restore. The log redaction is covered twice: the rule by `tests/logging.rs`, the wiring by the VM test.
+
+## known ssh-agent-lib behavior
+
+- Unknown message types (e.g. the SSH1 `REMOVE_ALL_RSA_IDENTITIES` = 9 that `ssh-add -D` still sends) fail to decode, and the library drops the connection instead of answering `FAILURE`. `ssh-add` ignores this for the SSH1 message.
+- Every refused request (default `Session` methods) is logged at `ERROR` by the library. That's noisy but contains no secrets.
+- `listen()` ends on the first `accept` error. `PeerCheckedListener` retries transient errors so that can't happen for resource exhaustion.
+
 ## secrets
 
 - The PIN and anything derived from it never get logged, `Debug`-printed or written to disk. Keep them in dedicated types that zeroize on drop and redact `Debug`.
