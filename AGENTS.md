@@ -1,0 +1,47 @@
+# AGENTS.md
+
+Context for anyone (human or agent) changing this repo.
+
+skagent is an ssh-agent for FIDO2 `sk-ssh-ed25519@openssh.com` keys created with `verify-required`. It caches the FIDO2 PIN for a bounded time, while the authenticator still requires a touch for every signature. Read `docs/design.md` before changing behavior. `docs/research/` holds the source-level findings the design is based on.
+
+## layout
+
+- `flake.nix`: flake-parts, numtide devshell, treefmt-nix, nci (nix-cargo-integration). The nci project is called `workspace` so it doesn't collide with the `skagent` crate in `nci.outputs`.
+- `rust-toolchain.toml`: the toolchain nci builds with and the devshell provides (incl. rust-analyzer + rust-src from the same release). It's pinned through `flake.lock`.
+- `Cargo.toml`: workspace, shared dependency versions and shared lints.
+- `crates/skagent`: the agent (lib + `skagent` binary).
+- `nix/tests/`: NixOS VM tests (end to end, real OpenSSH tools against the real binary).
+- `docs/design.md`: architecture, PIN cache rules, threat model. `docs/research/`: findings with source references.
+
+## commands
+
+```sh
+nix develop              # or direnv (`.envrc`)
+cargo build / cargo test / cargo clippy --all-targets
+nix fmt                  # treefmt: nixfmt, deadnix, statix, taplo, rustfmt
+nix flake check -L       # treefmt, per-crate tests + clippy, VM tests
+nix build                # release binary
+```
+
+- nci sets `CARGO_BUILD_TARGET`, so binaries land in `target/<triple>/debug/`. Use `cargo run -- ...`.
+- `RUSTFLAGS=-D warnings` is set for the nix builds **and** exported into the devshell. Warnings are errors everywhere, including clippy pedantic warnings in the clippy check.
+- No pre-commit hooks. They don't play well with jj, which is also used on this repo. Run `nix fmt` and `nix flake check` yourself before committing.
+
+## rules
+
+- Conventional commits with a scope: `chore(nix): ...`, `docs(research): ...`, `docs(design): ...`, `feat(agent): ...`, `feat(fido): ...`, `feat(cli): ...`, `fix(agent): ...`, `test: ...`, `test(vm): ...`. Commit small and often.
+- Write pedantic, deliberate Rust. Correctness and maintainability take priority over speed of implementation.
+- Never use `unwrap`, `expect`, `panic!`, `todo!`, `unimplemented!`, `unreachable!`, indexing/slicing that can go out of bounds, unchecked arithmetic, or anything else that can unexpectedly terminate a production execution path. The workspace lints deny all of these (`Cargo.toml`, `[workspace.lints.clippy]`). Don't `#[allow]` them away; restructure the code instead.
+- Every Rust crate root must carry `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]`. That includes `lib.rs`, `main.rs` and every integration test file, since each one is its own crate.
+- Propagate errors with `anyhow` and attach actionable context that names the failed operation and the resource involved: `.with_context(|| format!("binding agent socket {}", path.display()))`, not `.context("failed")`.
+- Argument parsing: `clap` with derive.
+- Tests live in separate files (`crates/<crate>/tests/*.rs`), never in inline `#[cfg(test)]` modules. Logic that needs tests is exposed through the library crate.
+- End-to-end behavior is tested in NixOS VMs (`nix/tests/`) in addition to the Rust tests. Anything that touches sockets, permissions, process state or OpenSSH interop needs a VM test.
+- `unsafe` is forbidden workspace-wide. The only planned exception is the libfido2 FFI wrapper crate, which must keep every `unsafe` block small, documented (`// SAFETY:`) and behind a safe API.
+- Terminal output must respect the user's terminal colors: use the `colored` crate with the basic ANSI colors only (no truecolor/256-color, no backgrounds), honor `NO_COLOR`, and disable color when the stream isn't a terminal. Don't over-color. Use color to highlight what matters, consistently: red = error, yellow = warning, bold = the value the user has to act on.
+
+## secrets
+
+- The PIN and anything derived from it never get logged, `Debug`-printed or written to disk. Keep them in dedicated types that zeroize on drop and redact `Debug`.
+- ssh-agent-lib logs every request at `debug` level (key handles, lock passphrases). Its `debug`/`trace` output must stay filtered no matter what log filter the user passes.
+- Fail closed: if a safety check can't be performed (peer credentials, retry counter, socket ownership), refuse the operation.
