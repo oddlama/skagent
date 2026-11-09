@@ -12,8 +12,10 @@ anyhow = "1"
 async-trait = "0.1"
 clap = { version = "4", features = ["derive", "env"] }
 colored = "3"
-rustix = { version = "1", features = ["fs", "process"] }
+rustix = { version = "1", features = ["fs", "mm", "param", "process"] }
+skagent-secret = { path = "crates/skagent-secret" }
 ssh-agent-lib = "0.6"
+subtle = "2"
 tempfile = "3"
 tokio = { version = "1", features = [
   "macros",
@@ -29,12 +31,15 @@ tracing-subscriber = { version = "0.3", features = [
   "fmt",
   "tracing-log",
 ] }
+zeroize = "1"
 
 # Lints shared by every crate. Each crate root additionally carries
 # `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]`, see AGENTS.md.
 [workspace.lints.rust]
 missing_docs = "warn"
-unsafe_code = "forbid"
+# deny, not forbid: the few crates that wrap raw memory or FFI allow it at
+# their root. Every other crate root carries `#![forbid(unsafe_code)]`.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

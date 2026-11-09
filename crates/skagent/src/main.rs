@@ -1,5 +1,6 @@
 //! `skagent` binary entry point.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![forbid(unsafe_code)]
 
 use std::io::{self, IsTerminal as _, Write as _};
 use std::process::ExitCode;

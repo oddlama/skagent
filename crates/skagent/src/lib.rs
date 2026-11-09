@@ -4,6 +4,7 @@
 //!
 //! See `docs/design.md` for the architecture and the caching rules.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![forbid(unsafe_code)]
 
 pub mod agent;
 pub mod cli;

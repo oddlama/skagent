@@ -9,7 +9,8 @@ skagent is an ssh-agent for FIDO2 `sk-ssh-ed25519@openssh.com` keys created with
 - `flake.nix`: flake-parts, numtide devshell, treefmt-nix, nci (nix-cargo-integration). The nci project is called `workspace` so it doesn't collide with the `skagent` crate in `nci.outputs`.
 - `rust-toolchain.toml`: the toolchain nci builds with and the devshell provides (incl. rust-analyzer + rust-src from the same release). It's pinned through `flake.lock`.
 - `Cargo.toml`: workspace, shared dependency versions and shared lints.
-- `crates/skagent`: the agent (lib + `skagent` binary).
+- `crates/skagent`: the agent (lib + `skagent` binary). `#![forbid(unsafe_code)]`.
+- `crates/skagent-secret`: `SecretBuffer`, locked/guarded/zeroizing memory for PINs and passphrases. Its `unsafe` is confined to `src/mapping.rs`.
 - `nix/tests/`: NixOS VM tests (end to end, real OpenSSH tools against the real binary).
 - `docs/design.md`: architecture, PIN cache rules, threat model. `docs/research/`: findings with source references.
 
@@ -37,7 +38,7 @@ nix build                # release binary
 - Argument parsing: `clap` with derive.
 - Tests live in separate files (`crates/<crate>/tests/*.rs`), never in inline `#[cfg(test)]` modules. Logic that needs tests is exposed through the library crate.
 - End-to-end behavior is tested in NixOS VMs (`nix/tests/`) in addition to the Rust tests. Anything that touches sockets, permissions, process state or OpenSSH interop needs a VM test.
-- `unsafe` is forbidden workspace-wide. The only planned exception is the libfido2 FFI wrapper crate, which must keep every `unsafe` block small, documented (`// SAFETY:`) and behind a safe API.
+- `unsafe` is denied workspace-wide (`deny`, so it can be lifted per crate). Only `skagent-secret` (raw mappings) and the planned libfido2 FFI crate allow it, at their crate root, with every block small, documented (`// SAFETY:`) and behind a safe API. All other crate roots carry `#![forbid(unsafe_code)]`.
 - Terminal output must respect the user's terminal colors: use the `colored` crate with the basic ANSI colors only (no truecolor/256-color, no backgrounds), honor `NO_COLOR`, and disable color when the stream isn't a terminal. Don't over-color. Use color to highlight what matters, consistently: red = error, yellow = warning, bold = the value the user has to act on.
 
 ## tests
@@ -54,6 +55,6 @@ nix build                # release binary
 
 ## secrets
 
-- The PIN and anything derived from it never get logged, `Debug`-printed or written to disk. Keep them in dedicated types that zeroize on drop and redact `Debug`.
+- The PIN and anything derived from it never get logged, `Debug`-printed or written to disk. Store secrets in `skagent_secret::SecretBuffer` (locked, guarded, zeroized, redacted `Debug`, no `Clone`), never in `String`/`Vec<u8>` longer than unavoidable, and compare them with `constant_time_eq`.
 - ssh-agent-lib logs every request at `debug` level (key handles, lock passphrases). Its `debug`/`trace` output must stay filtered no matter what log filter the user passes.
 - Fail closed: if a safety check can't be performed (peer credentials, retry counter, socket ownership), refuse the operation.
