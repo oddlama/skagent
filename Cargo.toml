@@ -9,7 +9,26 @@ version = "0.1.0"
 
 [workspace.dependencies]
 anyhow = "1"
+async-trait = "0.1"
 clap = { version = "4", features = ["derive", "env"] }
+colored = "3"
+rustix = { version = "1", features = ["fs", "process"] }
+ssh-agent-lib = "0.6"
+tempfile = "3"
+tokio = { version = "1", features = [
+  "macros",
+  "net",
+  "rt-multi-thread",
+  "signal",
+  "time",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = [
+  "ansi",
+  "env-filter",
+  "fmt",
+  "tracing-log",
+] }
 
 # Lints shared by every crate. Each crate root additionally carries
 # `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]`, see AGENTS.md.
@@ -26,6 +45,9 @@ exit = "deny"
 expect_used = "deny"
 indexing_slicing = "deny"
 panic = "deny"
+# println!/eprintln! panic when the stream is closed; write with writeln! and handle the error.
+print_stderr = "deny"
+print_stdout = "deny"
 string_slice = "deny"
 todo = "deny"
 unimplemented = "deny"

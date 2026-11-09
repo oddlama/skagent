@@ -5,4 +5,10 @@
 //! See `docs/design.md` for the architecture and the caching rules.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+pub mod agent;
 pub mod cli;
+pub mod hardening;
+pub mod logging;
+pub mod output;
+pub mod serve;
+pub mod socket;
