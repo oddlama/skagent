@@ -1,13 +1,15 @@
 //! `skagent serve`: bind the socket, serve until shutdown, clean up.
 
+use std::ffi::OsString;
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
 use crate::agent::SkAgent;
 use crate::cli::ServeArgs;
+use crate::prompt::Askpass;
 use crate::socket::{self, PeerCheckedListener};
 
 /// Runs `skagent serve` until SIGINT or SIGTERM.
@@ -21,20 +23,38 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         Some(path) => path,
         None => socket::default_socket_path(std::env::var_os("XDG_RUNTIME_DIR").as_deref())?,
     };
+    let askpass = askpass_program(args.askpass, std::env::var_os("SSH_ASKPASS"));
+    if let Some(program) = &askpass {
+        tracing::info!(askpass = %program.display(), "asking for PINs with askpass");
+    } else {
+        tracing::warn!("no askpass program configured, keys that need a PIN can't sign");
+    }
+    let agent = SkAgent::new(askpass.map(Askpass::new));
     // Installed before the socket exists, so a signal can't kill the process
     // between binding and serving and leave a stale socket behind.
     let signals = ShutdownSignals::install()?;
-    serve_until(&socket_path, signals.wait()).await
+    serve_until(&socket_path, agent, signals.wait()).await
 }
 
-/// Serves the agent on `socket_path` until `shutdown` completes, then removes
+/// The askpass program: `--askpass`, else `$SSH_ASKPASS` unless it is empty
+/// (as OpenSSH treats it; NixOS login shells set it empty).
+#[must_use]
+pub fn askpass_program(flag: Option<PathBuf>, environment: Option<OsString>) -> Option<PathBuf> {
+    flag.or_else(|| {
+        environment
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    })
+}
+
+/// Serves `agent` on `socket_path` until `shutdown` completes, then removes
 /// the socket file.
 ///
 /// # Errors
 ///
 /// Returns an error if binding or serving fails, if `shutdown` resolves to an
 /// error, or if the socket file can't be removed afterwards.
-pub async fn serve_until<F>(socket_path: &Path, shutdown: F) -> Result<()>
+pub async fn serve_until<F>(socket_path: &Path, agent: SkAgent, shutdown: F) -> Result<()>
 where
     F: Future<Output = Result<()>>,
 {
@@ -45,7 +65,7 @@ where
     );
 
     let served = tokio::select! {
-        result = ssh_agent_lib::agent::listen(PeerCheckedListener::new(listener, bound.path()), SkAgent::default()) => {
+        result = ssh_agent_lib::agent::listen(PeerCheckedListener::new(listener, bound.path()), agent) => {
             result.with_context(|| {
                 format!("serving the ssh-agent protocol on {}", socket_path.display())
             })

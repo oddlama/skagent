@@ -8,6 +8,8 @@
 //!   to 10 s. Attempts are serialized across connections, so opening more
 //!   connections doesn't speed up guessing.
 //!
+//! Signing goes to the security key; see [`crate::signer`].
+//!
 //! Refused requests answer `FAILURE`. The reason is logged at `warn`, never
 //! sent to the client: the protocol has no way to carry it.
 
@@ -28,6 +30,8 @@ use tokio::sync::Mutex;
 use zeroize::Zeroize as _;
 
 use crate::identities::{IdentityStore, SkIdentity, evaluate_constraints};
+use crate::prompt::Askpass;
+use crate::signer;
 use crate::socket::PeerCheckedListener;
 
 /// Extra wait per consecutive failed unlock attempt.
@@ -42,11 +46,26 @@ pub struct SkAgent {
     shared: Arc<Shared>,
 }
 
+impl SkAgent {
+    /// An agent that asks for PINs through `askpass`. Without one, keys that
+    /// need a PIN can't sign.
+    #[must_use]
+    pub fn new(askpass: Option<Askpass>) -> Self {
+        Self {
+            shared: Arc::new(Shared {
+                askpass,
+                ..Shared::default()
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct Shared {
     state: Mutex<State>,
     /// Held for the whole unlock attempt, including the penalty wait.
     unlock_attempts: Mutex<()>,
+    askpass: Option<Askpass>,
 }
 
 #[derive(Debug, Default)]
@@ -123,19 +142,26 @@ impl AgentSession {
         let PublicCredential::Key(key) = &request.credential else {
             bail!("certificates are never held by this agent");
         };
-        let mut state = self.shared.state.lock().await;
-        if state.lock.is_some() {
-            bail!("the agent is locked");
-        }
-        let identity = state
-            .identities
-            .find(key, Instant::now())
-            .ok_or_else(|| anyhow!("the key is not in the agent"))?;
-        bail!(
-            "signing with {} ({}) is not implemented yet",
-            identity.fingerprint(),
-            identity.comment()
-        )
+        // Copied out, so the state isn't locked while the device waits for a touch.
+        let identity = {
+            let mut state = self.shared.state.lock().await;
+            if state.lock.is_some() {
+                bail!("the agent is locked");
+            }
+            state
+                .identities
+                .find(key, Instant::now())
+                .ok_or_else(|| anyhow!("the key is not in the agent"))?
+                .clone()
+        };
+        let signature =
+            signer::sign(&identity, &request.data, self.shared.askpass.as_ref()).await?;
+        tracing::info!(
+            fingerprint = %identity.fingerprint(),
+            comment = %identity.comment(),
+            "signed"
+        );
+        Ok(signature)
     }
 
     async fn lock_with(&self, mut passphrase: String) -> Result<()> {

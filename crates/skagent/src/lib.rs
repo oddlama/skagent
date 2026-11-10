@@ -12,5 +12,7 @@ pub mod hardening;
 pub mod identities;
 pub mod logging;
 pub mod output;
+pub mod prompt;
 pub mod serve;
+pub mod signer;
 pub mod socket;

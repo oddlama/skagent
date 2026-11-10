@@ -33,4 +33,10 @@ pub struct ServeArgs {
     /// Path of the agent socket. Defaults to `$XDG_RUNTIME_DIR/skagent.sock`.
     #[arg(long, env = "SKAGENT_SOCKET")]
     pub socket: Option<PathBuf>,
+
+    /// Program that asks for the PIN: gets the prompt as its argument and
+    /// prints the PIN. Defaults to `$SSH_ASKPASS` if that is set and not
+    /// empty. Without one, keys created with `verify-required` can't sign.
+    #[arg(long)]
+    pub askpass: Option<PathBuf>,
 }
