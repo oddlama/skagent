@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use skagent_fido::{Device, hid_devices};
-use tokio::sync::{Mutex, OwnedMutexGuard, OwnedRwLockReadGuard, RwLock};
+use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard, OwnedRwLockReadGuard, RwLock};
 
+use crate::cancel::{Abandoned, AbandonedFlag};
 use crate::device::DeviceIdentity;
 use crate::pin_cache::CredentialKey;
 use crate::signer::SigningTicket;
@@ -117,16 +118,11 @@ pub(crate) struct RoutedDevice {
 }
 
 impl Router {
-    pub async fn bind(&self, key: CredentialKey, device: DeviceIdentity) {
-        self.bindings.lock().await.bind(key, device);
-    }
-
-    pub async fn forget(&self, key: &CredentialKey) {
-        self.bindings.lock().await.forget(key);
-    }
-
-    pub async fn clear(&self) {
-        self.bindings.lock().await.clear();
+    /// The bindings, locked. Callers that change them together with other
+    /// state take every lock first and then change everything without
+    /// awaiting, so a cancelled caller can't leave half of it done.
+    pub async fn bindings(&self) -> MutexGuard<'_, Bindings> {
+        self.bindings.lock().await
     }
 
     pub async fn route(&self, key: &CredentialKey, ticket: SigningTicket) -> Result<RoutedDevice> {
@@ -185,10 +181,14 @@ impl Router {
                 "touch the security key whose resident SSH credentials you want to load"
             );
         }
+        // Set when this request is dropped (client gone): the selection then
+        // stops at its next round instead of blocking everyone for 30 s.
+        let abandoned = Abandoned::default();
+        let flag = abandoned.flag();
         let (identity, device, exclusive) = tokio::task::spawn_blocking(move || {
             // Keep exclusive access until the worker stops, even if its caller
             // goes away. Outstanding probes are cancelled on drop.
-            let selected = select_by_touch(candidates, &ticket)?;
+            let selected = select_by_touch(candidates, &ticket, &flag)?;
             Ok::<_, anyhow::Error>((selected.0, selected.1, exclusive))
         })
         .await
@@ -258,6 +258,7 @@ fn open_checked(identity: &DeviceIdentity) -> Result<Device> {
 fn select_by_touch(
     identities: Vec<DeviceIdentity>,
     ticket: &SigningTicket,
+    abandoned: &AbandonedFlag,
 ) -> Result<(DeviceIdentity, Device)> {
     let started = Instant::now();
     let mut probes = Vec::new();
@@ -278,6 +279,10 @@ fn select_by_touch(
             "no connected security key could be asked for a touch"
         );
         ticket.check()?;
+        ensure!(
+            !abandoned.is_set(),
+            "the request went away, stopped the touch selection"
+        );
         let mut touched: Vec<DeviceIdentity> = Vec::new();
         probes.retain_mut(|(identity, probe)| match probe.poll(TOUCH_POLL) {
             Ok(true) => {

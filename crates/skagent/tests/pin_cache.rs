@@ -238,3 +238,37 @@ fn device_identity_of_a_non_device_fails() -> Result<()> {
     ensure!(DeviceIdentity::of("/dev/does-not-exist").is_err());
     Ok(())
 }
+
+#[test]
+fn unplugged_devices_lose_their_pins_and_are_asked_once() -> Result<()> {
+    let start = Instant::now();
+    let mut cache = cache_with_work_pin(CachePolicy::default(), start)?;
+    cache.store(
+        personal(),
+        SecretBuffer::from_slice(b"13579")?,
+        replugged(),
+        8,
+        start,
+    );
+    cache.store(
+        CredentialKey::new("ssh:other", &[3; 64]),
+        SecretBuffer::from_slice(b"13579")?,
+        replugged(),
+        8,
+        start,
+    );
+    let asked = std::cell::Cell::new(0_u32);
+    let dropped = cache.evict_absent(|device| {
+        asked.set(asked.get().saturating_add(1));
+        *device == self::device()
+    });
+    ensure!(dropped == 2, "dropped {dropped}");
+    ensure!(
+        asked.get() == 2,
+        "asked {} times for 2 devices",
+        asked.get()
+    );
+    expect_hit(cache.lookup(&work(), &device(), 8, start)?)?;
+    ensure!(cache.len() == 1);
+    Ok(())
+}

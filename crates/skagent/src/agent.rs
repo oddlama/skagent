@@ -30,6 +30,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{Mutex, MutexGuard};
 use zeroize::Zeroize as _;
 
+use crate::cancel::Hangup;
 use crate::identities::{IdentityStore, SkIdentity, evaluate_constraints};
 use crate::signer::Signer;
 use crate::socket::PeerCheckedListener;
@@ -131,9 +132,18 @@ struct State {
 }
 
 impl Agent<PeerCheckedListener> for SkAgent {
-    fn new_session(&mut self, _socket: &UnixStream) -> impl Session {
+    fn new_session(&mut self, socket: &UnixStream) -> impl Session {
+        let hangup = Hangup::watch(socket)
+            .map_err(|error| {
+                tracing::warn!(
+                    %error,
+                    "can't watch the connection, requests of a client that disconnects run to the end"
+                );
+            })
+            .ok();
         AgentSession {
             shared: Arc::clone(&self.shared),
+            hangup,
         }
     }
 }
@@ -142,6 +152,8 @@ impl Agent<PeerCheckedListener> for SkAgent {
 #[derive(Debug)]
 pub struct AgentSession {
     shared: Arc<Shared>,
+    /// Lets long requests (signing, loading) stop when the client is gone.
+    hangup: Option<Hangup>,
 }
 
 /// Logs why a request is refused and turns it into a protocol `FAILURE`.
@@ -217,11 +229,13 @@ impl AgentSession {
             let ticket = self.shared.signer.ticket_for(&identity).await;
             (identity, ticket)
         };
-        let signature = self
-            .shared
-            .signer
-            .sign(&identity, &request.data, ticket)
-            .await?;
+        // Only the device work is cut short when the client leaves; finding
+        // the identity above (which reaps expired ones) always completes.
+        let signature = Hangup::unless_closed(
+            self.hangup.as_ref(),
+            self.shared.signer.sign(&identity, &request.data, ticket),
+        )
+        .await?;
         tracing::info!(
             fingerprint = %identity.fingerprint(),
             comment = %identity.comment(),
@@ -240,7 +254,13 @@ impl AgentSession {
             ensure!(state.lock.is_none(), "the agent is locked");
             self.shared.signer.ticket()
         };
-        let mut loaded = self.shared.signer.prepare_load(ticket).await?;
+        // Selection, prompt and enumeration end when the client leaves. The
+        // commit below always runs to the end once it started.
+        let mut loaded = Hangup::unless_closed(
+            self.hangup.as_ref(),
+            self.shared.signer.prepare_load(ticket),
+        )
+        .await?;
         let (mut state, now) = self.shared.state_now().await;
         ensure!(
             state.lock.is_none(),

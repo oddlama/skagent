@@ -261,6 +261,19 @@ impl PinCache {
         self.entries.remove(key).is_some()
     }
 
+    /// Drops the PINs whose device fails `present`, e.g. because it was
+    /// unplugged. Each device is asked once. Returns how many PINs went.
+    pub fn evict_absent(&mut self, present: impl Fn(&DeviceIdentity) -> bool) -> usize {
+        let mut answers: HashMap<DeviceIdentity, bool> = HashMap::new();
+        let before = self.entries.len();
+        self.entries.retain(|_, entry| {
+            *answers
+                .entry(entry.device.clone())
+                .or_insert_with(|| present(&entry.device))
+        });
+        before.saturating_sub(self.entries.len())
+    }
+
     /// Drops every PIN tied to a device that rejected a loading PIN.
     pub fn evict_device(&mut self, device: &DeviceIdentity) {
         self.entries.retain(|_, entry| entry.device != *device);

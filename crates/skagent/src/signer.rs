@@ -13,6 +13,7 @@ use skagent_secret::SecretBuffer;
 use ssh_agent_lib::ssh_key::{Algorithm, Signature};
 use tokio::sync::{Mutex, watch};
 
+use crate::cancel::DeviceInterrupt;
 use crate::device::DeviceIdentity;
 use crate::identities::SkIdentity;
 use crate::loading::PreparedLoad;
@@ -173,8 +174,10 @@ impl Signer {
     /// Unloads all identity-specific state as well as the cached PINs.
     pub async fn remove_all(&self) -> usize {
         let mut state = self.state.lock().await;
+        let mut bindings = self.router.bindings().await;
+        // No awaits from here on: a cancelled caller can't stop halfway.
         self.invalidation.send_replace(());
-        self.router.clear().await;
+        bindings.clear();
         state.last_failure.clear();
         state.revocations.clear();
         state.cache.clear()
@@ -197,17 +200,31 @@ impl Signer {
     /// was cached.
     pub async fn forget(&self, identity: &SkIdentity) -> bool {
         let mut state = self.state.lock().await;
+        let mut bindings = self.router.bindings().await;
+        // No awaits from here on: a cancelled caller can't stop halfway.
         let key = credential_key(identity);
         // Dropping the sender closes the channel, which revokes.
         state.revocations.remove(&key);
-        self.router.forget(&key).await;
+        bindings.forget(&key);
         state.last_failure.remove(&key);
         state.cache.evict(&key)
     }
 
-    /// Drops PINs whose lifetime or idle timeout ended. Returns how many.
+    /// Drops PINs whose lifetime or idle timeout ended, returning how many,
+    /// and PINs of security keys that were unplugged (or replugged) since.
     pub async fn expire(&self, now: Instant) -> usize {
-        self.state.lock().await.cache.expire(now)
+        let mut state = self.state.lock().await;
+        let expired = state.cache.expire(now);
+        let unplugged = state.cache.evict_absent(|device| {
+            DeviceIdentity::of(device.path()).is_ok_and(|current| current == *device)
+        });
+        if unplugged > 0 {
+            tracing::info!(
+                unplugged,
+                "dropped the cached PINs of unplugged security keys"
+            );
+        }
+        expired
     }
 
     /// Number of cached PINs.
@@ -296,6 +313,8 @@ impl Signer {
         identities: &[SkIdentity],
     ) -> Result<()> {
         let mut state = self.state.lock().await;
+        let mut bindings = self.router.bindings().await;
+        // No awaits from here on: a cancelled caller can't stop halfway.
         loaded.ticket.check()?;
         let device = &loaded.routed.identity;
         ensure!(
@@ -318,9 +337,7 @@ impl Signer {
             }
         }
         for identity in identities {
-            self.router
-                .bind(credential_key(identity), device.clone())
-                .await;
+            bindings.bind(credential_key(identity), device.clone());
         }
         loaded.pin.clear();
         for (key, pin) in pins {
@@ -394,18 +411,20 @@ impl Signer {
         let retry_guard = matches!(source, PinSource::Cache(_))
             .then_some(retries)
             .flatten();
-        let (source, outcome) = {
+        // Revocation or a dropped request cancels the assertion on the
+        // device, which ends the wait for a touch and with it the PIN copy.
+        let (interrupt, finished) = DeviceInterrupt::new(routed.device.canceller());
+        let worker = {
             let device = device.clone();
             tokio::task::spawn_blocking(move || {
+                let _finished = finished;
                 let outcome = assert_on(&mut routed, &device, &request, source.pin(), retry_guard);
                 (source, outcome)
             })
-            .await
-            .context("the signing thread panicked or was cancelled")?
         };
+        let (source, outcome) = interrupt.run(worker, &mut ticket).await?;
 
-        // A blocking libfido2 call cannot yet be cancelled. Wait for it, but
-        // never return its signature or repopulate the cache after eviction.
+        // Revoked meanwhile: never return the signature or refill the cache.
         ticket.check()?;
         match outcome {
             Ok((statement, retries_after)) => {
@@ -488,11 +507,13 @@ impl Signer {
         ticket: &SigningTicket,
     ) -> Result<()> {
         let mut state = self.state.lock().await;
+        let mut bindings = self.router.bindings().await;
+        // No awaits from here on: a cancelled caller can't stop halfway.
         ticket.check()?;
         state.last_failure.remove(key);
         let still_same_device = DeviceIdentity::of(device.path()).is_ok_and(|now| now == *device);
         if still_same_device {
-            self.router.bind(key.clone(), device.clone()).await;
+            bindings.bind(key.clone(), device.clone());
         }
         if !state.caching_available {
             return Ok(());
