@@ -50,10 +50,12 @@ Why libfido2 and not a pure Rust CTAP stack: OpenSSH signs with exactly the libf
 skagent replaces ssh-agent for sk keys, so it handles any number of them at once (e.g. a work and a personal YubiKey plugged in together):
 
 - The identity store holds keys from any number of authenticators.
-- Per sign request, the device is resolved by probing the key handle against the connected devices (silent assertion, `up=false`, no UV). This is the same trick OpenSSH uses, and it never prompts or blinks the wrong key.
-- The PIN cache is per credential. Work and personal key have independent entries, lifetimes and retry guards. Evicting one never touches the other.
+- Finding the device that holds a key is the hard part. **A silent probe doesn't work for our keys**: credProtect `UV_REQUIRED` hides the credential from every request without user verification, so a probe with the key handle says "no credentials" on every device, the right one included. That's why OpenSSH falls back to "touch the key you mean" (`sk_probe: selecting sk by touch`). And verifying with a PIN on the wrong device costs that device a retry.
+- So skagent remembers where a key lives: after a signature succeeded on a device, the key is bound to that device's identity (its `/dev/hidrawN` node: device number, inode and change time, which change on every replug). With one device connected and no binding yet, that device is used. With several and no binding, the user picks by touch (libfido2's touch-begin/status, the device that gets touched wins), then the PIN is asked for.
+- **A cached PIN is only ever sent to the device it was verified on.** The cache entry carries the device identity; if it no longer matches (replug, other device on that node), the entry is dropped and the user is asked again. This also covers "personal key plugged in where the work key was".
+- The PIN cache is per credential and device. Work and personal key have independent entries, lifetimes and retry guards. Evicting one never touches the other.
 - There's one lock per device, so signatures on different keys run in parallel and two requests for the same key queue.
-- Unplugging a device evicts the cache entries of the credentials last resolved to it (hidraw remove event), like gpg forgetting the PIN on card removal.
+- Unplugging a device evicts the cache entries bound to it (checked on every use through the device identity, and eagerly on hidraw remove events), like gpg forgetting the PIN on card removal.
 - Later: per-key policy (lifetime, idle timeout) selected by application, comment or fingerprint, e.g. 8h for work and 1h for personal.
 
 ## secret memory
@@ -91,7 +93,7 @@ Key loading: `ssh-add -K` with stock tooling works from day one, but it asks for
 5. **Forced PIN change pending** (`PIN_POLICY_VIOLATION`): don't cache. Tell the user to run `ykman fido access change-pin`.
 6. **Lifetime:** hard max since creation (default 8h, configurable down), plus an optional idle timeout since last use. There's no "forever".
 7. **Evict everything on:** `ssh-add -D`, `ssh-add -x`, logind `Lock` and `PrepareForSleep(true)` over D-Bus, `skagent forget`, agent shutdown.
-8. **Scope:** one entry per credential (key handle) to start with. FIDO has no portable device serial, so "per device" needs a device identity first (open question).
+8. **Scope:** one entry per credential (key handle), bound to the device identity it was verified on (see multiple keys). Never sent anywhere else.
 
 ## prompting
 
@@ -114,14 +116,14 @@ Key loading: `ssh-add -K` with stock tooling works from day one, but it asks for
 
 ## open questions
 
-- Whether a per-device PIN cache is worth it over per-credential (needs a device identity, FIDO has no portable serial).
 - systemd user unit with socket activation, plus a NixOS/home-manager module.
 
 ## milestones
 
 1. ~~Agent skeleton: socket handling (`0600`, stale socket, peer uid), process hardening, safe logging, empty `REQUEST_IDENTITIES`. VM test with `ssh-add`.~~ Done.
-2. Identity store: sk keys via `ssh-add -K`/stub, lifetime, remove, lock/unlock.
-3. `skagent-fido`: libfido2 wrapper, assertion with UV + PIN, retry counter.
+2. ~~Identity store: sk keys via `ssh-add -K`/stub, lifetime, remove, lock/unlock.~~ Done.
+3. ~~`skagent-fido`: libfido2 wrapper, assertion with UV + PIN, retry counter.~~ Done, with signing through it (PIN via askpass every time, exactly one device).
 4. PIN cache + pinentry.
-5. Virtual authenticator + full sign path in VM tests.
+5. ~~Virtual authenticator + full sign path in VM tests.~~ Done early (`skagent-testkey`, `checks.vm-testkey`, `checks.vm-signing`). Open: soft-fido2's credential listing gap (`docs/research/test-key.md`).
+7. Multiple devices: device binding, select by touch.
 6. Eviction triggers via logind, `skagent forget`, `skagent load`.

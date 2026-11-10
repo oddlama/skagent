@@ -11,6 +11,7 @@ skagent is an ssh-agent for FIDO2 `sk-ssh-ed25519@openssh.com` keys created with
 - `Cargo.toml`: workspace, shared dependency versions and shared lints.
 - `crates/skagent`: the agent (lib + `skagent` binary). `#![forbid(unsafe_code)]`.
 - `crates/skagent-secret`: `SecretBuffer`, locked/guarded/zeroizing memory for PINs and passphrases. Its `unsafe` is confined to `src/mapping.rs`.
+- `crates/skagent-fido`: safe wrapper over libfido2 (via `libfido2-sys`, bindgen against the system headers). Its `unsafe` is confined to `src/raw.rs`. Only `/dev/hidraw*` devices are used; libfido2 also lists YubiKeys over `pcsc://`.
 - `crates/skagent-testkey`: **test-only** virtual FIDO2 key on uhid (soft-fido2, AGPL-3.0). Used inside VM tests only. `checks.license-boundary` (`nix/license-boundary.nix`) fails if `skagent` or `skagent-secret` ever reach it or soft-fido2 through `Cargo.lock`; add new shipped crates to its `shippedCrates`.
 - `nix/tests/`: NixOS VM tests (end to end, real OpenSSH tools against the real binary). `common.nix` has the shared helpers (stub key writer, askpass that logs prompts, uhid/hidraw setup).
 - `clippy.toml`: proper names allowed without backticks in doc comments.
@@ -40,13 +41,14 @@ nix build                # release binary
 - Argument parsing: `clap` with derive.
 - Tests live in separate files (`crates/<crate>/tests/*.rs`), never in inline `#[cfg(test)]` modules. Logic that needs tests is exposed through the library crate.
 - End-to-end behavior is tested in NixOS VMs (`nix/tests/`) in addition to the Rust tests. Anything that touches sockets, permissions, process state or OpenSSH interop needs a VM test.
-- `unsafe` is denied workspace-wide (`deny`, so it can be lifted per crate). Only `skagent-secret` (raw mappings) and the planned libfido2 FFI crate allow it, at their crate root, with every block small, documented (`// SAFETY:`) and behind a safe API. All other crate roots carry `#![forbid(unsafe_code)]`.
+- `unsafe` is denied workspace-wide (`deny`, so it can be lifted per crate). Only `skagent-secret` (raw mappings) and `skagent-fido` (libfido2 FFI) allow it, at their crate root, with every block small, documented (`// SAFETY:`) and behind a safe API. All other crate roots carry `#![forbid(unsafe_code)]`.
 - Terminal output must respect the user's terminal colors: use the `colored` crate with the basic ANSI colors only (no truecolor/256-color, no backgrounds), honor `NO_COLOR`, and disable color when the stream isn't a terminal. Don't over-color. Use color to highlight what matters, consistently: red = error, yellow = warning, bold = the value the user has to act on.
 
 ## tests
 
 - `crates/skagent/tests/*.rs`: Rust tests, which also run inside every nix package build (a failing test fails `nix build`).
 - `nix/tests/agent.nix` (`checks.vm-agent`): the release binary as a transient systemd unit in a NixOS VM, driven by stock `ssh-add`. Build one VM test alone with `nix build -L .#checks.x86_64-linux.vm-agent`.
+- `nix/tests/signing.nix` (`checks.vm-signing`): skagent signing with the virtual key, incl. an ssh login to sshd with `verify-required`, touch/PIN counting, wrong PIN, no touch, two keys.
 - `nix/tests/testkey.nix` (`checks.vm-testkey`): the virtual key against stock OpenSSH, no skagent. If this fails, no FIDO VM test means anything. Its quirks and workarounds: `docs/research/test-key.md`.
 - VM test scripts: the driver runs shell commands with `pipefail` and type-checks/lints the Python. Wait with `retry(fn, timeout_seconds=...)` in Python instead of `cmd | grep -q` in shell, and don't shadow driver globals (`log`, `machine`, ...).
 - When adding a safety property, check that a test fails without it. Break the code, watch the test fail, restore. The log redaction is covered twice: the rule by `tests/logging.rs`, the wiring by the VM test.
@@ -62,3 +64,5 @@ nix build                # release binary
 - The PIN and anything derived from it never get logged, `Debug`-printed or written to disk. Store secrets in `skagent_secret::SecretBuffer` (locked, guarded, zeroized, redacted `Debug`, no `Clone`), never in `String`/`Vec<u8>` longer than unavoidable, and compare them with `constant_time_eq`.
 - ssh-agent-lib logs every request at `debug` level (key handles, lock passphrases). Its `debug`/`trace` output must stay filtered no matter what log filter the user passes.
 - Fail closed: if a safety check can't be performed (peer credentials, retry counter, socket ownership), refuse the operation.
+- Never send a PIN to a device that isn't known to hold the credential. Wrong-device PIN attempts cost that device a retry, and `verify-required` credentials can't be found by a silent probe (see `docs/design.md`, multiple keys).
+- Don't hold the agent state lock across device operations or prompts; they block for up to ~35 s.
