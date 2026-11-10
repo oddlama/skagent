@@ -273,7 +273,19 @@ pkgs.testers.runNixOSTest {
         expect_prompt()
         machine.succeed("systemctl unmask --runtime systemd-logind.service && systemctl start systemd-logind.service")
         retry(lambda _last_try: journal("skagent").count("machine sleeps (logind)") == 2, timeout_seconds=40)
-        expect_prompt()
+        # logind reapplies hidraw ACLs on restart, changing ctime. That is
+        # conservatively a new device identity and requires selection again.
+        recovery_touches = touches()
+        alice_ok("rm -f ~/msg.sig")
+        machine.succeed(
+            "systemd-run --unit recovered-sign --uid alice --setenv SSH_AUTH_SOCK=${socket}"
+            " ${pkgs.openssh}/bin/ssh-keygen -Y sign -f /home/alice/id_sk.pub -n test /home/alice/msg"
+        )
+        retry(lambda _last_try: touches() == recovery_touches + 1, timeout_seconds=10)
+        touch()
+        retry(lambda _last_try: touches() == recovery_touches + 2, timeout_seconds=10)
+        touch()
+        machine.wait_for_file("/home/alice/msg.sig")
         expect_cached()
 
     with subtest("a wrong PIN is refused, not retried, and mentioned in the next prompt"):
@@ -291,14 +303,11 @@ pkgs.testers.runNixOSTest {
         assert "pin retries: 8" in pin_retries(), pin_retries()
         expect_cached()
 
-    with subtest("with two security keys connected skagent refuses to guess"):
+    with subtest("a second connected key does not disturb the established binding"):
         machine.succeed("${startTestkey "testkey-two" "test key two"}")
         machine.wait_until_succeeds("fido2-token -L | grep -F 'test key two' >/dev/null")
-        before = prompts()
-        status, out = sign()
-        assert status != 0, f"signed with two keys connected: {out}"
-        assert "2 FIDO security keys are connected" in journal("skagent"), journal("skagent")
-        assert prompts() == before, "asked for a PIN without knowing the device"
+        expect_cached()
+        assert "touch requested" not in journal("testkey-two"), "unrelated key was probed"
         machine.succeed("systemctl stop testkey-two")
         machine.wait_until_fails("fido2-token -L | grep -F 'test key two' >/dev/null")
         expect_cached()

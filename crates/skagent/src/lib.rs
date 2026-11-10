@@ -18,6 +18,7 @@ pub mod output;
 pub mod pin_cache;
 pub mod pinentry;
 pub mod prompt;
+pub mod routing;
 pub mod serve;
 pub mod signer;
 pub mod socket;

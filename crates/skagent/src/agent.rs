@@ -307,7 +307,7 @@ impl Session for AgentSession {
             return Err(refuse("removing all keys", &anyhow!("the agent is locked")));
         }
         let removed = state.identities.clear();
-        let forgotten = self.shared.signer.forget_all().await;
+        let forgotten = self.shared.signer.remove_all().await;
         drop(state);
         tracing::info!(removed, forgotten_pins = forgotten, "removed all keys");
         Ok(())
