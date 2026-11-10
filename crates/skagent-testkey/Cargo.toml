@@ -1,0 +1,26 @@
+[package]
+name = "skagent-testkey"
+description = "Virtual FIDO2 security key on uhid for skagent's VM tests. Links soft-fido2 (AGPL-3.0): test-only, never a dependency of skagent itself."
+edition.workspace = true
+publish.workspace = true
+version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "skagent-testkey"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+ciborium.workspace = true
+clap.workspace = true
+sha2.workspace = true
+soft-fido2.workspace = true
+soft-fido2-transport.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[lints]
+workspace = true

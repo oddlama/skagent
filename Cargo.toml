@@ -10,10 +10,15 @@ version = "0.1.0"
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
+ciborium = "0.2"
 clap = { version = "4", features = ["derive", "env"] }
 colored = "3"
 rustix = { version = "1", features = ["fs", "mm", "param", "process"] }
 skagent-secret = { path = "crates/skagent-secret" }
+sha2 = "0.10"
+# AGPL-3.0, test-only: only skagent-testkey may depend on these.
+soft-fido2 = { version = "0.17", default-features = false, features = ["std"] }
+soft-fido2-transport = "0.17"
 ssh-agent-lib = "0.6"
 subtle = "2"
 tempfile = "3"
