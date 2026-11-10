@@ -234,18 +234,37 @@ pkgs.testers.runNixOSTest {
         expect_prompt()
         expect_cached()
 
-    with subtest("an assertion finishing after forget cannot refill the cache or return a signature"):
-        alice_ok("skagent forget --socket ${socket}")
+    def cancelled() -> int:
+        return journal("testkey").count("outcome=Cancelled")
+
+    def wait_for_touch_request(unit: str) -> None:
         pending_touches = touches()
         machine.succeed(
-            "systemd-run --unit pending-touch --uid alice --setenv SSH_AUTH_SOCK=${socket}"
+            f"systemd-run --unit {unit} --uid alice --setenv SSH_AUTH_SOCK=${socket}"
             " ${pkgs.openssh}/bin/ssh-keygen -Y sign -f /home/alice/id_sk.pub -n test /home/alice/msg"
         )
         retry(lambda _last_try: touches() == pending_touches + 1, timeout_seconds=10)
+
+    with subtest("forget cancels an assertion that waits for a touch, on the key itself"):
+        expect_cached()
+        before_cancel = cancelled()
+        wait_for_touch_request("pending-touch")
         alice_ok("skagent forget --socket ${socket}")
-        touch()
+        # CTAPHID_CANCEL reaches the key well before its own 10 s touch timeout.
+        retry(lambda _last_try: cancelled() == before_cancel + 1, timeout_seconds=3)
         machine.wait_until_succeeds("test $(systemctl show pending-touch -p ExecMainStatus --value) != 0")
+        assert "cancelling the security key operation of a revoked request" in journal("skagent")
         expect_prompt()
+        expect_cached()
+
+    with subtest("a client that hangs up during the touch wait cancels its assertion"):
+        before_cancel = cancelled()
+        wait_for_touch_request("hangup-touch")
+        machine.succeed("systemctl kill --signal=KILL hangup-touch")
+        retry(lambda _last_try: cancelled() == before_cancel + 1, timeout_seconds=3)
+        assert "the client disconnected" in journal("skagent")
+        # A hangup isn't an eviction: the PIN stays cached, and the key is
+        # free for the next signature right away.
         expect_cached()
 
     with subtest("loginctl lock-session drops the PIN"):
@@ -363,9 +382,14 @@ pkgs.testers.runNixOSTest {
         assert "SETERROR The previous PIN was wrong" in machine.succeed("cat ${pinentryLog}")
         expect_cached()
 
-    with subtest("a replugged key gets no cached PIN"):
+    with subtest("an unplugged key's PIN is dropped, a replugged key gets none"):
         machine.succeed("systemctl stop testkey")
         machine.wait_until_fails("fido2-token -L | grep -F 'test key one' >/dev/null")
+        # The 15 s sweep notices the unplug without waiting for a request.
+        retry(
+            lambda _last_try: "dropped the cached PINs of unplugged security keys" in journal("skagent-pinentry"),
+            timeout_seconds=25,
+        )
         machine.succeed("${startTestkey "testkey-replugged" "test key one"}")
         machine.wait_until_succeeds("fido2-token -L | grep -F 'test key one' >/dev/null")
         # The virtual key lost its credentials with the restart, so the
@@ -376,7 +400,6 @@ pkgs.testers.runNixOSTest {
         status, out = sign()
         assert status != 0, f"signed with a credential the new key doesn't have: {out}"
         assert prompts() == before + 1, "the cached PIN went to a replugged device"
-        assert "the security key was replugged or replaced" in journal("skagent-pinentry")
 
     with subtest("PINs never reach the journal"):
         for unit in ["skagent", "skagent-short", "skagent-idle", "skagent-no-cache", "skagent-pinentry"]:

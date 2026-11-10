@@ -88,9 +88,8 @@ pkgs.testers.runNixOSTest {
         assert "Good" in out, out
 
     def wait_selections_idle() -> None:
-        # The test key's synchronous transport cannot consume CANCEL while
-        # waiting for a touch. Unselected probes time out after 10s; production
-        # devices receive fido_dev_cancel when the probe handle is dropped.
+        # Unselected probes get CTAPHID_CANCEL when they are dropped; wait
+        # until every key answered its selection request.
         for key in ["work", "personal"]:
             retry(lambda _last_try: count(key, "select") == count(key, "select", "answered"), timeout_seconds=15)
 
@@ -259,6 +258,26 @@ pkgs.testers.runNixOSTest {
         retries("impatient")
         machine.succeed("systemctl stop key-impatient")
         machine.wait_until_fails("fido2-token -L | grep -F multi-impatient >/dev/null")
+
+    with subtest("a client that hangs up during selection frees all keys at once"):
+        alice("SSH_AUTH_SOCK=${socket} ssh-add -d ~/personal && SSH_AUTH_SOCK=${socket} ssh-add ~/personal")
+        hangup_keys = ["work", "personal"]
+        hangup_selects = {key: count(key, "select") for key in hangup_keys}
+        hangup_cancels = {key: journal(f"key-{key}").count("outcome=Cancelled") for key in hangup_keys}
+        asked = prompts()
+        start_sign("personal", "hangup-select")
+        for key in hangup_keys:
+            retry(lambda _last_try: count(key, "select") == hangup_selects[key] + 1, timeout_seconds=10)
+        machine.succeed("systemctl kill --signal=KILL hangup-select")
+        for key in hangup_keys:
+            retry(
+                lambda _last_try: journal(f"key-{key}").count("outcome=Cancelled") == hangup_cancels[key] + 1,
+                timeout_seconds=3,
+            )
+        assert "the client disconnected" in journal("skagent")
+        assert prompts() == asked, "asked for a PIN for a client that left"
+        # Nobody waits out the abandoned selection: the next one starts now.
+        select_and_sign("personal", "after-hangup-select")
 
     with subtest("PINs are absent from the agent journal"):
         for pin in ["246810", "135790", "999999"]:
