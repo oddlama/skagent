@@ -8,10 +8,12 @@
 
 pub mod agent;
 pub mod cli;
+pub mod device;
 pub mod hardening;
 pub mod identities;
 pub mod logging;
 pub mod output;
+pub mod pin_cache;
 pub mod prompt;
 pub mod serve;
 pub mod signer;
