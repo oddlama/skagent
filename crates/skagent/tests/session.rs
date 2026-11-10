@@ -226,3 +226,41 @@ async fn wrong_unlocks_are_refused_with_a_growing_delay() -> Result<()> {
 
     agent.stop().await
 }
+
+#[tokio::test]
+async fn forget_is_accepted_and_unknown_extensions_are_refused() -> Result<()> {
+    let dir = tempfile::tempdir().context("creating temp dir")?;
+    let socket = dir.path().join("agent.sock");
+    let agent = RunningAgent::start(&socket).await?;
+
+    skagent::client::forget_pins(&socket).await?;
+
+    let mut client = agent.client().await?;
+    let unknown = client
+        .extension(Extension {
+            name: "session-bind@openssh.com".to_owned(),
+            details: Unparsed::from(Vec::new()),
+        })
+        .await;
+    ensure!(
+        unknown.is_err(),
+        "unsupported extension answered: {unknown:?}"
+    );
+    ensure!(
+        comments(&mut client).await?.is_empty(),
+        "connection unusable after a refused extension"
+    );
+
+    agent.stop().await
+}
+
+#[tokio::test]
+async fn forget_fails_without_an_agent() -> Result<()> {
+    let dir = tempfile::tempdir().context("creating temp dir")?;
+    ensure!(
+        skagent::client::forget_pins(&dir.path().join("nothing.sock"))
+            .await
+            .is_err()
+    );
+    Ok(())
+}

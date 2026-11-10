@@ -149,8 +149,15 @@ fn store_removes_single_and_all_keys() -> Result<()> {
     store.add(identity(1, "first", None)?);
     store.add(identity(2, "second", None)?);
 
-    ensure!(store.remove(&sk_key_data(1), now));
-    ensure!(!store.remove(&sk_key_data(1), now), "removed twice");
+    ensure!(
+        store
+            .remove(&sk_key_data(1), now)
+            .is_some_and(|removed| removed.comment() == "first")
+    );
+    ensure!(
+        store.remove(&sk_key_data(1), now).is_none(),
+        "removed twice"
+    );
     ensure!(store.find(&sk_key_data(2), now).is_some());
     ensure!(store.clear() == 1);
     ensure!(store.identities(now).is_empty());
