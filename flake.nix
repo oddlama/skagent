@@ -103,6 +103,11 @@
                 inherit pkgs;
                 package = config.packages.default;
               };
+              vm-signing = import ./nix/tests/signing.nix {
+                inherit pkgs;
+                package = config.packages.default;
+                testkey = config.packages.testkey;
+              };
               vm-testkey = import ./nix/tests/testkey.nix {
                 inherit pkgs;
                 testkey = config.packages.testkey;
