@@ -14,6 +14,7 @@ mod error;
 mod raw;
 
 use std::ffi::{CStr, CString};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use skagent_secret::SecretBuffer;
@@ -141,6 +142,21 @@ impl Device {
         &self.path
     }
 
+    /// Starts PIN-free touch selection. Consumes the device so no assertion
+    /// can race the pending response. Dropping the probe cancels it.
+    ///
+    /// # Errors
+    /// Returns an error if the selection request cannot be sent.
+    pub fn begin_touch(mut self) -> Result<TouchProbe> {
+        self.inner
+            .touch_begin()
+            .with_context(|| format!("starting touch selection on {}", self.path))?;
+        Ok(TouchProbe {
+            device: self,
+            touched: false,
+        })
+    }
+
     /// PIN attempts left. Reading it doesn't use one.
     ///
     /// # Errors
@@ -214,6 +230,46 @@ impl Device {
             flags,
             counter,
         })
+    }
+}
+
+/// A PIN-free selection request pending on one device. Drop cancels it.
+#[derive(Debug)]
+pub struct TouchProbe {
+    device: Device,
+    touched: bool,
+}
+
+impl TouchProbe {
+    /// Polls for touch for at most `timeout`, without sending any PIN.
+    ///
+    /// # Errors
+    /// Returns an error if the device refuses or the timeout is out of range.
+    pub fn poll(&mut self, timeout: Duration) -> Result<bool> {
+        if !self.touched {
+            let milliseconds =
+                i32::try_from(timeout.as_millis()).context("touch poll timeout is too large")?;
+            self.touched = self
+                .device
+                .inner
+                .touch_status(milliseconds)
+                .with_context(|| format!("polling touch selection on {}", self.device.path))?;
+        }
+        Ok(self.touched)
+    }
+
+    /// Returns the same open device, only after a successful touch.
+    ///
+    /// # Errors
+    /// Refuses to finish an untouched probe.
+    pub fn finish(self) -> Result<Device> {
+        if !self.touched {
+            bail!(
+                "security key {} was not selected by touch",
+                self.device.path
+            );
+        }
+        Ok(self.device)
     }
 }
 

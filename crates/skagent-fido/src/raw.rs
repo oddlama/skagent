@@ -111,6 +111,7 @@ pub(crate) fn list_devices(max: usize) -> Result<Vec<ListedDevice>, FidoError> {
 /// An open device.
 pub(crate) struct Device {
     raw: NonNull<sys::fido_dev_t>,
+    touch_pending: bool,
 }
 
 // SAFETY: a fido_dev_t is used by one thread at a time; `Device` is only
@@ -124,7 +125,10 @@ impl Device {
         // SAFETY: allocates a closed device handle, or returns null.
         let raw = NonNull::new(unsafe { sys::fido_dev_new() })
             .ok_or_else(|| FidoError::new("fido_dev_new", sys::FIDO_ERR_INTERNAL))?;
-        let device = Self { raw };
+        let device = Self {
+            raw,
+            touch_pending: false,
+        };
         // SAFETY: `raw` is a fresh handle and `path` is NUL-terminated.
         check("fido_dev_open", unsafe {
             sys::fido_dev_open(device.raw.as_ptr(), path.as_ptr())
@@ -142,6 +146,29 @@ impl Device {
     pub(crate) fn is_fido2(&self) -> bool {
         // SAFETY: `raw` is an open device owned by `self`; the call only reads.
         unsafe { sys::fido_dev_is_fido2(self.raw.as_ptr()) }
+    }
+
+    pub(crate) fn touch_begin(&mut self) -> Result<(), FidoError> {
+        // SAFETY: exclusive access to an open device. This sends a request;
+        // touch_status will read its response on this same handle.
+        check("fido_dev_get_touch_begin", unsafe {
+            sys::fido_dev_get_touch_begin(self.raw.as_ptr())
+        })?;
+        self.touch_pending = true;
+        Ok(())
+    }
+
+    pub(crate) fn touch_status(&mut self, milliseconds: c_int) -> Result<bool, FidoError> {
+        let mut touched = 0;
+        // SAFETY: exclusive access; `touched` is a valid output pointer and
+        // milliseconds bounds this poll. No other operation uses this handle.
+        check("fido_dev_get_touch_status", unsafe {
+            sys::fido_dev_get_touch_status(self.raw.as_ptr(), &raw mut touched, milliseconds)
+        })?;
+        if touched != 0 {
+            self.touch_pending = false;
+        }
+        Ok(touched != 0)
     }
 
     pub(crate) fn pin_retries(&mut self) -> Result<u32, FidoError> {
@@ -175,6 +202,11 @@ impl Drop for Device {
         // SAFETY: `raw` is owned by `self` and used for the last time. Closing
         // an already closed device is harmless; free nulls our copy.
         unsafe {
+            if self.touch_pending {
+                // Best effort: stop blinking on unselected devices. Only a
+                // transmit, with no concurrent use of this handle.
+                let _cancelled = sys::fido_dev_cancel(raw);
+            }
             let _closed = sys::fido_dev_close(raw);
             sys::fido_dev_free(&raw mut raw);
         }
