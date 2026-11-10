@@ -34,7 +34,7 @@ Every touch request is logged as `touch requested`, so tests count touches in th
 
 libfido2 1.17's `src/touch.c` implements touch-begin/status with a dummy `makeCredential` carrying an empty `pinUvAuthParam` (not `authenticatorSelection`). CTAP requires touch before rejecting that empty parameter. The test key handles it before soft-fido2: request `select` touch, then return `PIN_AUTH_INVALID` without checking a PIN, changing retries or creating a credential. libfido2 recognizes that status as a successful selection.
 
-The transport loop is synchronous: while waiting for a touch it cannot process a CTAPHID CANCEL. Unselected test devices therefore wait out their 10s timeout; the multi-key suite waits for that before its next operation. Production sends `fido_dev_cancel` before closing outstanding probes, but prompt hardware cancellation still needs a real-key test.
+While a request waits for a touch, the test key keeps reading its uhid device: `CTAPHID_CANCEL` ends the wait with `KEEPALIVE_CANCEL` (`outcome=Cancelled` in the journal), and anything else is answered with `CHANNEL_BUSY`, like a busy YubiKey. The key serves one request at a time, so a cancel on any channel counts. That lets the VM tests check that revocation, hangups and dropped selection probes reach the key promptly. Whether a real YubiKey reacts the same way still needs a hardware run.
 
 ### credential management listing workaround
 

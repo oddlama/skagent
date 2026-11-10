@@ -23,7 +23,7 @@ PINs expire after 8h by default. Use `--pin-lifetime 2h`, optionally `--pin-idle
 
 With several keys connected, the first signature asks you to touch the key holding that credential, then enter its PIN and touch again to sign. Successful signatures establish a device binding: later signatures use that device with one touch, and work/personal PIN caches stay separate. Bound devices can sign concurrently. A lost binding requires selection again—even if only one device remains. `skagent forget` keeps bindings; removing identities clears them.
 
-A PIN prompt left open closes after 60s. Eviction cancels pending prompts and discards late signatures. A libfido2 call already in progress cannot yet be interrupted; its temporary PIN copy survives until the call returns or times out (up to about 35s), even after cache eviction.
+A PIN prompt left open closes after 60s. Eviction cancels pending prompts, aborts an assertion that waits for a touch on the key itself (`CTAPHID_CANCEL`, the key stops blinking) and discards late signatures. A client that disconnects mid-request (Ctrl-C on `ssh`) cancels its request the same way, without dropping the PIN. An unplugged key loses its cached PIN within 15s. Cancellation is tested against the virtual key only so far.
 
 ## dev
 

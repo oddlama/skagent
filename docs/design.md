@@ -17,7 +17,7 @@ Protected:
 
 - **Lost/stolen YubiKey:** useless without the PIN (`UV_REQUIRED`, discovery needs the PIN too).
 - **Leaked key handle (stub file, agent memory dump):** useless without the PIN.
-- **Stolen laptop + key while no PIN remains in memory** (evicted, expired, rebooted): PIN needed. An already-running libfido2 call retains its temporary copy until it returns; see concurrency.
+- **Stolen laptop + key while no PIN remains in memory** (evicted, expired, rebooted): PIN needed. An assertion still waiting for a touch when the PINs are evicted is cancelled on the key, which ends its temporary PIN copy; see concurrency.
 - **Other local users:** socket is `0600` in `$XDG_RUNTIME_DIR`, and the peer uid is checked on accept (own uid or root, same as OpenSSH).
 - **Forwarded agent on a hostile remote host:** every signature still needs a touch on your machine, so no silent use.
 - **Core dumps / ptrace by other processes of the same user:** `RLIMIT_CORE=0`, `PR_SET_DUMPABLE=0`. The PIN sits in a zeroizing, mlocked buffer.
@@ -57,7 +57,7 @@ The identity store, device bindings and PIN cache support multiple credentials a
 - The PIN cache is per credential and device. Work and personal key have independent entries, lifetimes and retry guards. Evicting one never touches the other.
 - There's one lock per device and per credential, so bound devices sign in parallel and duplicate requests queue without duplicate prompts. Touch selection takes exclusive access across devices to avoid consuming a touch intended for an assertion. Device locks travel into blocking workers; dropping an async request cannot release the hardware early.
 - Bindings survive PIN expiry, lock and `skagent forget`. Removing an identity drops its binding; `ssh-add -D` drops all bindings.
-- Device identity changes evict the PIN on its next lookup. Eager eviction on hidraw remove events is still pending. Permission/ACL changes also change ctime, conservatively requiring selection and a fresh PIN.
+- Device identity changes evict the PIN on its next lookup, and the 15s sweep drops the PINs of unplugged (or replugged) keys without waiting for a request. Permission/ACL changes also change ctime, conservatively requiring selection and a fresh PIN.
 - Later: per-key policy (lifetime, idle timeout) selected by application, comment or fingerprint, e.g. 8h for work and 1h for personal.
 
 ## secret memory
@@ -115,7 +115,8 @@ Expiry is enforced on lookup; a 15s sweep also wipes unused expired entries from
 - Per-device and per-credential locks; bound devices operate independently. Selection takes a global write lock and is polled for at most 30s. PIN prompts are bounded to 60s; queue timeouts are pending.
 - Selection sends no PIN. libfido2 uses a dummy makeCredential with empty pinUvAuthParam, which requires touch before rejection and consumes no PIN retry. A second touch is required for the actual signature. Outstanding probes are cancelled on drop, on the same thread that owns each device.
 - Signing tickets are captured under the agent state lock. A ticket is revoked by every global eviction and by the removal or expiry of its own credential (loading tickets: global only, so a key removed while a load is pending can come back with that load). Revocation cancels queued requests and prompts, and prevents late signatures from being returned or cached. No agent state lock is held over device operations or prompts.
-- A blocking libfido2 assertion cannot yet be cancelled: the operation and its temporary PIN copy remain until it returns or times out (~35s). Eviction clears cache entries immediately but not this copy. Active-operation cancellation (`fido_dev_cancel`), including on disconnect and before suspend, is pending.
+- Running device operations end early when their request is revoked or abandoned (`cancel.rs`). An assertion waiting for a touch gets `CTAPHID_CANCEL` through `fido_dev_cancel` from another thread, repeated every 100ms until the worker returns, since a cancel that reaches the key before the request does is ignored. Touch selection checks an abandoned flag every round. Prompts and queue waits are futures and end when dropped. The worker then releases the device and its PIN copy. Calling `fido_dev_cancel` while the owner is inside another call on the same handle is free of data races in libfido2 1.17 (reasoning at `CancelSlot::cancel` in `raw.rs`); the slot is cleared under its lock before the handle is closed. Suspend revokes all tickets, so it cancels too.
+- ssh-agent-lib only notices a disconnected client when it writes the reply. So each connection is also watched for hangup, via `EPOLLRDHUP` on a duplicate of its descriptor that is never read from: a client that disconnects mid-request (Ctrl-C on ssh) cancels the request like a revocation would, but leaves the PIN cache alone.
 
 ## testing
 
@@ -137,4 +138,5 @@ Expiry is enforced on lookup; a 15s sweep also wipes unused expired entries from
 4. ~~PIN cache + pinentry.~~ Done: lifetime/idle limits, retry/device guards, Assuan/askpass, eviction races, Rust and VM tests.
 5. ~~Virtual authenticator + full sign path in VM tests.~~ Done early (`skagent-testkey`, `checks.vm-testkey`, `checks.vm-signing`). Credential listing is supplemented by the test wrapper; stock `ssh-keygen -K` and `ssh-add -K` now pass (`docs/research/test-key.md`).
 6. ~~Eviction triggers, `skagent forget`, `skagent load`.~~ Done, including authenticated enumeration, cache priming, preserved constraints and loading races in `checks.vm-loading`. Logind sleep tests mock the kernel suspend action.
-7. ~~Multiple devices: device binding, select by touch.~~ Done, with per-device locking and a two-key VM suite using distinct PINs. Eager unplug eviction is pending.
+7. ~~Multiple devices: device binding, select by touch.~~ Done, with per-device locking and a two-key VM suite using distinct PINs.
+8. ~~Cancelling running operations.~~ Done: revocation, suspend and client hangups cancel assertions on the key and stop selections; unplugged keys lose their PINs within 15s. Real-key confirmation pending.
