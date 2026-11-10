@@ -143,6 +143,104 @@ impl Device {
         })
     }
 
+    pub(crate) fn supports_credman(&self) -> bool {
+        // SAFETY: reads capabilities of our open device, without mutation.
+        unsafe { sys::fido_dev_supports_credman(self.raw.as_ptr()) }
+    }
+
+    pub(crate) fn resident_rps(&mut self, pin: &CStr) -> Result<Vec<String>, FidoError> {
+        // SAFETY: creates an empty owned RP list, or null on allocation failure.
+        let list = ResidentParties(
+            NonNull::new(unsafe { sys::fido_credman_rp_new() })
+                .ok_or_else(|| FidoError::new("fido_credman_rp_new", sys::FIDO_ERR_INTERNAL))?,
+        );
+        // SAFETY: exclusive device, valid owned output list and NUL-terminated PIN.
+        check("fido_credman_get_dev_rp", unsafe {
+            sys::fido_credman_get_dev_rp(self.raw.as_ptr(), list.0.as_ptr(), pin.as_ptr())
+        })?;
+        // SAFETY: populated list, alive for this entire loop.
+        let count = unsafe { sys::fido_credman_rp_count(list.0.as_ptr()) };
+        if count > 1024 {
+            return Err(FidoError::new(
+                "resident RP count exceeds 1024",
+                sys::FIDO_ERR_INTERNAL,
+            ));
+        }
+        (0..count)
+            .map(|index| {
+                // SAFETY: index is in bounds and the string is copied before list drops.
+                let id = unsafe { owned_string(sys::fido_credman_rp_id(list.0.as_ptr(), index)) };
+                if id.is_empty() {
+                    return Err(FidoError::new(
+                        "empty resident RP id",
+                        sys::FIDO_ERR_INTERNAL,
+                    ));
+                }
+                Ok(id)
+            })
+            .collect()
+    }
+
+    pub(crate) fn resident_keys(
+        &mut self,
+        rp: &CStr,
+        pin: &CStr,
+    ) -> Result<Vec<ResidentKey>, FidoError> {
+        // SAFETY: creates an empty owned credential list, or null on failure.
+        let list = ResidentKeys(
+            NonNull::new(unsafe { sys::fido_credman_rk_new() })
+                .ok_or_else(|| FidoError::new("fido_credman_rk_new", sys::FIDO_ERR_INTERNAL))?,
+        );
+        // SAFETY: exclusive device, owned output list, RP and PIN live through the call.
+        check("fido_credman_get_dev_rk", unsafe {
+            sys::fido_credman_get_dev_rk(
+                self.raw.as_ptr(),
+                rp.as_ptr(),
+                list.0.as_ptr(),
+                pin.as_ptr(),
+            )
+        })?;
+        // SAFETY: populated, live credential list.
+        let count = unsafe { sys::fido_credman_rk_count(list.0.as_ptr()) };
+        if count > 1024 {
+            return Err(FidoError::new(
+                "resident credential count exceeds 1024",
+                sys::FIDO_ERR_INTERNAL,
+            ));
+        }
+        let mut keys = Vec::new();
+        for index in 0..count {
+            // SAFETY: in-bounds index; the borrowed credential lives until list drops.
+            let key = unsafe { sys::fido_credman_rk(list.0.as_ptr(), index) };
+            if key.is_null() {
+                return Err(FidoError::new(
+                    "null resident credential",
+                    sys::FIDO_ERR_INTERNAL,
+                ));
+            }
+            // SAFETY: valid borrowed credential; all blobs/strings are copied
+            // before the parent list is freed. Only EdDSA keys are returned.
+            unsafe {
+                if sys::fido_cred_type(key) != sys::COSE_EDDSA {
+                    continue;
+                }
+                keys.push(ResidentKey {
+                    public_key: copy_credential_blob(
+                        sys::fido_cred_pubkey_ptr(key),
+                        sys::fido_cred_pubkey_len(key),
+                    )?,
+                    key_handle: copy_credential_blob(
+                        sys::fido_cred_id_ptr(key),
+                        sys::fido_cred_id_len(key),
+                    )?,
+                    protection: sys::fido_cred_prot(key),
+                    user_name: owned_string(sys::fido_cred_user_name(key)),
+                });
+            }
+        }
+        Ok(keys)
+    }
+
     pub(crate) fn is_fido2(&self) -> bool {
         // SAFETY: `raw` is an open device owned by `self`; the call only reads.
         unsafe { sys::fido_dev_is_fido2(self.raw.as_ptr()) }
@@ -211,6 +309,47 @@ impl Drop for Device {
             sys::fido_dev_free(&raw mut raw);
         }
     }
+}
+
+pub(crate) struct ResidentKey {
+    pub public_key: Vec<u8>,
+    pub key_handle: Vec<u8>,
+    pub protection: i32,
+    pub user_name: String,
+}
+
+struct ResidentParties(NonNull<sys::fido_credman_rp_t>);
+struct ResidentKeys(NonNull<sys::fido_credman_rk_t>);
+
+impl Drop for ResidentParties {
+    fn drop(&mut self) {
+        let mut raw = self.0.as_ptr();
+        // SAFETY: unique owned list allocated by fido_credman_rp_new.
+        unsafe { sys::fido_credman_rp_free(&raw mut raw) };
+    }
+}
+
+impl Drop for ResidentKeys {
+    fn drop(&mut self) {
+        let mut raw = self.0.as_ptr();
+        // SAFETY: unique owned list allocated by fido_credman_rk_new.
+        unsafe { sys::fido_credman_rk_free(&raw mut raw) };
+    }
+}
+
+/// Copies a blob borrowed from a live libfido2 credential.
+///
+/// # Safety
+/// Pointer must be null or readable for `length` bytes through this call.
+unsafe fn copy_credential_blob(pointer: *const u8, length: usize) -> Result<Vec<u8>, FidoError> {
+    if pointer.is_null() || length == 0 || length > 1024 {
+        return Err(FidoError::new(
+            "invalid resident credential blob",
+            sys::FIDO_ERR_INTERNAL,
+        ));
+    }
+    // SAFETY: guaranteed by caller, non-null and bounded above.
+    Ok(unsafe { std::slice::from_raw_parts(pointer, length) }.to_vec())
 }
 
 /// An assertion request and, after `get_assert`, its result.

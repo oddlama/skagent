@@ -12,6 +12,8 @@
 
 mod error;
 mod raw;
+mod resident;
+pub use resident::ResidentCredential;
 
 use std::ffi::{CStr, CString};
 use std::time::Duration;
@@ -140,6 +142,59 @@ impl Device {
     #[must_use]
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// Enumerates Ed25519 resident credentials in SSH relying parties.
+    /// The PIN is authenticated by credential management before anything is
+    /// returned. Other algorithms and non-SSH relying parties are skipped.
+    ///
+    /// # Errors
+    /// Refuses unsupported devices, bad PINs or malformed credential data.
+    pub fn resident_ssh_keys(&mut self, pin: &SecretBuffer) -> Result<Vec<ResidentCredential>> {
+        if !self.inner.supports_credman() {
+            bail!(
+                "security key {} does not support resident credential management",
+                self.path
+            );
+        }
+        let terminated = nul_terminated_pin(pin)?;
+        let pin = CStr::from_bytes_with_nul(terminated.expose())
+            .context("the PIN contains a NUL byte")?;
+        let parties = match self.inner.resident_rps(pin) {
+            Ok(parties) => parties,
+            Err(error) if error.kind() == ErrorKind::NoCredentials => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("enumerating resident relying parties on {}", self.path)
+                });
+            }
+        };
+        let mut credentials = Vec::new();
+        for application in parties.into_iter().filter(|id| id.starts_with("ssh:")) {
+            let rp = CString::new(application.as_bytes())
+                .context("resident relying party contains a NUL byte")?;
+            for key in self.inner.resident_keys(&rp, pin).with_context(|| {
+                format!(
+                    "enumerating resident credentials on {} for {application}",
+                    self.path
+                )
+            })? {
+                credentials.push(ResidentCredential::new(
+                    application.clone(),
+                    &key.public_key,
+                    key.key_handle,
+                    key.protection,
+                    key.user_name,
+                )?);
+                if credentials.len() > 1024 {
+                    bail!(
+                        "security key {} returned more than 1024 SSH credentials",
+                        self.path
+                    );
+                }
+            }
+        }
+        Ok(credentials)
     }
 
     /// Starts PIN-free touch selection. Consumes the device so no assertion
