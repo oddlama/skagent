@@ -1,8 +1,6 @@
-//! Asking the user for the PIN.
-//!
-//! For now through an askpass program (`--askpass`, `$SSH_ASKPASS`), like
-//! OpenSSH's ssh-agent: the program gets the prompt as its only argument and
-//! prints the answer on stdout. The answer goes straight into locked memory.
+//! Asking the user for the PIN: through pinentry (default) or an askpass
+//! program, like OpenSSH's ssh-agent uses. Either way the answer goes
+//! straight into locked memory and is checked to be a valid FIDO PIN.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -13,6 +11,99 @@ use skagent_secret::SecretBuffer;
 use tokio::io::AsyncReadExt as _;
 use tokio::process::Command;
 use zeroize::Zeroize as _;
+
+use crate::pinentry::{Dialog, Pinentry};
+
+/// At or below this many retries left, prompts warn about them.
+pub const LOW_RETRIES: u32 = 3;
+
+/// What the user is asked about.
+#[derive(Debug, Clone, Copy)]
+pub struct PinRequest<'a> {
+    /// The key as the user knows it, e.g. `alice@example.com yubikey:1 (SHA256:...)`.
+    pub key: &'a str,
+    /// PIN attempts the device has left, if known.
+    pub retries: Option<u32>,
+    /// What went wrong last time, e.g. a wrong PIN.
+    pub error: Option<&'a str>,
+}
+
+impl PinRequest<'_> {
+    fn retries_warning(&self) -> Option<String> {
+        self.retries
+            .filter(|&retries| retries <= LOW_RETRIES)
+            .map(|retries| format!("{retries} PIN attempts left before the key locks"))
+    }
+
+    /// One-line prompt for askpass programs.
+    #[must_use]
+    pub fn askpass_text(&self) -> String {
+        let mut text = String::new();
+        if let Some(error) = self.error {
+            text.push_str(error);
+            text.push_str(". ");
+        }
+        text.push_str("Enter PIN for ");
+        text.push_str(self.key);
+        text.push_str(", then touch the key");
+        if let Some(warning) = self.retries_warning() {
+            text.push_str(" (");
+            text.push_str(&warning);
+            text.push(')');
+        }
+        text
+    }
+
+    /// Description for the pinentry dialog.
+    #[must_use]
+    pub fn pinentry_description(&self) -> String {
+        let mut text = format!(
+            "Enter the PIN of the security key holding\n{}\n\nThen touch the key when it blinks.",
+            self.key
+        );
+        if let Some(warning) = self.retries_warning() {
+            text.push_str("\n\n");
+            text.push_str(&warning);
+            text.push('.');
+        }
+        text
+    }
+}
+
+/// How PINs are asked for.
+#[derive(Debug, Clone)]
+pub enum PinPrompt {
+    /// A pinentry program (Assuan).
+    Pinentry(Pinentry),
+    /// An askpass program.
+    Askpass(Askpass),
+}
+
+impl PinPrompt {
+    /// Asks the user for the PIN described by `request`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the prompt fails or is cancelled, or the answer
+    /// isn't a valid FIDO PIN.
+    pub async fn ask(&self, request: &PinRequest<'_>) -> Result<SecretBuffer> {
+        match self {
+            Self::Askpass(askpass) => askpass.ask_pin(&request.askpass_text()).await,
+            Self::Pinentry(pinentry) => {
+                let description = request.pinentry_description();
+                let answer = pinentry
+                    .get_pin(&Dialog {
+                        title: "skagent",
+                        description: &description,
+                        prompt: "PIN:",
+                        error: request.error,
+                    })
+                    .await?;
+                checked_pin(answer.expose())
+            }
+        }
+    }
+}
 
 /// Shortest valid FIDO PIN.
 pub const PIN_MIN_BYTES: usize = 4;
@@ -117,6 +208,16 @@ pub fn pin_from_answer(answer: &SecretBuffer) -> Result<SecretBuffer> {
     let bytes = answer.expose();
     let bytes = bytes.strip_suffix(b"\n").unwrap_or(bytes);
     let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
+    checked_pin(bytes)
+}
+
+/// Checks that `bytes` is a valid FIDO PIN (4 to 63 bytes) and copies it
+/// into locked memory.
+///
+/// # Errors
+///
+/// Returns an error if the length is off. The message never contains the PIN.
+pub fn checked_pin(bytes: &[u8]) -> Result<SecretBuffer> {
     if bytes.len() < PIN_MIN_BYTES || bytes.len() > PIN_MAX_BYTES {
         bail!(
             "a FIDO PIN has {PIN_MIN_BYTES} to {PIN_MAX_BYTES} bytes, the answer had {}",

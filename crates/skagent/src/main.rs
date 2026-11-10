@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use anyhow::{Context as _, Result};
 use clap::Parser as _;
 use skagent::cli::{Cli, Command};
-use skagent::{hardening, logging, output, serve};
+use skagent::{client, hardening, logging, output, serve};
 
 fn main() -> ExitCode {
     let color = output::color_enabled(
@@ -40,5 +40,6 @@ fn run(cli: Cli, color: bool) -> Result<()> {
         .context("starting the tokio runtime")?;
     match cli.command {
         Command::Serve(args) => runtime.block_on(serve::run(args)),
+        Command::Forget(args) => runtime.block_on(client::forget_pins(&serve::socket_path(args)?)),
     }
 }

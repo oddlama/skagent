@@ -225,12 +225,14 @@ impl IdentityStore {
         }
     }
 
-    /// Removes the identity with public key `key`. Returns whether it existed.
-    pub fn remove(&mut self, key: &KeyData, now: Instant) -> bool {
+    /// Removes the identity with public key `key` and returns it.
+    pub fn remove(&mut self, key: &KeyData, now: Instant) -> Option<SkIdentity> {
         self.expire(now);
-        let before = self.identities.len();
-        self.identities.retain(|identity| !identity.matches(key));
-        self.identities.len() != before
+        let index = self
+            .identities
+            .iter()
+            .position(|identity| identity.matches(key))?;
+        Some(self.identities.remove(index))
     }
 
     /// Removes all identities. Returns how many there were.

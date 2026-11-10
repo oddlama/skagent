@@ -22,7 +22,8 @@ use skagent_secret::SecretBuffer;
 use ssh_agent_lib::agent::{Agent, Session};
 use ssh_agent_lib::error::AgentError;
 use ssh_agent_lib::proto::{
-    AddIdentity, AddIdentityConstrained, Identity, PublicCredential, RemoveIdentity, SignRequest,
+    AddIdentity, AddIdentityConstrained, Extension, Identity, PublicCredential, RemoveIdentity,
+    SignRequest,
 };
 use ssh_agent_lib::ssh_key::Signature;
 use tokio::net::UnixStream;
@@ -30,9 +31,12 @@ use tokio::sync::Mutex;
 use zeroize::Zeroize as _;
 
 use crate::identities::{IdentityStore, SkIdentity, evaluate_constraints};
-use crate::prompt::Askpass;
-use crate::signer;
+use crate::signer::Signer;
 use crate::socket::PeerCheckedListener;
+
+/// Agent protocol extension that drops all cached PINs and keeps the keys.
+/// `skagent forget` sends it; screen lockers can run that.
+pub const FORGET_PINS_EXTENSION: &str = "forget-pins@skagent";
 
 /// Extra wait per consecutive failed unlock attempt.
 pub const UNLOCK_DELAY_STEP: Duration = Duration::from_millis(100);
@@ -47,15 +51,32 @@ pub struct SkAgent {
 }
 
 impl SkAgent {
-    /// An agent that asks for PINs through `askpass`. Without one, keys that
-    /// need a PIN can't sign.
+    /// An agent that signs with `signer`.
     #[must_use]
-    pub fn new(askpass: Option<Askpass>) -> Self {
+    pub fn new(signer: Signer) -> Self {
         Self {
             shared: Arc::new(Shared {
-                askpass,
+                signer,
                 ..Shared::default()
             }),
+        }
+    }
+
+    /// Drops all cached PINs, e.g. when the screen locks. Returns how many there were.
+    pub async fn forget_pins(&self, reason: &str) -> usize {
+        let forgotten = self.shared.signer.forget_all().await;
+        tracing::info!(forgotten, reason, "dropped cached PINs");
+        forgotten
+    }
+
+    /// Drops cached PINs whose lifetime or idle timeout ended.
+    pub async fn expire_pins(&self) {
+        let expired = self.shared.signer.expire(Instant::now()).await;
+        if expired > 0 {
+            tracing::info!(
+                expired,
+                "cached PINs reached their lifetime or idle timeout"
+            );
         }
     }
 }
@@ -65,7 +86,7 @@ struct Shared {
     state: Mutex<State>,
     /// Held for the whole unlock attempt, including the penalty wait.
     unlock_attempts: Mutex<()>,
-    askpass: Option<Askpass>,
+    signer: Signer,
 }
 
 #[derive(Debug, Default)]
@@ -131,10 +152,18 @@ impl AgentSession {
         if state.lock.is_some() {
             bail!("the agent is locked");
         }
-        if !state.identities.remove(key, Instant::now()) {
-            bail!("the key is not in the agent");
-        }
-        tracing::info!(fingerprint = %key.fingerprint(ssh_agent_lib::ssh_key::HashAlg::Sha256), "removed key");
+        let removed = state
+            .identities
+            .remove(key, Instant::now())
+            .ok_or_else(|| anyhow!("the key is not in the agent"))?;
+        drop(state);
+        let pin_dropped = self.shared.signer.forget(&removed).await;
+        tracing::info!(
+            fingerprint = %removed.fingerprint(),
+            comment = %removed.comment(),
+            pin_dropped,
+            "removed key"
+        );
         Ok(())
     }
 
@@ -154,8 +183,7 @@ impl AgentSession {
                 .ok_or_else(|| anyhow!("the key is not in the agent"))?
                 .clone()
         };
-        let signature =
-            signer::sign(&identity, &request.data, self.shared.askpass.as_ref()).await?;
+        let signature = self.shared.signer.sign(&identity, &request.data).await?;
         tracing::info!(
             fingerprint = %identity.fingerprint(),
             comment = %identity.comment(),
@@ -174,7 +202,9 @@ impl AgentSession {
             bail!("the agent is already locked");
         }
         state.lock = Some(stored);
-        tracing::info!("agent locked");
+        drop(state);
+        let forgotten = self.shared.signer.forget_all().await;
+        tracing::info!(forgotten_pins = forgotten, "agent locked");
         Ok(())
     }
 
@@ -267,8 +297,22 @@ impl Session for AgentSession {
             return Err(refuse("removing all keys", &anyhow!("the agent is locked")));
         }
         let removed = state.identities.clear();
-        tracing::info!(removed, "removed all keys");
+        drop(state);
+        let forgotten = self.shared.signer.forget_all().await;
+        tracing::info!(removed, forgotten_pins = forgotten, "removed all keys");
         Ok(())
+    }
+
+    async fn extension(&mut self, extension: Extension) -> Result<Option<Extension>, AgentError> {
+        if extension.name == FORGET_PINS_EXTENSION {
+            let forgotten = self.shared.signer.forget_all().await;
+            tracing::info!(forgotten, reason = "forget request", "dropped cached PINs");
+            return Ok(None);
+        }
+        // ssh sends session-bind@openssh.com on every connection; not
+        // implemented yet, so not worth a warning each time.
+        tracing::debug!(name = %extension.name, "unsupported extension");
+        Err(AgentError::Failure)
     }
 
     async fn lock(&mut self, passphrase: String) -> Result<(), AgentError> {
