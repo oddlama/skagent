@@ -202,6 +202,18 @@ pkgs.testers.runNixOSTest {
         alice_ok("SSH_AUTH_SOCK=${socket} ssh-add ~/id_sk")
         expect_prompt()
 
+    with subtest("a key whose ssh-add -t lifetime ended takes its PIN along"):
+        # Replacing the identity with a lifetime keeps the PIN for now.
+        alice_ok("SSH_AUTH_SOCK=${socket} ssh-add -t 2 ~/id_sk")
+        expect_cached()
+        machine.sleep(3)
+        # Re-adding finds the expired identity: it is removed like ssh-add -d,
+        # PIN included, instead of being silently replaced.
+        alice_ok("SSH_AUTH_SOCK=${socket} ssh-add ~/id_sk")
+        assert "key lifetime ended, removed from the agent" in journal("skagent")
+        expect_prompt()
+        expect_cached()
+
     with subtest("remove-all drops the PIN"):
         alice_ok("SSH_AUTH_SOCK=${socket} ssh-add -D")
         alice_ok("SSH_AUTH_SOCK=${socket} ssh-add ~/id_sk")

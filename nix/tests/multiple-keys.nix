@@ -62,10 +62,10 @@ pkgs.testers.runNixOSTest {
         info = machine.succeed(f"fido2-token -I {device(key)}")
         assert "pin retries: 8" in info, (key, info)
 
-    def start_key(key: str, pin: str) -> None:
+    def start_key(key: str, pin: str, extra: str = "") -> None:
         machine.succeed(
             f"systemd-run --unit key-{key} --setenv SKAGENT_TESTKEY_PIN={pin}"
-            f" ${testkey}/bin/skagent-testkey --name multi-{key} --touch file --touch-file /run/{key}-touch"
+            f" ${testkey}/bin/skagent-testkey --name multi-{key} --touch file --touch-file /run/{key}-touch {extra}"
         )
         machine.wait_until_succeeds(f"fido2-token -L | grep -F multi-{key} >/dev/null")
 
@@ -93,6 +93,9 @@ pkgs.testers.runNixOSTest {
         # devices receive fido_dev_cancel when the probe handle is dropped.
         for key in ["work", "personal"]:
             retry(lambda _last_try: count(key, "select") == count(key, "select", "answered"), timeout_seconds=15)
+
+    def gave_up(key: str) -> int:
+        return journal(f"key-{key}").count("outcome=TimedOut")
 
     def select_and_sign(key: str, unit: str) -> None:
         selections = count(key, "select")
@@ -228,6 +231,34 @@ pkgs.testers.runNixOSTest {
         retries("work")
         retries("personal")
         bound_sign("personal", "personal-after-replacement")
+
+    with subtest("a key that gives up waiting drops out of selection, the others still count"):
+        # Like a YubiKey that stops blinking: answers USER_ACTION_TIMEOUT after 1s.
+        start_key("impatient", "424242", "--touch-timeout 1")
+        alice("SSH_AUTH_SOCK=${socket} ssh-add -d ~/personal && SSH_AUTH_SOCK=${socket} ssh-add ~/personal")
+        timed_out = gave_up("impatient")
+        selections = count("personal", "select")
+        asserted = count("personal", "getAssertion")
+        asked = prompts()
+        start_sign("personal", "after-impatient")
+        retry(lambda _last_try: gave_up("impatient") == timed_out + 1, timeout_seconds=10)
+        retry(lambda _last_try: count("personal", "select") == selections + 1, timeout_seconds=10)
+        machine.sleep(1)
+        state = machine.succeed("systemctl show after-impatient -p ActiveState --value").strip()
+        assert state == "active", f"selection ended when one key gave up: {state}, {journal('skagent')}"
+        assert prompts() == asked, "asked for a PIN before a key was chosen"
+        touch("personal")
+        retry(lambda _last_try: count("personal", "getAssertion") == asserted + 1, timeout_seconds=10)
+        touch("personal")
+        finished("after-impatient")
+        verify("personal", "after-impatient")
+        assert prompts() == asked + 1
+        assert "dropped out of touch selection" in journal("skagent")
+        wait_selections_idle()
+        retries("personal")
+        retries("impatient")
+        machine.succeed("systemctl stop key-impatient")
+        machine.wait_until_fails("fido2-token -L | grep -F multi-impatient >/dev/null")
 
     with subtest("PINs are absent from the agent journal"):
         for pin in ["246810", "135790", "999999"]:
