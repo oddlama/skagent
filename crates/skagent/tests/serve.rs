@@ -5,6 +5,7 @@
 mod support;
 
 use anyhow::{Context as _, Result, ensure};
+use skagent::agent::SkAgent;
 use skagent::serve::serve_until;
 use ssh_agent_lib::agent::Session as _;
 use ssh_agent_lib::proto::SignRequest;
@@ -91,7 +92,7 @@ async fn second_agent_on_the_same_socket_is_refused() -> Result<()> {
     let socket = dir.path().join("agent.sock");
     let agent = RunningAgent::start(&socket).await?;
 
-    let second = serve_until(&socket, async { Ok(()) }).await;
+    let second = serve_until(&socket, SkAgent::default(), async { Ok(()) }).await;
     let error = match second {
         Ok(()) => anyhow::bail!("second agent started on a live socket"),
         Err(error) => format!("{error:#}"),

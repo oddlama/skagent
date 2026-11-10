@@ -6,6 +6,9 @@ use std::path::Path;
 use anyhow::{Context as _, Result, ensure};
 use clap::{CommandFactory as _, Parser as _};
 use skagent::cli::{Cli, Command};
+use skagent::serve::askpass_program;
+use std::ffi::OsString;
+use std::path::PathBuf;
 
 #[test]
 fn cli_definition_is_consistent() {
@@ -35,4 +38,21 @@ fn log_filter_is_global_and_defaults_to_info() -> Result<()> {
 #[test]
 fn a_subcommand_is_required() {
     assert!(Cli::try_parse_from(["skagent"]).is_err());
+}
+
+#[test]
+fn askpass_comes_from_the_flag_then_a_non_empty_environment() {
+    let flag = Some(PathBuf::from("/flag"));
+    let environment = Some(OsString::from("/env"));
+    assert_eq!(askpass_program(flag.clone(), environment.clone()), flag);
+    assert_eq!(
+        askpass_program(None, environment),
+        Some(PathBuf::from("/env"))
+    );
+    assert_eq!(
+        askpass_program(None, Some(OsString::new())),
+        None,
+        "empty SSH_ASKPASS used"
+    );
+    assert_eq!(askpass_program(None, None), None);
 }
