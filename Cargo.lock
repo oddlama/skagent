@@ -963,11 +963,13 @@ dependencies = [
  "clap",
  "colored",
  "rustix",
+ "skagent-secret",
  "ssh-agent-lib",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]
