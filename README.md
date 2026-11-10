@@ -4,16 +4,18 @@ ssh-agent for FIDO2 `ed25519-sk` keys. Keeps `verify-required` on the key (PIN +
 
 Why not just ssh-agent: OpenSSH has no PIN cache for sk keys. With `verify-required`, every signature asks for the PIN via askpass. Dropping `verify-required` gets rid of that, but then the key handle (stub file / agent memory) plus the key is enough to sign. Details in `docs/research/` and `docs/design.md`.
 
-Status: PIN caching, pinentry and multiple connected security keys work. `skagent load` is still pending. Tested with a virtual authenticator in NixOS VMs, not yet on real hardware.
+Status: PIN caching, pinentry, multiple connected keys and resident loading work. Tested with a virtual authenticator in NixOS VMs, not yet on real hardware.
 
 ```sh
 skagent serve                                       # pinentry must be on PATH
 # In another terminal:
 export SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/skagent.sock
-ssh-add ~/.ssh/id_ed25519_sk_rk_example                    # or ssh-add -K with a real key
-ssh -T git@github.com                                # PIN once, touch every time
+skagent load                                        # select one device, enter its PIN once
+ssh -T git@github.com                                # touch to sign; PIN already cached
 skagent forget                                      # drop PINs, keep loaded keys
 ```
+
+`skagent load` imports Ed25519 resident credentials with an `ssh:` application, establishes device bindings and caches the authenticated PIN for keys that require it. With multiple devices, touch the one to load; repeat for another device. No stub files are written and no PIN crosses the agent socket. Reloading preserves existing identity lifetimes and comments. Newly loaded comments use the application and stored user name—the original SSH comment isn't stored on the device. `ssh-add <stub>` and `ssh-add -K` remain supported.
 
 PINs expire after 8h by default. Use `--pin-lifetime 2h`, optionally `--pin-idle 30m`; `--pin-lifetime 0` disables caching. `--pinentry /path/to/pinentry` selects the dialog, or `--askpass /path/to/ssh-askpass` uses askpass instead (no implicit `$SSH_ASKPASS` fallback).
 

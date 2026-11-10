@@ -41,7 +41,7 @@ ssh / git / ssh-add ── ssh-agent protocol (unix socket, peer-checked) ──
 Crates:
 
 - `skagent`: CLI, socket and process hardening, protocol handling via `ssh-agent-lib`, identity store, cache policy. `unsafe` is forbidden.
-- `skagent-fido`: safe wrapper over `libfido2-sys`, the same libfido2 OpenSSH uses. Enumerates devices, reads the PIN retry counter, selects devices by touch and asserts with up/uv/pin. Resident credential enumeration is pending. Unsafe code is confined to `raw.rs`.
+- `skagent-fido`: safe wrapper over `libfido2-sys`, the same libfido2 OpenSSH uses. Enumerates devices, reads the PIN retry counter, selects devices by touch and asserts with up/uv/pin. Enumerates resident SSH credentials through PIN-authenticated credential management. Unsafe code is confined to `raw.rs`.
 - `skagent-secret`: guarded, locked, zeroizing memory. Unsafe code is confined to `mapping.rs`.
 
 Why libfido2 and not a pure Rust CTAP stack: OpenSSH signs with exactly the libfido2 assertion semantics (raw client data, `ssh:` rp ids, credProtect), and libfido2 handles hidraw, pcsc and all PIN protocol versions. Matching OpenSSH byte for byte is the point.
@@ -52,7 +52,7 @@ The identity store, device bindings and PIN cache support multiple credentials a
 
 - The identity store holds keys from any number of authenticators.
 - Finding the device that holds a key is the hard part. **A silent probe doesn't work for our keys**: credProtect `UV_REQUIRED` hides the credential from every request without user verification, so a probe with the key handle says "no credentials" on every device, the right one included. That's why OpenSSH falls back to "touch the key you mean" (`sk_probe: selecting sk by touch`). And verifying with a PIN on the wrong device costs that device a retry.
-- So skagent remembers where a key lives: after a signature succeeded on a device, the key is bound to that device's identity (its `/dev/hidrawN` node: device number, inode and change time, which change on every replug). With one device connected and no binding yet, that device is used. With several and no binding, the user picks by touch (libfido2's touch-begin/status), then the PIN is asked for. A lost binding always requires selection, even with one remaining device; another device is never silently substituted. Two detected touches in one polling round are refused as ambiguous.
+- So skagent remembers where a key lives: after a signature or authenticated resident enumeration succeeded on a device, the key is bound to that device's identity (its `/dev/hidrawN` node: device number, inode and change time, which change on every replug). With one device connected and no binding yet, that device is used. With several and no binding, the user picks by touch (libfido2's touch-begin/status), then the PIN is asked for. A lost binding always requires selection, even with one remaining device; another device is never silently substituted. Two detected touches in one polling round are refused as ambiguous.
 - **A cached PIN is only ever sent to the device it was verified on.** The cache entry carries the device identity; if it no longer matches (replug, other device on that node), the entry is dropped and the user is asked again. This also covers "personal key plugged in where the work key was".
 - The PIN cache is per credential and device. Work and personal key have independent entries, lifetimes and retry guards. Evicting one never touches the other.
 - There's one lock per device and per credential, so bound devices sign in parallel and duplicate requests queue without duplicate prompts. Touch selection takes exclusive access across devices to avoid consuming a touch intended for an assertion. Device locks travel into blocking workers; dropping an async request cannot release the hardware early.
@@ -82,15 +82,18 @@ Secrets (cached PINs, the `LOCK` passphrase) live in `skagent-secret` buffers:
 | `REMOVE_IDENTITY`, `REMOVE_ALL_IDENTITIES` | drop identities. Remove-all also evicts the whole PIN cache |
 | `LOCK` / `UNLOCK` (`ssh-add -x/-X`) | lock evicts the PIN cache and refuses signing until unlock. Passphrase compared in constant time |
 | `EXTENSION forget-pins@skagent` | evict PINs, keep keys; used by `skagent forget` |
+| `EXTENSION load-resident-keys@skagent` | empty request; agent selects one device, prompts and loads its resident SSH keys; reply is a big-endian u32 count, never a PIN |
 | `EXTENSION session-bind@openssh.com` | currently refused; recording it for destination constraints and prompts is pending |
 | anything else | `FAILURE` |
 
-Key loading: `ssh-add -K` with stock tooling works from day one, but it asks for the PIN itself, so the user types it twice. `skagent load` (later) enumerates resident credentials with one PIN entry and primes the cache with it.
+Key loading: `ssh-add -K` with stock tooling asks for the PIN itself, so the user types it again when signing. `skagent load` instead asks inside the running agent, enumerates one selected device's resident credentials and primes their PIN caches and bindings. It skips non-SSH RPs and non-Ed25519 algorithms. credProtect 3 maps to `verify-required`; other policies retain OpenSSH's presence-only behavior. No stub files are written.
+
+Loading stages the whole result before committing. Existing identities retain their lifetimes, comments and flags; conflicting handles or verification policies are refused. Agent lock/removal/forget invalidates a pending load just like signing. A rejected loading PIN evicts only that device's cached PINs, with no automatic retry. Each explicit load prompts afresh; it never tries another device's cached PIN.
 
 ## PIN cache rules
 
-1. **Only store PINs the device accepted.** An entry is created after a successful UV assertion, never from raw user input.
-2. **An entry** holds the PIN (zeroizing, mlocked), `created_at`, `last_used` and `retries_at_store`, which is the retry counter read right after the successful assertion.
+1. **Only store PINs the device accepted.** An entry is created after a successful UV assertion or PIN-authenticated credential-management enumeration, never from raw user input.
+2. **An entry** holds the PIN (zeroizing, mlocked), `created_at`, `last_used` and `retries_at_store`, which is the retry counter read right after the successful assertion or enumeration.
 3. **Retry guard.** Before using a cached PIN, read the device's retry counter (free, no attempt consumed). Use the PIN only if the counter equals `retries_at_store`. Anything lower means someone entered a wrong PIN since: evict and prompt. This is stricter than gpg's `>= 3`.
 4. **PIN error from the device** (`PIN_INVALID`, `PIN_BLOCKED`, `PIN_AUTH_BLOCKED`): evict immediately and never retry with a cached PIN. Prompt again only through the user, with the remaining retries shown.
 5. **Forced PIN change pending** (`PIN_POLICY_VIOLATION`): don't cache. Tell the user to run `ykman fido access change-pin`.
@@ -132,6 +135,6 @@ Expiry is enforced on lookup; a 15s sweep also wipes unused expired entries from
 2. ~~Identity store: sk keys via `ssh-add -K`/stub, lifetime, remove, lock/unlock.~~ Done.
 3. ~~`skagent-fido`: libfido2 wrapper, assertion with UV + PIN, retry counter.~~ Done, exactly one device.
 4. ~~PIN cache + pinentry.~~ Done: lifetime/idle limits, retry/device guards, Assuan/askpass, eviction races, Rust and VM tests.
-5. ~~Virtual authenticator + full sign path in VM tests.~~ Done early (`skagent-testkey`, `checks.vm-testkey`, `checks.vm-signing`). Open: soft-fido2's credential listing gap (`docs/research/test-key.md`).
-6. Logind eviction and `skagent forget` done (VM-tested, including mocked suspend execution through real logind). `skagent load` pending.
+5. ~~Virtual authenticator + full sign path in VM tests.~~ Done early (`skagent-testkey`, `checks.vm-testkey`, `checks.vm-signing`). Credential listing is supplemented by the test wrapper; stock `ssh-keygen -K` and `ssh-add -K` now pass (`docs/research/test-key.md`).
+6. ~~Eviction triggers, `skagent forget`, `skagent load`.~~ Done, including authenticated enumeration, cache priming, preserved constraints and loading races in `checks.vm-loading`. Logind sleep tests mock the kernel suspend action.
 7. ~~Multiple devices: device binding, select by touch.~~ Done, with per-device locking and a two-key VM suite using distinct PINs. Eager unplug eviction is pending.

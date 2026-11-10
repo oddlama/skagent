@@ -36,7 +36,7 @@ libfido2 1.17's `src/touch.c` implements touch-begin/status with a dummy `makeCr
 
 The transport loop is synchronous: while waiting for a touch it cannot process a CTAPHID CANCEL. Unselected test devices therefore wait out their 10s timeout; the multi-key suite waits for that before its next operation. Production sends `fido_dev_cancel` before closing outstanding probes, but prompt hardware cancellation still needs a real-key test.
 
-### credential management listing is incomplete
+### credential management listing workaround
 
 soft-fido2 0.17's `enumerateCredentialsBegin/GetNextCredential` responses carry user and credential id, but not `publicKey` (0x08) or `credProtect` (0x0A), although both keys are defined in `credential_management.rs`. libfido2 then reports key type 0, and OpenSSH skips the credential:
 
@@ -46,7 +46,9 @@ read_rks: unsupported key type 0
 No keys to download
 ```
 
-So `ssh-keygen -K` and `ssh-add -K` don't work against the test key. VM tests load keys from the stub file written at enrollment instead. Fix before `skagent load` needs it: either patch the listing response in the test key (it has the credentials) or upstream.
+`src/catalog.rs` now captures the public COSE key from each successfully touched enrollment's authenticator data. After soft-fido2 authorizes enumeration, the wrapper supplements successful begin/next replies with that public key and the stored credProtect policy. Error replies are untouched, and no private key is accessed. Integer map keys must be sorted: appending publicKey (8) after totalCredentials (9) makes libfido2 reject the response as invalid CBOR.
+
+`checks.vm-testkey` verifies stock `ssh-keygen -K`, public-key equality, signing with the recovered stub, and `ssh-add -K`. `checks.vm-loading` covers multiple credentials per RP, multiple RPs, skipped ECDSA keys, empty devices and separate PINs on two devices.
 
 ### PIN
 

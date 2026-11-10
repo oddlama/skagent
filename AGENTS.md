@@ -49,6 +49,7 @@ nix build                # release binary
 - `crates/skagent/tests/*.rs`: Rust tests, which also run inside every nix package build (a failing test fails `nix build`).
 - `nix/tests/agent.nix` (`checks.vm-agent`): the release binary as a transient systemd unit in a NixOS VM, driven by stock `ssh-add`. Build one VM test alone with `nix build -L .#checks.x86_64-linux.vm-agent`.
 - `nix/tests/signing.nix` (`checks.vm-signing`): signing with the virtual key, sshd `verify-required`, touch/PIN counting, retry/device guards, expiry, pinentry, eviction during prompts/assertions, logind lock/sleep/outage handling. Suspend uses real logind but replaces systemd-suspend's kernel action with a short sleep.
+- `nix/tests/loading.nix` (`checks.vm-loading`): resident enumeration and cache priming, no stubs, preserved lifetimes, wrong PIN, load/removal races, empty and multiple devices. The load extension carries no PIN.
 - `nix/tests/multiple-keys.nix` (`checks.vm-multiple-keys`): two keys with different PINs; selection before prompting, independent caches, parallel bound signing, removal, cancellation and replacement. Checks retry counters stay at 8.
 - `nix/tests/testkey.nix` (`checks.vm-testkey`): the virtual key against stock OpenSSH, no skagent. If this fails, no FIDO VM test means anything. Its quirks and workarounds: `docs/research/test-key.md`.
 - VM test scripts: the driver runs shell commands with `pipefail` and type-checks/lints the Python. Wait with `retry(fn, timeout_seconds=...)` in Python instead of `cmd | grep -q` in shell, and don't shadow driver globals (`log`, `machine`, ...).
@@ -68,4 +69,5 @@ nix build                # release binary
 - Eviction must invalidate signing tickets as well as wipe cache entries. A pending prompt or late assertion must never refill an evicted cache. Blocking libfido2 cancellation is still pending: an active call retains its temporary PIN copy until it returns.
 - Never send a PIN to a device that isn't known to hold the credential. Wrong-device PIN attempts cost that device a retry, and `verify-required` credentials can't be found by a silent probe (see `docs/design.md`, multiple keys).
 - Don't hold the agent state lock across device operations or prompts; they block for up to ~35 s. Per-device locks must travel with the device into blocking workers, never be dropped with an async caller while hardware is still in use.
+- Resident loading must preserve existing identity constraints and stage all PIN copies before committing. Only successful PIN-authenticated enumeration may prime caches; never serialize a PIN into an agent extension.
 - PIN eviction preserves bindings; identity removal drops them. A stale binding requires touch selection, not automatic substitution of another connected key.
