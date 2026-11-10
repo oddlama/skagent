@@ -87,6 +87,17 @@
                 inherit pkgs;
                 testkey = config.packages.testkey;
               };
+              license-boundary = pkgs.callPackage ./nix/license-boundary.nix {
+                cargoLock = ./Cargo.lock;
+                shippedCrates = [
+                  "skagent"
+                  "skagent-secret"
+                ];
+                forbiddenPrefixes = [
+                  "soft-fido2"
+                  "skagent-testkey"
+                ];
+              };
             };
 
           devshells.default = {
