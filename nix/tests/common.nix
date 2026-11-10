@@ -16,11 +16,39 @@
       if [[ -n ''${SKAGENT_TEST_ASKPASS_LOG:-} ]]; then
         printf '%s\n' "''${1:-}" >>"$SKAGENT_TEST_ASKPASS_LOG"
       fi
+      while [[ -n ''${SKAGENT_TEST_ASKPASS_GATE:-} && -e $SKAGENT_TEST_ASKPASS_GATE ]]; do
+        sleep 0.05
+      done
       if [[ -n ''${SKAGENT_TEST_ANSWER_FILE:-} ]]; then
         cat "$SKAGENT_TEST_ANSWER_FILE"
       else
         printf '%s\n' "$SKAGENT_TEST_ANSWER"
       fi
+    '';
+  };
+
+  # A pinentry speaking just enough Assuan: answers GETPIN with the content
+  # of $SKAGENT_TEST_ANSWER_FILE and logs every command (SETERROR, GETPIN, ...)
+  # to $SKAGENT_TEST_PINENTRY_LOG.
+  testPinentry = pkgs.writeShellApplication {
+    name = "test-pinentry";
+    runtimeInputs = [ pkgs.coreutils ];
+    text = ''
+      echo "OK Pleased to meet you"
+      while IFS= read -r line; do
+        printf '%s\n' "$line" >>"$SKAGENT_TEST_PINENTRY_LOG"
+        case "$line" in
+          GETPIN)
+            printf 'D %s\n' "$(cat "$SKAGENT_TEST_ANSWER_FILE")"
+            echo OK
+            ;;
+          BYE)
+            echo "OK closing connection"
+            exit 0
+            ;;
+          *) echo OK ;;
+        esac
+      done
     '';
   };
 
