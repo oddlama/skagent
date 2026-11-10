@@ -1,6 +1,6 @@
 # skagent design
 
-Draft. Findings this is based on: `docs/research/pin-caching.md`.
+Target design; the milestones below distinguish implemented and pending pieces. Findings this is based on: `docs/research/pin-caching.md`.
 
 ## goal
 
@@ -17,7 +17,7 @@ Protected:
 
 - **Lost/stolen YubiKey:** useless without the PIN (`UV_REQUIRED`, discovery needs the PIN too).
 - **Leaked key handle (stub file, agent memory dump):** useless without the PIN.
-- **Stolen laptop + key while the cache is empty** (locked, suspended, expired, rebooted): PIN needed.
+- **Stolen laptop + key while no PIN remains in memory** (evicted, expired, rebooted): PIN needed. An already-running libfido2 call retains its temporary copy until it returns; see concurrency.
 - **Other local users:** socket is `0600` in `$XDG_RUNTIME_DIR`, and the peer uid is checked on accept (own uid or root, same as OpenSSH).
 - **Forwarded agent on a hostile remote host:** every signature still needs a touch on your machine, so no silent use.
 - **Core dumps / ptrace by other processes of the same user:** `RLIMIT_CORE=0`, `PR_SET_DUMPABLE=0`. The PIN sits in a zeroizing, mlocked buffer.
@@ -41,13 +41,14 @@ ssh / git / ssh-add ── ssh-agent protocol (unix socket, peer-checked) ──
 Crates:
 
 - `skagent`: CLI, socket and process hardening, protocol handling via `ssh-agent-lib`, identity store, cache policy. `unsafe` is forbidden.
-- `skagent-fido` (planned): the only crate with `unsafe`. It's a safe wrapper over `libfido2-sys`, the same libfido2 OpenSSH uses. It provides: enumerate devices, read the PIN retry counter, assert with up/uv/pin, probe which device holds a key handle (silent assertion, `up=false`, no UV), and enumerate resident credentials (credential management, needs the PIN).
+- `skagent-fido`: safe wrapper over `libfido2-sys`, the same libfido2 OpenSSH uses. Enumerates devices, reads the PIN retry counter and asserts with up/uv/pin. Touch selection and resident credential enumeration are pending. Unsafe code is confined to `raw.rs`.
+- `skagent-secret`: guarded, locked, zeroizing memory. Unsafe code is confined to `mapping.rs`.
 
 Why libfido2 and not a pure Rust CTAP stack: OpenSSH signs with exactly the libfido2 assertion semantics (raw client data, `ssh:` rp ids, credProtect), and libfido2 handles hidraw, pcsc and all PIN protocol versions. Matching OpenSSH byte for byte is the point.
 
 ## multiple keys
 
-skagent replaces ssh-agent for sk keys, so it handles any number of them at once (e.g. a work and a personal YubiKey plugged in together):
+The identity store and PIN cache support multiple credentials. Device selection currently requires exactly one connected authenticator; signing is globally serialized. The target for several connected keys (work + personal):
 
 - The identity store holds keys from any number of authenticators.
 - Finding the device that holds a key is the hard part. **A silent probe doesn't work for our keys**: credProtect `UV_REQUIRED` hides the credential from every request without user verification, so a probe with the key handle says "no credentials" on every device, the right one included. That's why OpenSSH falls back to "touch the key you mean" (`sk_probe: selecting sk by touch`). And verifying with a PIN on the wrong device costs that device a retry.
@@ -79,7 +80,8 @@ Secrets (cached PINs, the `LOCK` passphrase) live in `skagent-secret` buffers:
 | `ADD_IDENTITY(_CONSTRAINED)` | sk keys from `ssh-add -K` or `ssh-add <stub>`, any other key type is refused. Lifetime (`-t`) honored. `sk-provider@openssh.com` is accepted for the built-in provider only. Confirm (`-c`), destination constraints (`-h`) and anything unknown **refuse the key**, fail closed |
 | `REMOVE_IDENTITY`, `REMOVE_ALL_IDENTITIES` | drop identities. Remove-all also evicts the whole PIN cache |
 | `LOCK` / `UNLOCK` (`ssh-add -x/-X`) | lock evicts the PIN cache and refuses signing until unlock. Passphrase compared in constant time |
-| `EXTENSION session-bind@openssh.com` | accepted and recorded per connection (needed for destination constraints and for showing the target host in the PIN prompt) |
+| `EXTENSION forget-pins@skagent` | evict PINs, keep keys; used by `skagent forget` |
+| `EXTENSION session-bind@openssh.com` | currently refused; recording it for destination constraints and prompts is pending |
 | anything else | `FAILURE` |
 
 Key loading: `ssh-add -K` with stock tooling works from day one, but it asks for the PIN itself, so the user types it twice. `skagent load` (later) enumerates resident credentials with one PIN entry and primes the cache with it.
@@ -92,23 +94,27 @@ Key loading: `ssh-add -K` with stock tooling works from day one, but it asks for
 4. **PIN error from the device** (`PIN_INVALID`, `PIN_BLOCKED`, `PIN_AUTH_BLOCKED`): evict immediately and never retry with a cached PIN. Prompt again only through the user, with the remaining retries shown.
 5. **Forced PIN change pending** (`PIN_POLICY_VIOLATION`): don't cache. Tell the user to run `ykman fido access change-pin`.
 6. **Lifetime:** hard max since creation (default 8h, configurable down), plus an optional idle timeout since last use. There's no "forever".
-7. **Evict everything on:** `ssh-add -D`, `ssh-add -x`, logind `Lock` and `PrepareForSleep(true)` over D-Bus, `skagent forget`, agent shutdown.
-8. **Scope:** one entry per credential (key handle), bound to the device identity it was verified on (see multiple keys). Never sent anywhere else.
+7. **Evict everything on:** `ssh-add -D`, `ssh-add -x`, logind `Lock`, `LockedHint=true` and `PrepareForSleep(true)` over D-Bus, `skagent forget`, agent shutdown. `ssh-add -d` evicts the removed credential's PIN. Outstanding signing requests are invalidated too; an old request cannot refill the cache.
+8. **Scope:** one entry per credential (key handle), bound to the device identity it was verified on (see multiple keys). Never sent anywhere else. The same open device is kept from retry-counter read through prompt and assertion, with node identity checked again before sending the PIN.
+9. **Monitoring failure:** caching is disabled until logind subscriptions and a sleep delay inhibitor are established. Losing the bus or logind owner evicts PINs and disables caching until reconnection. Sleep preparation clears the cache before releasing the inhibitor; resuming reacquires it.
+
+Expiry is enforced on lookup; a 15s sweep also wipes unused expired entries from memory. Logind signals are matched to its unique bus owner. Session lock events are filtered by uid; unknown ownership conservatively evicts.
 
 ## prompting
 
-- **PIN:** pinentry over Assuan, so it uses whatever the user already has (gnome3/qt/curses/tty). The description names the key (comment, e.g. `alice@example.com yubikey:12345678`) and, once session-bind is handled, the destination host. Either a tiny own Assuan client or the `pinentry` crate, to be decided.
+- **PIN:** pinentry over Assuan, so it uses whatever the user already has (gnome3/qt/curses/tty). The description names the key (comment, e.g. `alice@example.com yubikey:12345678`) and, once session-bind is handled, the destination host. A small Assuan client reads replies into locked memory and never includes protocol payloads in errors. `--askpass` is an explicit alternative.
 - **Touch:** libfido2 blocks until touched. Optionally show a desktop notification (`org.freedesktop.Notifications`) while waiting.
 
 ## concurrency
 
 - libfido2 calls block for up to the touch timeout, so they run on `spawn_blocking`.
-- One operation per device at a time (per-device mutex). Other requests wait with a timeout.
-- Cancel the pending assertion (`fido_dev_cancel`) when the client disconnects. Later.
+- Currently one global operation mutex; per-device locks and queue timeouts are pending.
+- Signing tickets are captured under the agent state lock. Eviction invalidates queued requests, cancels prompts, and prevents late signatures from being returned or cached. No agent state lock is held over device operations or prompts.
+- A blocking libfido2 assertion cannot yet be cancelled: the operation and its temporary PIN copy remain until it returns or times out (~35s). Eviction clears cache entries immediately but not this copy. Active-operation cancellation (`fido_dev_cancel`), including on disconnect and before suspend, is pending.
 
 ## testing
 
-- **Rust:** protocol tests against an in-process agent over a real unix socket. The cache policy is a pure state machine over an injected clock and a fake `Authenticator` trait, so retry and eviction rules are tested deterministically.
+- **Rust:** protocol tests against an in-process agent over a real unix socket. The cache policy is a pure state machine over explicit `Instant` values and fabricated device identities, so retry, expiry and eviction rules are deterministic. Signing-ticket revocation and Assuan protocol handling have separate tests.
 - **NixOS VM tests:** stock OpenSSH tools (`ssh-add`, `ssh`, `ssh-keygen -Y sign`) against the real binary. For FIDO inside the VM we need a virtual authenticator on `/dev/uhid`:
   - `soft-fido2` (pure Rust CTAP 2.1 with a uhid transport, EdDSA, credProtect, PIN, forcePINChange). Decided: used, but only in a separate test-only crate whose binary runs inside the VM. It's **AGPL-3.0**, so it is never a dependency of the agent crates.
   - QEMU USB passthrough of a real key stays an option for manual hardware runs.
@@ -122,8 +128,8 @@ Key loading: `ssh-add -K` with stock tooling works from day one, but it asks for
 
 1. ~~Agent skeleton: socket handling (`0600`, stale socket, peer uid), process hardening, safe logging, empty `REQUEST_IDENTITIES`. VM test with `ssh-add`.~~ Done.
 2. ~~Identity store: sk keys via `ssh-add -K`/stub, lifetime, remove, lock/unlock.~~ Done.
-3. ~~`skagent-fido`: libfido2 wrapper, assertion with UV + PIN, retry counter.~~ Done, with signing through it (PIN via askpass every time, exactly one device).
-4. PIN cache + pinentry.
+3. ~~`skagent-fido`: libfido2 wrapper, assertion with UV + PIN, retry counter.~~ Done, exactly one device.
+4. ~~PIN cache + pinentry.~~ Done: lifetime/idle limits, retry/device guards, Assuan/askpass, eviction races, Rust and VM tests.
 5. ~~Virtual authenticator + full sign path in VM tests.~~ Done early (`skagent-testkey`, `checks.vm-testkey`, `checks.vm-signing`). Open: soft-fido2's credential listing gap (`docs/research/test-key.md`).
+6. Logind eviction and `skagent forget` done (VM-tested, including mocked suspend execution through real logind). `skagent load` pending.
 7. Multiple devices: device binding, select by touch.
-6. Eviction triggers via logind, `skagent forget`, `skagent load`.

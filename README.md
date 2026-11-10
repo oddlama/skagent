@@ -4,14 +4,22 @@ ssh-agent for FIDO2 `ed25519-sk` keys. Keeps `verify-required` on the key (PIN +
 
 Why not just ssh-agent: OpenSSH has no PIN cache for sk keys. With `verify-required`, every signature asks for the PIN via askpass. Dropping `verify-required` gets rid of that, but then the key handle (stub file / agent memory) plus the key is enough to sign. Details in `docs/research/` and `docs/design.md`.
 
-Status: milestones 1-3 of `docs/design.md`. skagent holds sk keys, refuses everything else, and signs through libfido2 with one connected key. It still asks for the PIN on every signature (askpass, like ssh-agent); the PIN cache is the next milestone.
+Status: PIN caching and pinentry work, with exactly one connected security key. Multiple-device selection and `skagent load` are still pending. Tested with a virtual authenticator in NixOS VMs, not yet on real hardware.
 
 ```sh
-skagent serve --askpass "$(command -v ssh-askpass)"   # socket at $XDG_RUNTIME_DIR/skagent.sock
+skagent serve                                       # pinentry must be on PATH
+# In another terminal:
 export SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/skagent.sock
-ssh-add ~/.ssh/id_ed25519_sk_rk_example                    # or ssh-add -K
-ssh -T git@github.com                                  # PIN prompt + touch
+ssh-add ~/.ssh/id_ed25519_sk_rk_example                    # or ssh-add -K with a real key
+ssh -T git@github.com                                # PIN once, touch every time
+skagent forget                                      # drop PINs, keep loaded keys
 ```
+
+PINs expire after 8h by default. Use `--pin-lifetime 2h`, optionally `--pin-idle 30m`; `--pin-lifetime 0` disables caching. `--pinentry /path/to/pinentry` selects the dialog, or `--askpass /path/to/ssh-askpass` uses askpass instead (no implicit `$SSH_ASKPASS` fallback).
+
+`ssh-add -d/-D/-x`, logind session locks (`Lock` or `LockedHint`), suspend preparation, and shutdown evict PINs. Lockers that don't notify logind must run `skagent forget` themselves. If logind or its sleep delay inhibitor is unavailable, signing still works but caching stays disabled. Replugging a key or changing its PIN retry counter forces a new prompt.
+
+Eviction cancels pending prompts and discards late signatures. A libfido2 call already in progress cannot yet be interrupted; its temporary PIN copy survives until the call returns or times out (up to about 35s), even after cache eviction.
 
 ## dev
 

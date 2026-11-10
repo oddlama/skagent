@@ -48,7 +48,7 @@ nix build                # release binary
 
 - `crates/skagent/tests/*.rs`: Rust tests, which also run inside every nix package build (a failing test fails `nix build`).
 - `nix/tests/agent.nix` (`checks.vm-agent`): the release binary as a transient systemd unit in a NixOS VM, driven by stock `ssh-add`. Build one VM test alone with `nix build -L .#checks.x86_64-linux.vm-agent`.
-- `nix/tests/signing.nix` (`checks.vm-signing`): skagent signing with the virtual key, incl. an ssh login to sshd with `verify-required`, touch/PIN counting, wrong PIN, no touch, two keys.
+- `nix/tests/signing.nix` (`checks.vm-signing`): signing with the virtual key, sshd `verify-required`, touch/PIN counting, retry/device guards, expiry, pinentry, eviction during prompts/assertions, logind lock/sleep/outage handling. Suspend uses real logind but replaces systemd-suspend's kernel action with a short sleep.
 - `nix/tests/testkey.nix` (`checks.vm-testkey`): the virtual key against stock OpenSSH, no skagent. If this fails, no FIDO VM test means anything. Its quirks and workarounds: `docs/research/test-key.md`.
 - VM test scripts: the driver runs shell commands with `pipefail` and type-checks/lints the Python. Wait with `retry(fn, timeout_seconds=...)` in Python instead of `cmd | grep -q` in shell, and don't shadow driver globals (`log`, `machine`, ...).
 - When adding a safety property, check that a test fails without it. Break the code, watch the test fail, restore. The log redaction is covered twice: the rule by `tests/logging.rs`, the wiring by the VM test.
@@ -63,6 +63,7 @@ nix build                # release binary
 
 - The PIN and anything derived from it never get logged, `Debug`-printed or written to disk. Store secrets in `skagent_secret::SecretBuffer` (locked, guarded, zeroized, redacted `Debug`, no `Clone`), never in `String`/`Vec<u8>` longer than unavoidable, and compare them with `constant_time_eq`.
 - ssh-agent-lib logs every request at `debug` level (key handles, lock passphrases). Its `debug`/`trace` output must stay filtered no matter what log filter the user passes.
-- Fail closed: if a safety check can't be performed (peer credentials, retry counter, socket ownership), refuse the operation.
+- Fail closed: if a safety check can't be performed (peer credentials, retry counter, socket ownership), refuse the operation. If logind monitoring or the sleep delay inhibitor fails, disable caching until it recovers; uncached signing is still allowed.
+- Eviction must invalidate signing tickets as well as wipe cache entries. A pending prompt or late assertion must never refill an evicted cache. Blocking libfido2 cancellation is still pending: an active call retains its temporary PIN copy until it returns.
 - Never send a PIN to a device that isn't known to hold the credential. Wrong-device PIN attempts cost that device a retry, and `verify-required` credentials can't be found by a silent probe (see `docs/design.md`, multiple keys).
 - Don't hold the agent state lock across device operations or prompts; they block for up to ~35 s.
