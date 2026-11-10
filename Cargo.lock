@@ -1818,6 +1818,7 @@ dependencies = [
  "sha2 0.10.9",
  "soft-fido2",
  "soft-fido2-transport",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]

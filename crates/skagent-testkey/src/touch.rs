@@ -28,25 +28,40 @@ pub enum TouchOutcome {
     Refused,
     /// Nobody touched the key in time.
     TimedOut,
+    /// The host cancelled the request (`CTAPHID_CANCEL`) while it waited.
+    Cancelled,
 }
 
 impl Touch {
     /// Asks for a touch. Every request is logged as `touch requested`, so
-    /// tests can count them in the journal.
-    pub fn request(&self, operation: &str, rp_id: &str) -> TouchOutcome {
+    /// tests can count them in the journal. While waiting, `cancelled` is
+    /// polled; once it returns true the wait ends as [`TouchOutcome::Cancelled`].
+    pub fn request(
+        &self,
+        operation: &str,
+        rp_id: &str,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> TouchOutcome {
         tracing::info!(operation, rp_id, "touch requested");
         let outcome = match self {
             Self::Auto => TouchOutcome::Touched,
             Self::Deny => TouchOutcome::Refused,
-            Self::File(path, timeout) => Self::wait_for_file(path, *timeout),
+            Self::File(path, timeout) => Self::wait_for_file(path, *timeout, cancelled),
         };
         tracing::info!(operation, rp_id, ?outcome, "touch answered");
         outcome
     }
 
-    fn wait_for_file(path: &PathBuf, timeout: Duration) -> TouchOutcome {
+    fn wait_for_file(
+        path: &PathBuf,
+        timeout: Duration,
+        cancelled: &mut dyn FnMut() -> bool,
+    ) -> TouchOutcome {
         let started = Instant::now();
         while started.elapsed() < timeout {
+            if cancelled() {
+                return TouchOutcome::Cancelled;
+            }
             match std::fs::remove_file(path) {
                 Ok(()) => return TouchOutcome::Touched,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

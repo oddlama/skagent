@@ -32,6 +32,8 @@ pub const STATUS_OK: u8 = 0x00;
 pub const STATUS_INVALID_CBOR: u8 = 0x12;
 /// CTAP2 status: the user refused (touch denied).
 pub const STATUS_OPERATION_DENIED: u8 = 0x27;
+/// CTAP2 status: the request was cancelled with `CTAPHID_CANCEL`.
+pub const STATUS_KEEPALIVE_CANCEL: u8 = 0x2d;
 /// Empty `pinUvAuthParam`: touch first, then `PIN_AUTH_INVALID` (no retry used).
 pub const STATUS_PIN_AUTH_INVALID: u8 = 0x33;
 /// CTAP2 status: no touch within the timeout.

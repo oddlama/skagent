@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
@@ -12,11 +13,12 @@ use sha2::{Digest as _, Sha256};
 use skagent_testkey::callbacks::{Callbacks, UndoHandle};
 use skagent_testkey::catalog::Catalog;
 use skagent_testkey::ctap::{
-    STATUS_INVALID_CBOR, STATUS_OK, STATUS_OPERATION_DENIED, STATUS_PIN_AUTH_INVALID,
-    STATUS_USER_ACTION_TIMEOUT, TouchRequirement, touch_requirement,
+    STATUS_INVALID_CBOR, STATUS_KEEPALIVE_CANCEL, STATUS_OK, STATUS_OPERATION_DENIED,
+    STATUS_PIN_AUTH_INVALID, STATUS_USER_ACTION_TIMEOUT, TouchRequirement, touch_requirement,
 };
 use skagent_testkey::touch::{DEFAULT_TOUCH_TIMEOUT, Touch, TouchOutcome};
 use soft_fido2::{Authenticator, AuthenticatorConfig, AuthenticatorOptions};
+use soft_fido2_transport::ctaphid::ErrorCode;
 use soft_fido2_transport::{Cmd, CommandHandler, CtapHidHandler, Packet, UhidDevice};
 
 /// COSE algorithm ids: EdDSA (ed25519-sk) and ES256 (ecdsa-sk).
@@ -123,11 +125,13 @@ fn run(cli: Cli) -> Result<()> {
             "creating the uhid device (is the uhid module loaded, /dev/uhid writable?): {error}"
         )
     })?;
+    let device = Rc::new(device);
     let mut handler = CtapHidHandler::new(CborHandler {
         authenticator,
         touch,
         undo,
         catalog: Catalog::default(),
+        device: Rc::clone(&device),
     });
     tracing::info!(name = %cli.name, touch = ?cli.touch, "test key ready");
 
@@ -157,9 +161,18 @@ struct CborHandler {
     touch: Touch,
     undo: UndoHandle,
     catalog: Catalog,
+    /// Read while waiting for a touch, to notice `CTAPHID_CANCEL`.
+    device: Rc<UhidDevice>,
 }
 
 impl CborHandler {
+    /// Asks for a touch, ending the wait early when the host cancels.
+    fn touch(&self, operation: &str, rp_id: &str) -> TouchOutcome {
+        let device = Rc::clone(&self.device);
+        let mut cancelled = move || cancel_arrived(&device);
+        self.touch.request(operation, rp_id, &mut cancelled)
+    }
+
     fn forward(&mut self, request: &[u8]) -> soft_fido2_transport::Result<Vec<u8>> {
         let mut response = Vec::new();
         self.authenticator
@@ -173,12 +186,40 @@ impl CborHandler {
     }
 }
 
+/// Drains what the host sent while a request waits for a touch. A
+/// `CTAPHID_CANCEL` ends the wait; anything else is answered with
+/// `CHANNEL_BUSY`, like a real key that is busy with a request. The key only
+/// ever serves one request at a time, so a cancel on any channel counts.
+fn cancel_arrived(device: &UhidDevice) -> bool {
+    loop {
+        let mut packet = [0_u8; 64];
+        match device.read_packet(&mut packet) {
+            Ok(Some(_)) => {
+                let packet = Packet::from_bytes(packet);
+                if packet.cmd() == Some(Cmd::Cancel) {
+                    return true;
+                }
+                let busy = Packet::new_error(packet.cid(), ErrorCode::ChannelBusy);
+                if let Err(error) = device.write_packet(busy.as_bytes()) {
+                    tracing::warn!(%error, "answering a packet while busy failed");
+                }
+            }
+            Ok(None) => return false,
+            Err(error) => {
+                tracing::warn!(%error, "reading from the uhid device while waiting for a touch failed");
+                return false;
+            }
+        }
+    }
+}
+
 /// CTAP2 response for a touch that didn't happen.
 fn touch_failure(outcome: TouchOutcome) -> Option<Vec<u8>> {
     match outcome {
         TouchOutcome::Touched => None,
         TouchOutcome::Refused => Some(vec![STATUS_OPERATION_DENIED]),
         TouchOutcome::TimedOut => Some(vec![STATUS_USER_ACTION_TIMEOUT]),
+        TouchOutcome::Cancelled => Some(vec![STATUS_KEEPALIVE_CANCEL]),
     }
 }
 
@@ -197,7 +238,7 @@ impl CommandHandler for CborHandler {
         match requirement {
             TouchRequirement::None => self.forward(data),
             TouchRequirement::Selection => {
-                let outcome = self.touch.request("select", "");
+                let outcome = self.touch("select", "");
                 Ok(touch_failure(outcome).unwrap_or_else(|| vec![STATUS_PIN_AUTH_INVALID]))
             }
             TouchRequirement::AfterSuccess { operation, rp_id } => {
@@ -208,7 +249,7 @@ impl CommandHandler for CborHandler {
                 if response.first() != Some(&STATUS_OK) {
                     return Ok(response);
                 }
-                let Some(failure) = touch_failure(self.touch.request(operation, &rp_id)) else {
+                let Some(failure) = touch_failure(self.touch(operation, &rp_id)) else {
                     if operation == "makeCredential" {
                         self.catalog
                             .record(&response, |id| {
