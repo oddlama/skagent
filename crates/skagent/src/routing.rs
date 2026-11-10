@@ -248,6 +248,13 @@ fn open_checked(identity: &DeviceIdentity) -> Result<Device> {
     Ok(device)
 }
 
+/// Asks every candidate for a touch and returns the one that got it.
+///
+/// A device that can't be asked, or that fails while waiting (unplugged,
+/// gave up waiting for its own touch, refused), drops out of the selection
+/// like in OpenSSH's `sk_select_by_touch`; the others keep waiting. Dropped
+/// probes are cancelled. Selection fails when no candidate is left, two
+/// devices report a touch in the same round, or nobody touches in time.
 fn select_by_touch(
     identities: Vec<DeviceIdentity>,
     ticket: &SigningTicket,
@@ -256,32 +263,51 @@ fn select_by_touch(
     let mut probes = Vec::new();
     for identity in identities {
         ticket.check()?;
-        let probe = open_checked(&identity)?.begin_touch()?;
-        probes.push((identity, probe));
+        match open_checked(&identity).and_then(Device::begin_touch) {
+            Ok(probe) => probes.push((identity, probe)),
+            Err(error) => tracing::warn!(
+                device = identity.path(),
+                error = %format!("{error:#}"),
+                "leaving a security key out of touch selection"
+            ),
+        }
     }
     while started.elapsed() < SELECTION_TIMEOUT {
-        let mut selected = None;
-        for (identity, probe) in &mut probes {
-            ticket.check()?;
-            if probe.poll(TOUCH_POLL)? {
-                ensure!(
-                    selected.is_none(),
-                    "several security keys were touched; select only one"
+        ensure!(
+            !probes.is_empty(),
+            "no connected security key could be asked for a touch"
+        );
+        ticket.check()?;
+        let mut touched: Vec<DeviceIdentity> = Vec::new();
+        probes.retain_mut(|(identity, probe)| match probe.poll(TOUCH_POLL) {
+            Ok(true) => {
+                touched.push(identity.clone());
+                true
+            }
+            Ok(false) => true,
+            Err(error) => {
+                tracing::warn!(
+                    device = identity.path(),
+                    error = %format!("{error:#}"),
+                    "security key dropped out of touch selection"
                 );
-                selected = Some(identity.clone());
+                false
             }
-        }
-        if let Some(selected) = selected {
-            for (identity, probe) in probes {
-                if identity == selected {
-                    ensure!(
-                        DeviceIdentity::of(identity.path())? == identity,
-                        "selected security key changed"
-                    );
-                    return Ok((identity, probe.finish()?));
-                }
+        });
+        match touched.as_slice() {
+            [] => {}
+            [selected] => {
+                let (identity, probe) = probes
+                    .into_iter()
+                    .find(|(identity, _)| identity == selected)
+                    .context("the touched security key disappeared from the candidates")?;
+                ensure!(
+                    DeviceIdentity::of(identity.path())? == identity,
+                    "selected security key changed"
+                );
+                return Ok((identity, probe.finish()?));
             }
-            bail!("selected security key disappeared from the candidate list");
+            _ => bail!("several security keys were touched; touch only the one you mean"),
         }
     }
     bail!("timed out selecting a security key; touch the key holding this credential")

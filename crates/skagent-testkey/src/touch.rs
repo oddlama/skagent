@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-/// How long `Touch::File` waits for the trigger file.
-const TOUCH_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long `Touch::File` waits for the trigger file by default.
+pub const DEFAULT_TOUCH_TIMEOUT: Duration = Duration::from_secs(10);
 const TOUCH_POLL: Duration = Duration::from_millis(20);
 
 /// How touch requests are answered.
@@ -14,8 +14,9 @@ pub enum Touch {
     Auto,
     /// Every request is refused.
     Deny,
-    /// A touch is the appearance of this file, which is then deleted.
-    File(PathBuf),
+    /// A touch is the appearance of this file, which is then deleted. Gives
+    /// up after the timeout, like a real key does.
+    File(PathBuf, Duration),
 }
 
 /// The answer to a touch request.
@@ -37,15 +38,15 @@ impl Touch {
         let outcome = match self {
             Self::Auto => TouchOutcome::Touched,
             Self::Deny => TouchOutcome::Refused,
-            Self::File(path) => Self::wait_for_file(path),
+            Self::File(path, timeout) => Self::wait_for_file(path, *timeout),
         };
         tracing::info!(operation, rp_id, ?outcome, "touch answered");
         outcome
     }
 
-    fn wait_for_file(path: &PathBuf) -> TouchOutcome {
+    fn wait_for_file(path: &PathBuf, timeout: Duration) -> TouchOutcome {
         let started = Instant::now();
-        while started.elapsed() < TOUCH_TIMEOUT {
+        while started.elapsed() < timeout {
             match std::fs::remove_file(path) {
                 Ok(()) => return TouchOutcome::Touched,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

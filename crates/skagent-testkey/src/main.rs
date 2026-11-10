@@ -15,7 +15,7 @@ use skagent_testkey::ctap::{
     STATUS_INVALID_CBOR, STATUS_OK, STATUS_OPERATION_DENIED, STATUS_PIN_AUTH_INVALID,
     STATUS_USER_ACTION_TIMEOUT, TouchRequirement, touch_requirement,
 };
-use skagent_testkey::touch::{Touch, TouchOutcome};
+use skagent_testkey::touch::{DEFAULT_TOUCH_TIMEOUT, Touch, TouchOutcome};
 use soft_fido2::{Authenticator, AuthenticatorConfig, AuthenticatorOptions};
 use soft_fido2_transport::{Cmd, CommandHandler, CtapHidHandler, Packet, UhidDevice};
 
@@ -41,6 +41,11 @@ struct Cli {
     /// deleted again, so one file is one touch.
     #[arg(long, required_if_eq("touch", "file"))]
     touch_file: Option<PathBuf>,
+
+    /// With `--touch file`: seconds to wait for the touch before answering
+    /// `USER_ACTION_TIMEOUT`, like a real key that stops blinking.
+    #[arg(long, default_value_t = DEFAULT_TOUCH_TIMEOUT.as_secs())]
+    touch_timeout: u64,
 
     /// Product name of the HID device.
     #[arg(long, default_value = "skagent test key")]
@@ -76,7 +81,7 @@ fn run(cli: Cli) -> Result<()> {
     let touch = match (cli.touch, cli.touch_file) {
         (TouchMode::Auto, _) => Touch::Auto,
         (TouchMode::Deny, _) => Touch::Deny,
-        (TouchMode::File, Some(path)) => Touch::File(path),
+        (TouchMode::File, Some(path)) => Touch::File(path, Duration::from_secs(cli.touch_timeout)),
         (TouchMode::File, None) => bail!("--touch file needs --touch-file"),
     };
 
