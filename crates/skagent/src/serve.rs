@@ -16,8 +16,9 @@ use crate::prompt::{Askpass, PinPrompt};
 use crate::signer::Signer;
 use crate::socket::{self, PeerCheckedListener};
 
-/// How often expired PINs are wiped. Lookups check expiry themselves; this
-/// only makes sure an unused PIN doesn't sit in memory past its time.
+/// How often expired PINs and keys are wiped. Lookups check expiry
+/// themselves; this makes sure an unused PIN doesn't sit in memory past its
+/// time, and a key whose `ssh-add -t` lifetime ended takes its PIN with it.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(15);
 
 /// The socket path from `--socket` / `SKAGENT_SOCKET`, or the default in
@@ -103,7 +104,7 @@ where
                 format!("serving the ssh-agent protocol on {}", socket_path.display())
             })
         }
-        result = sweep_expired_pins(agent.clone()) => result,
+        result = sweep_expired(agent.clone()) => result,
         result = logind::watch(agent.clone()) => result,
         result = shutdown => result,
     };
@@ -124,12 +125,12 @@ where
     }
 }
 
-/// Wipes expired PINs periodically. Never returns.
-async fn sweep_expired_pins(agent: SkAgent) -> Result<()> {
+/// Wipes expired PINs and keys periodically. Never returns.
+async fn sweep_expired(agent: SkAgent) -> Result<()> {
     let mut interval = tokio::time::interval(SWEEP_INTERVAL);
     loop {
         interval.tick().await;
-        agent.expire_pins().await;
+        agent.expire().await;
     }
 }
 

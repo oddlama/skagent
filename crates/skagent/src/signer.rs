@@ -38,24 +38,50 @@ pub struct Signer {
 }
 
 /// Captured while the agent authorizes a request, before it queues for the
-/// device. Any eviction invalidates outstanding requests, including prompts.
+/// device. Revoked by evictions that cover it: every global one (lock,
+/// forget, remove-all, sleep, monitoring changes), and the removal or expiry
+/// of its own credential. Revocation cancels prompts and queued work, and a
+/// revoked request never returns a signature or refills the cache.
 #[derive(Debug, Clone)]
-pub struct SigningTicket(watch::Receiver<()>);
+pub struct SigningTicket {
+    all: watch::Receiver<()>,
+    /// Closed (sender dropped) when this credential's identity is removed.
+    credential: Option<watch::Receiver<()>>,
+}
 
 impl SigningTicket {
-    /// Refuses a request authorized before an eviction.
+    /// Refuses a request authorized before an eviction that covers it.
     ///
     /// # Errors
-    /// Returns an error after removal, lock, forget or watcher failure.
+    /// Returns an error once the ticket is revoked.
     pub fn check(&self) -> Result<()> {
+        // A closed channel is an error, and an error means revoked.
+        let revoked = self.all.has_changed().unwrap_or(true)
+            || self
+                .credential
+                .as_ref()
+                .is_some_and(|credential| credential.has_changed().unwrap_or(true));
         ensure!(
-            !self
-                .0
-                .has_changed()
-                .context("checking signature authorization")?,
-            "signature cancelled by PIN eviction; request a new signature"
+            !revoked,
+            "request cancelled by PIN eviction or key removal; request it again"
         );
         Ok(())
+    }
+
+    /// Completes when the ticket is revoked. Cancel-safe.
+    pub async fn revoked(&mut self) {
+        let Self { all, credential } = self;
+        match credential {
+            Some(credential) => {
+                tokio::select! {
+                    _ = all.changed() => {}
+                    _ = credential.changed() => {}
+                }
+            }
+            None => {
+                let _changed_or_closed = all.changed().await;
+            }
+        }
     }
 }
 
@@ -65,6 +91,8 @@ struct State {
     /// Shown with the next prompt for that credential, e.g. "wrong PIN".
     last_failure: HashMap<CredentialKey, String>,
     caching_available: bool,
+    /// Per-credential revocation; dropping a sender revokes its tickets.
+    revocations: HashMap<CredentialKey, watch::Sender<()>>,
 }
 
 /// Where the PIN for one signature came from.
@@ -100,16 +128,39 @@ impl Signer {
                 cache: PinCache::new(policy),
                 last_failure: HashMap::new(),
                 caching_available: true,
+                revocations: HashMap::new(),
             }),
             router: Router::default(),
             invalidation: watch::channel(()).0,
         }
     }
 
-    /// Authorizes a request in the current eviction generation.
+    /// Authorizes a request that isn't about one credential (loading),
+    /// revoked by global evictions only.
     #[must_use]
     pub fn ticket(&self) -> SigningTicket {
-        SigningTicket(self.invalidation.subscribe())
+        SigningTicket {
+            all: self.invalidation.subscribe(),
+            credential: None,
+        }
+    }
+
+    /// Authorizes a request for `identity`, also revoked when that identity
+    /// is removed or expires.
+    pub async fn ticket_for(&self, identity: &SkIdentity) -> SigningTicket {
+        let mut state = self.state.lock().await;
+        state
+            .revocations
+            .retain(|_, sender| sender.receiver_count() > 0);
+        let credential = state
+            .revocations
+            .entry(credential_key(identity))
+            .or_insert_with(|| watch::channel(()).0)
+            .subscribe();
+        SigningTicket {
+            all: self.invalidation.subscribe(),
+            credential: Some(credential),
+        }
     }
 
     /// Drops all cached PINs and invalidates outstanding signatures.
@@ -125,6 +176,7 @@ impl Signer {
         self.invalidation.send_replace(());
         self.router.clear().await;
         state.last_failure.clear();
+        state.revocations.clear();
         state.cache.clear()
     }
 
@@ -139,11 +191,15 @@ impl Signer {
         }
     }
 
-    /// Drops the cached PIN of `identity`. Returns whether there was one.
+    /// Forgets everything about `identity` after its removal or expiry: its
+    /// PIN, device binding and last failure, and revokes its in-flight
+    /// requests. Other credentials' requests continue. Returns whether a PIN
+    /// was cached.
     pub async fn forget(&self, identity: &SkIdentity) -> bool {
         let mut state = self.state.lock().await;
-        self.invalidation.send_replace(());
         let key = credential_key(identity);
+        // Dropping the sender closes the channel, which revokes.
+        state.revocations.remove(&key);
         self.router.forget(&key).await;
         state.last_failure.remove(&key);
         state.cache.evict(&key)
@@ -164,7 +220,7 @@ impl Signer {
         let routing_ticket = ticket.clone();
         let mut routed = tokio::select! {
             biased;
-            _ = ticket.0.changed() => bail!("resident loading cancelled by PIN eviction"),
+            () = ticket.revoked() => bail!("resident loading cancelled by PIN eviction"),
             routed = self.router.for_load(routing_ticket) => routed?,
         };
         let (mut routed, retries) = tokio::task::spawn_blocking(move || {
@@ -183,10 +239,11 @@ impl Signer {
             key: &label,
             retries: Some(retries),
             error: None,
+            then_touch: false,
         };
         let pin = tokio::select! {
             biased;
-            _ = ticket.0.changed() => bail!("resident PIN prompt cancelled by PIN eviction"),
+            () = ticket.revoked() => bail!("resident PIN prompt cancelled by PIN eviction"),
             pin = prompt.ask(&request) => pin?,
         };
         ticket.check()?;
@@ -293,7 +350,7 @@ impl Signer {
         let key = credential_key(identity);
         let _credential = tokio::select! {
             biased;
-            _ = ticket.0.changed() => bail!("queued signature cancelled by PIN eviction"),
+            () = ticket.revoked() => bail!("queued signature cancelled by PIN eviction or key removal"),
             guard = self.router.credentials.lock(key.clone()) => guard,
         };
         ticket.check()?;
@@ -301,7 +358,7 @@ impl Signer {
         let routing_ticket = ticket.clone();
         let mut routed = tokio::select! {
             biased;
-            _ = ticket.0.changed() => bail!("device selection cancelled by PIN eviction"),
+            () = ticket.revoked() => bail!("device selection cancelled by PIN eviction or key removal"),
             routed = self.router.route(&key, routing_ticket) => routed?,
         };
         let device = routed.identity.clone();
@@ -322,7 +379,7 @@ impl Signer {
         } else {
             tokio::select! {
                 biased;
-                _ = ticket.0.changed() => bail!("PIN prompt cancelled by PIN eviction"),
+                () = ticket.revoked() => bail!("PIN prompt cancelled by PIN eviction or key removal"),
                 source = self.pin_for(identity, &key, &device, retries.context("missing PIN retry counter")?) => source?,
             }
         };
@@ -414,6 +471,7 @@ impl Signer {
                 key: &describe(identity),
                 retries: Some(retries),
                 error: last_failure.as_deref(),
+                then_touch: true,
             })
             .await?;
         Ok(PinSource::User(pin))

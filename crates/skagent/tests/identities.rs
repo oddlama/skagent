@@ -194,3 +194,30 @@ fn re_adding_resets_the_lifetime() -> Result<()> {
     ensure!(store.find(&sk_key_data(1), later(start, 3600)?).is_some());
     Ok(())
 }
+
+#[test]
+fn take_expired_hands_out_exactly_the_ended_identities() -> Result<()> {
+    let start = Instant::now();
+    let mut store = IdentityStore::default();
+    store.add(identity(1, "short", Some(later(start, 10)?))?);
+    store.add(identity(2, "forever", None)?);
+    store.add(identity(3, "long", Some(later(start, 100)?))?);
+
+    ensure!(store.take_expired(later(start, 9)?).is_empty());
+    let expired = store.take_expired(later(start, 10)?);
+    ensure!(
+        expired.iter().map(SkIdentity::comment).collect::<Vec<_>>() == ["short"],
+        "{expired:?}"
+    );
+    let remaining: Vec<_> = store
+        .identities(later(start, 10)?)
+        .iter()
+        .map(|identity| identity.comment().to_owned())
+        .collect();
+    ensure!(remaining == ["forever", "long"], "{remaining:?}");
+    ensure!(
+        store.take_expired(later(start, 10)?).is_empty(),
+        "taken twice"
+    );
+    Ok(())
+}

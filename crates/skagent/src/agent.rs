@@ -27,7 +27,7 @@ use ssh_agent_lib::proto::{
 };
 use ssh_agent_lib::ssh_key::Signature;
 use tokio::net::UnixStream;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 use zeroize::Zeroize as _;
 
 use crate::identities::{IdentityStore, SkIdentity, evaluate_constraints};
@@ -78,8 +78,12 @@ impl SkAgent {
         self.shared.signer.set_caching_available(available).await;
     }
 
-    /// Drops cached PINs whose lifetime or idle timeout ended.
-    pub async fn expire_pins(&self) {
+    /// Removes identities whose `ssh-add -t` lifetime ended (with their PINs
+    /// and device bindings), and drops cached PINs whose own lifetime or idle
+    /// timeout ended.
+    pub async fn expire(&self) {
+        let (state, _now) = self.shared.state_now().await;
+        drop(state);
         let expired = self.shared.signer.expire(Instant::now()).await;
         if expired > 0 {
             tracing::info!(
@@ -96,6 +100,26 @@ struct Shared {
     /// Held for the whole unlock attempt, including the penalty wait.
     unlock_attempts: Mutex<()>,
     signer: Signer,
+}
+
+impl Shared {
+    /// Locks the agent state and removes identities whose lifetime ended at
+    /// the returned `now`, dropping their PINs and bindings like `ssh-add -d`.
+    /// Callers use the same `now` for every lookup under this lock.
+    async fn state_now(&self) -> (MutexGuard<'_, State>, Instant) {
+        let mut state = self.state.lock().await;
+        let now = Instant::now();
+        for identity in state.identities.take_expired(now) {
+            let pin_dropped = self.signer.forget(&identity).await;
+            tracing::info!(
+                fingerprint = %identity.fingerprint(),
+                comment = %identity.comment(),
+                pin_dropped,
+                "key lifetime ended, removed from the agent"
+            );
+        }
+        (state, now)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -128,7 +152,7 @@ fn refuse(request: &str, reason: &anyhow::Error) -> AgentError {
 
 impl AgentSession {
     async fn add(&self, identity: AddIdentity, lifetime: Option<Duration>) -> Result<()> {
-        let now = Instant::now();
+        let (mut state, now) = self.shared.state_now().await;
         let expires_at = lifetime
             .map(|lifetime| {
                 now.checked_add(lifetime)
@@ -137,7 +161,6 @@ impl AgentSession {
             .transpose()?;
         let identity = SkIdentity::from_credential(identity.credential, expires_at)?;
 
-        let mut state = self.shared.state.lock().await;
         if state.lock.is_some() {
             bail!("the agent is locked");
         }
@@ -157,13 +180,13 @@ impl AgentSession {
         let PublicCredential::Key(key) = credential else {
             bail!("certificates are never held by this agent");
         };
-        let mut state = self.shared.state.lock().await;
+        let (mut state, now) = self.shared.state_now().await;
         if state.lock.is_some() {
             bail!("the agent is locked");
         }
         let removed = state
             .identities
-            .remove(key, Instant::now())
+            .remove(key, now)
             .ok_or_else(|| anyhow!("the key is not in the agent"))?;
         let pin_dropped = self.shared.signer.forget(&removed).await;
         drop(state);
@@ -182,16 +205,17 @@ impl AgentSession {
         };
         // Copied out, so the state isn't locked while the device waits for a touch.
         let (identity, ticket) = {
-            let mut state = self.shared.state.lock().await;
+            let (mut state, now) = self.shared.state_now().await;
             if state.lock.is_some() {
                 bail!("the agent is locked");
             }
             let identity = state
                 .identities
-                .find(key, Instant::now())
+                .find(key, now)
                 .ok_or_else(|| anyhow!("the key is not in the agent"))?
                 .clone();
-            (identity, self.shared.signer.ticket())
+            let ticket = self.shared.signer.ticket_for(&identity).await;
+            (identity, ticket)
         };
         let signature = self
             .shared
@@ -217,15 +241,13 @@ impl AgentSession {
             self.shared.signer.ticket()
         };
         let mut loaded = self.shared.signer.prepare_load(ticket).await?;
-        let mut state = self.shared.state.lock().await;
+        let (mut state, now) = self.shared.state_now().await;
         ensure!(
             state.lock.is_none(),
             "the agent was locked during resident loading"
         );
         loaded.ticket.check()?;
-        let imports = state
-            .identities
-            .resident_imports(&loaded.identities, Instant::now())?;
+        let imports = state.identities.resident_imports(&loaded.identities, now)?;
         let count = u32::try_from(imports.len())
             .context("too many resident identities for the loading reply")?;
         self.shared
@@ -301,13 +323,13 @@ impl AgentSession {
 #[async_trait]
 impl Session for AgentSession {
     async fn request_identities(&mut self) -> Result<Vec<Identity>, AgentError> {
-        let mut state = self.shared.state.lock().await;
+        let (mut state, now) = self.shared.state_now().await;
         if state.lock.is_some() {
             return Ok(Vec::new());
         }
         Ok(state
             .identities
-            .identities(Instant::now())
+            .identities(now)
             .iter()
             .map(SkIdentity::identity)
             .collect())

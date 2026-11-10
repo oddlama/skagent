@@ -2,7 +2,10 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![forbid(unsafe_code)]
 
+mod support;
+
 use anyhow::{Result, ensure};
+use skagent::identities::SkIdentity;
 use skagent::signer::Signer;
 
 #[tokio::test]
@@ -28,4 +31,58 @@ async fn monitoring_transitions_revoke_in_flight_requests() -> Result<()> {
     signer.set_caching_available(true).await;
     ensure!(during_loss.check().is_err());
     signer.ticket().check()
+}
+
+fn identity(seed: u8, comment: &str) -> Result<SkIdentity> {
+    SkIdentity::from_credential(support::sk_credential(seed, comment)?, None)
+}
+
+#[tokio::test]
+async fn removing_one_key_revokes_only_its_own_requests() -> Result<()> {
+    let signer = Signer::default();
+    let (work, personal) = (identity(1, "work")?, identity(2, "personal")?);
+    let work_request = signer.ticket_for(&work).await;
+    let personal_request = signer.ticket_for(&personal).await;
+    let loading = signer.ticket();
+
+    signer.forget(&work).await;
+    ensure!(
+        work_request.check().is_err(),
+        "removed key's request survived"
+    );
+    personal_request.check()?;
+    loading.check()?;
+    // A new request for the re-added key is authorized again.
+    signer.ticket_for(&work).await.check()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn revocation_wakes_waiters() -> Result<()> {
+    let signer = Signer::default();
+    let work = identity(1, "work")?;
+    let mut waiting = signer.ticket_for(&work).await;
+    let mut global = signer.ticket_for(&identity(2, "personal")?).await;
+    signer.forget(&work).await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), waiting.revoked()).await?;
+    ensure!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), global.revoked())
+            .await
+            .is_err(),
+        "another key's request was revoked"
+    );
+    signer.forget_all().await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), global.revoked()).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn remove_all_revokes_every_request() -> Result<()> {
+    let signer = Signer::default();
+    let work = signer.ticket_for(&identity(1, "work")?).await;
+    let loading = signer.ticket();
+    signer.remove_all().await;
+    ensure!(work.check().is_err());
+    ensure!(loading.check().is_err());
+    Ok(())
 }

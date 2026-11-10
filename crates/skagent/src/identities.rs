@@ -303,17 +303,25 @@ impl IdentityStore {
             .find(|identity| identity.matches(key))
     }
 
+    /// Removes and returns the identities whose lifetime ended at `now`, so
+    /// the caller can drop their PINs and device bindings too.
+    pub fn take_expired(&mut self, now: Instant) -> Vec<SkIdentity> {
+        let (expired, kept) = std::mem::take(&mut self.identities)
+            .into_iter()
+            .partition(|identity| identity.is_expired(now));
+        self.identities = kept;
+        expired
+    }
+
+    /// Safety net for callers that didn't [`IdentityStore::take_expired`]
+    /// with the same `now` first: an expired identity is never handed out.
     fn expire(&mut self, now: Instant) {
-        self.identities.retain(|identity| {
-            let expired = identity.is_expired(now);
-            if expired {
-                tracing::info!(
-                    fingerprint = %identity.fingerprint(),
-                    comment = %identity.comment,
-                    "key lifetime ended, removed from the agent"
-                );
-            }
-            !expired
-        });
+        for identity in self.take_expired(now) {
+            tracing::warn!(
+                fingerprint = %identity.fingerprint(),
+                comment = %identity.comment,
+                "key lifetime ended, removed without dropping its PIN"
+            );
+        }
     }
 }
