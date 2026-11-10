@@ -108,6 +108,11 @@
                 package = config.packages.default;
                 testkey = config.packages.testkey;
               };
+              vm-multiple-keys = import ./nix/tests/multiple-keys.nix {
+                inherit pkgs;
+                package = config.packages.default;
+                testkey = config.packages.testkey;
+              };
               vm-testkey = import ./nix/tests/testkey.nix {
                 inherit pkgs;
                 testkey = config.packages.testkey;
