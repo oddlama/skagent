@@ -7,12 +7,13 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use skagent_secret::SecretBuffer;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::{ChildStdin, ChildStdout, Command};
-use zeroize::Zeroize as _;
+use zeroize::Zeroizing;
 
 /// Longest Assuan line, without the newline (Assuan spec).
 const MAX_LINE: usize = 1000;
@@ -81,7 +82,7 @@ impl Pinentry {
         // Best effort: pinentry quits on BYE or when its stdin closes.
         let _bye = session.stdin.write_all(b"BYE\n").await;
         drop(session);
-        let _exited = child.wait().await;
+        let _exited = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
         answer
     }
 }
@@ -96,18 +97,18 @@ struct Session {
 /// Classified response line.
 enum Response {
     Ok,
-    Err(String),
+    Err,
     Data,
     /// Comments (`#`) and status lines (`S`).
     Ignored,
-    Unexpected(String),
+    Unexpected,
 }
 
 impl Session {
     async fn converse(&mut self, dialog: &Dialog<'_>) -> Result<SecretBuffer> {
         match self.read_response().await? {
             Response::Ok => {}
-            Response::Err(message) => bail!("pinentry refused to start: {message}"),
+            Response::Err => bail!("pinentry refused to start"),
             _ => bail!("pinentry didn't greet with OK"),
         }
         self.command("SETTITLE", dialog.title).await?;
@@ -123,9 +124,9 @@ impl Session {
             match self.read_response().await? {
                 Response::Data => decode_data(self.line.expose(), &mut answer)?,
                 Response::Ok => return Ok(answer),
-                Response::Err(message) => bail!("the PIN dialog was cancelled ({message})"),
+                Response::Err => bail!("the PIN dialog was cancelled or refused"),
                 Response::Ignored => {}
-                Response::Unexpected(line) => bail!("unexpected answer to GETPIN: {line}"),
+                Response::Unexpected => bail!("unexpected answer to GETPIN (contents redacted)"),
             }
         }
     }
@@ -135,9 +136,9 @@ impl Session {
         loop {
             match self.read_response().await? {
                 Response::Ok => return Ok(()),
-                Response::Err(message) => bail!("pinentry refused {command}: {message}"),
+                Response::Err => bail!("pinentry refused {command}"),
                 Response::Ignored => {}
-                Response::Data | Response::Unexpected(_) => bail!("unexpected answer to {command}"),
+                Response::Data | Response::Unexpected => bail!("unexpected answer to {command}"),
             }
         }
     }
@@ -162,36 +163,36 @@ impl Session {
     async fn read_response(&mut self) -> Result<Response> {
         self.line.clear();
         loop {
-            let mut byte = [0_u8; 1];
+            let mut byte = Zeroizing::new([0_u8; 1]);
             let count = self
                 .stdout
-                .read(&mut byte)
+                .read(&mut *byte)
                 .await
                 .context("reading from pinentry")?;
             if count == 0 {
                 bail!("pinentry closed the connection");
             }
-            if byte == *b"\n" {
+            if *byte == *b"\n" {
                 break;
             }
             self.line
-                .extend_from_slice(&byte)
+                .extend_from_slice(&*byte)
                 .map_err(|_| anyhow!("pinentry sent a line longer than {MAX_LINE} bytes"))?;
-            // A dead store would be optimized away; zeroize writes volatile.
-            byte.zeroize();
+            // Zeroizing also clears the stack byte on early errors.
         }
         let line = self.line.expose();
         Ok(if line == b"OK" || line.starts_with(b"OK ") {
             Response::Ok
         } else if line.starts_with(b"ERR") {
-            Response::Err(String::from_utf8_lossy(line).into_owned())
+            Response::Err
         } else if line.starts_with(b"D ") {
             Response::Data
         } else if line.starts_with(b"#") || line.starts_with(b"S ") || line == b"S" {
             Response::Ignored
         } else {
-            // Not a data line, so it holds no secret.
-            Response::Unexpected(String::from_utf8_lossy(line).into_owned())
+            // INQUIRE QUALITY, malformed replies and even ERR text can
+            // contain the answer. Never include protocol payloads in errors.
+            Response::Unexpected
         })
     }
 }

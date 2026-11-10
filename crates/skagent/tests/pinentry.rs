@@ -152,6 +152,20 @@ async fn the_pin_prompt_checks_the_pin_length() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn protocol_errors_never_echo_secrets() -> Result<()> {
+    for reply in ["INQUIRE QUALITY 975310", "ERR 1 secret 975310", "975310"] {
+        let dir = tempfile::tempdir().context("creating temp dir")?;
+        let (program, _) = fake_pinentry(dir.path(), "OK", &format!("echo '{reply}'"))?;
+        let error = match get_pin(program, None).await {
+            Ok(_) => bail!("malformed reply accepted"),
+            Err(error) => format!("{error:#}"),
+        };
+        ensure!(!error.contains("975310"), "secret in error");
+    }
+    Ok(())
+}
+
 #[test]
 fn escaping_covers_percent_and_line_breaks() {
     assert_eq!(escape("50% off\r\nnext"), "50%25 off%0D%0Anext");
