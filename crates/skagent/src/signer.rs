@@ -15,6 +15,7 @@ use tokio::sync::{Mutex, watch};
 
 use crate::device::DeviceIdentity;
 use crate::identities::SkIdentity;
+use crate::loading::PreparedLoad;
 use crate::pin_cache::{CachePolicy, CredentialKey, Lookup, Miss, PinCache};
 use crate::prompt::{PinPrompt, PinRequest};
 use crate::routing::{RoutedDevice, Router};
@@ -156,6 +157,122 @@ impl Signer {
     /// Number of cached PINs.
     pub async fn cached(&self) -> usize {
         self.state.lock().await.cache.len()
+    }
+
+    /// Authenticates and lists one selected device, without mutating identities.
+    pub(crate) async fn prepare_load(&self, mut ticket: SigningTicket) -> Result<PreparedLoad> {
+        let routing_ticket = ticket.clone();
+        let mut routed = tokio::select! {
+            biased;
+            _ = ticket.0.changed() => bail!("resident loading cancelled by PIN eviction"),
+            routed = self.router.for_load(routing_ticket) => routed?,
+        };
+        let (mut routed, retries) = tokio::task::spawn_blocking(move || {
+            let retries = routed.device.pin_retries()?;
+            Ok::<_, anyhow::Error>((routed, retries))
+        })
+        .await
+        .context("reading PIN retries before resident loading")??;
+        ensure!(retries > 0, "the selected security key's PIN is blocked");
+        let prompt = self
+            .prompt
+            .as_ref()
+            .context("resident loading needs a PIN prompt (--pinentry or --askpass)")?;
+        let label = format!("resident SSH credentials on {}", routed.identity.path());
+        let request = PinRequest {
+            key: &label,
+            retries: Some(retries),
+            error: None,
+        };
+        let pin = tokio::select! {
+            biased;
+            _ = ticket.0.changed() => bail!("resident PIN prompt cancelled by PIN eviction"),
+            pin = prompt.ask(&request) => pin?,
+        };
+        ticket.check()?;
+        let worker_ticket = ticket.clone();
+        let (routed, pin, outcome) = tokio::task::spawn_blocking(move || {
+            let outcome = (|| {
+                worker_ticket.check()?;
+                ensure!(
+                    DeviceIdentity::of(routed.identity.path())? == routed.identity,
+                    "security key changed during the loading prompt"
+                );
+                let credentials = routed.device.resident_ssh_keys(&pin)?;
+                let retries = routed.device.pin_retries()?;
+                Ok::<_, anyhow::Error>((credentials, retries))
+            })();
+            (routed, pin, outcome)
+        })
+        .await
+        .context("enumerating resident credentials in the device thread")?;
+        if outcome
+            .as_ref()
+            .err()
+            .and_then(error_kind)
+            .is_some_and(ErrorKind::invalidates_pin)
+        {
+            self.state.lock().await.cache.evict_device(&routed.identity);
+        }
+        let (credentials, retries) = outcome
+            .context("loading resident SSH credentials; the PIN is never retried automatically")?;
+        ticket.check()?;
+        ensure!(
+            DeviceIdentity::of(routed.identity.path())? == routed.identity,
+            "security key changed during resident loading"
+        );
+        Ok(PreparedLoad {
+            identities: credentials.iter().map(SkIdentity::from_resident).collect(),
+            pin,
+            routed,
+            retries,
+            accepted_at: Instant::now(),
+            ticket,
+        })
+    }
+
+    /// Commits bindings and verified PINs. Caller holds the agent state lock
+    /// and inserts the identities immediately afterwards, without awaiting.
+    pub(crate) async fn prime_loaded(
+        &self,
+        loaded: &mut PreparedLoad,
+        identities: &[SkIdentity],
+    ) -> Result<()> {
+        let mut state = self.state.lock().await;
+        loaded.ticket.check()?;
+        let device = &loaded.routed.identity;
+        ensure!(
+            DeviceIdentity::of(device.path())? == *device,
+            "security key changed before committing resident credentials"
+        );
+        // Allocate every copy before modifying state. An mlock failure cannot
+        // leave a partially primed cache or partially loaded identity list.
+        let mut pins = Vec::new();
+        if state.caching_available && state.cache.policy().caches() {
+            for identity in identities
+                .iter()
+                .filter(|identity| identity.flags() & SK_USER_VERIFICATION_REQUIRED != 0)
+            {
+                pins.push((
+                    credential_key(identity),
+                    SecretBuffer::from_slice(loaded.pin.expose())
+                        .context("allocating a resident credential's cached PIN")?,
+                ));
+            }
+        }
+        for identity in identities {
+            self.router
+                .bind(credential_key(identity), device.clone())
+                .await;
+        }
+        loaded.pin.clear();
+        for (key, pin) in pins {
+            state.last_failure.remove(&key);
+            state
+                .cache
+                .store(key, pin, device.clone(), loaded.retries, loaded.accepted_at);
+        }
+        Ok(())
     }
 
     /// Signs `data` with `identity`.

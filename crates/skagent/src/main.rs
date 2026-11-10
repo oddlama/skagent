@@ -41,5 +41,10 @@ fn run(cli: Cli, color: bool) -> Result<()> {
     match cli.command {
         Command::Serve(args) => runtime.block_on(serve::run(args)),
         Command::Forget(args) => runtime.block_on(client::forget_pins(&serve::socket_path(args)?)),
+        Command::Load(args) => {
+            let count = runtime.block_on(client::load_keys(&serve::socket_path(args)?))?;
+            writeln!(io::stdout(), "Loaded {count} resident SSH key(s).")
+                .context("writing the resident-loading result")
+        }
     }
 }

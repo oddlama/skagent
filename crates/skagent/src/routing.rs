@@ -130,10 +130,38 @@ impl Router {
     }
 
     pub async fn route(&self, key: &CredentialKey, ticket: SigningTicket) -> Result<RoutedDevice> {
+        self.route_key(Some(key), ticket).await
+    }
+
+    pub async fn for_load(&self, ticket: SigningTicket) -> Result<RoutedDevice> {
+        self.route_key(None, ticket).await
+    }
+
+    async fn resolve(
+        &self,
+        key: Option<&CredentialKey>,
+        candidates: &[DeviceIdentity],
+    ) -> Result<Resolution> {
+        if let Some(key) = key {
+            self.bindings.lock().await.resolve(key, candidates)
+        } else {
+            ensure!(!candidates.is_empty(), "no FIDO security key is connected");
+            Ok(match candidates {
+                [only] => Resolution::Direct(only.clone()),
+                _ => Resolution::Touch,
+            })
+        }
+    }
+
+    async fn route_key(
+        &self,
+        key: Option<&CredentialKey>,
+        ticket: SigningTicket,
+    ) -> Result<RoutedDevice> {
         let read = Arc::clone(&self.access).read_owned().await;
         ticket.check()?;
         let candidates = connected().await?;
-        let decision = self.bindings.lock().await.resolve(key, &candidates)?;
+        let decision = self.resolve(key, &candidates).await?;
         if let Resolution::Direct(identity) = decision {
             return self.open_direct(identity, read).await;
         }
@@ -144,13 +172,19 @@ impl Router {
         let exclusive = Arc::clone(&self.access).write_owned().await;
         ticket.check()?;
         let candidates = connected().await?;
-        let decision = self.bindings.lock().await.resolve(key, &candidates)?;
+        let decision = self.resolve(key, &candidates).await?;
         if let Resolution::Direct(identity) = decision {
             return self.open_direct(identity, exclusive.downgrade()).await;
         }
-        tracing::info!(
-            "touch the key holding the requested credential to select it; signing will need another touch"
-        );
+        if key.is_some() {
+            tracing::info!(
+                "touch the key holding the requested credential to select it; signing will need another touch"
+            );
+        } else {
+            tracing::info!(
+                "touch the security key whose resident SSH credentials you want to load"
+            );
+        }
         let (identity, device, exclusive) = tokio::task::spawn_blocking(move || {
             // Keep exclusive access until the worker stops, even if its caller
             // goes away. Outstanding probes are cancelled on drop.

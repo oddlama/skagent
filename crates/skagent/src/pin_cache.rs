@@ -261,6 +261,11 @@ impl PinCache {
         self.entries.remove(key).is_some()
     }
 
+    /// Drops every PIN tied to a device that rejected a loading PIN.
+    pub fn evict_device(&mut self, device: &DeviceIdentity) {
+        self.entries.retain(|_, entry| entry.device != *device);
+    }
+
     /// Drops all PINs. Returns how many there were.
     pub fn clear(&mut self) -> usize {
         let count = self.entries.len();

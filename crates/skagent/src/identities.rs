@@ -6,13 +6,15 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, bail};
+use crate::signer::{SK_USER_PRESENCE_REQUIRED, SK_USER_VERIFICATION_REQUIRED};
+use anyhow::{Result, bail, ensure};
+use skagent_fido::ResidentCredential;
 use ssh_agent_lib::proto::{
     Extension, Identity, KeyConstraint, PrivateCredential, PublicCredential,
 };
 use ssh_agent_lib::ssh_key::HashAlg;
 use ssh_agent_lib::ssh_key::private::KeypairData;
-use ssh_agent_lib::ssh_key::public::{KeyData, SkEd25519};
+use ssh_agent_lib::ssh_key::public::{Ed25519PublicKey, KeyData, SkEd25519};
 
 /// Extension constraint `ssh-add` attaches to sk keys, naming the security
 /// key middleware that should drive the device.
@@ -90,6 +92,30 @@ pub struct SkIdentity {
 }
 
 impl SkIdentity {
+    /// Builds a public agent identity from authenticated resident metadata.
+    /// The original SSH comment isn't on the authenticator: use RP and user.
+    #[must_use]
+    pub fn from_resident(credential: &ResidentCredential) -> Self {
+        let flags = SK_USER_PRESENCE_REQUIRED
+            | if credential.requires_pin() {
+                SK_USER_VERIFICATION_REQUIRED
+            } else {
+                0
+            };
+        Self {
+            public: SkEd25519::new(
+                Ed25519PublicKey(*credential.public_key()),
+                credential.application(),
+            ),
+            flags,
+            key_handle: credential.key_handle().to_vec(),
+            comment: format!("{} {}", credential.application(), credential.user_name())
+                .trim_end()
+                .to_owned(),
+            expires_at: None,
+        }
+    }
+
     /// Takes an sk key out of an `ADD_IDENTITY` credential.
     ///
     /// # Errors
@@ -223,6 +249,27 @@ impl IdentityStore {
             self.identities.push(identity);
             false
         }
+    }
+
+    /// Plans a resident import without overwriting an existing identity's
+    /// lifetime, comment or flags. Conflicting handles/policies are refused.
+    ///
+    /// # Errors
+    /// Refuses a resident key whose public key matches different stored metadata.
+    pub fn resident_imports(
+        &mut self,
+        loaded: &[SkIdentity],
+        now: Instant,
+    ) -> Result<Vec<SkIdentity>> {
+        self.expire(now);
+        loaded.iter().map(|identity| {
+            let Some(existing) = self.identities.iter().find(|existing| existing.public == identity.public) else {
+                return Ok(identity.clone());
+            };
+            ensure!(existing.key_handle == identity.key_handle && existing.flags & SK_USER_VERIFICATION_REQUIRED == identity.flags & SK_USER_VERIFICATION_REQUIRED,
+                "resident key {} conflicts with a loaded identity; remove it explicitly before reloading", identity.fingerprint());
+            Ok(existing.clone())
+        }).collect()
     }
 
     /// Removes the identity with public key `key` and returns it.

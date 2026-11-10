@@ -16,14 +16,14 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use async_trait::async_trait;
 use skagent_secret::SecretBuffer;
 use ssh_agent_lib::agent::{Agent, Session};
 use ssh_agent_lib::error::AgentError;
 use ssh_agent_lib::proto::{
     AddIdentity, AddIdentityConstrained, Extension, Identity, PublicCredential, RemoveIdentity,
-    SignRequest,
+    SignRequest, Unparsed,
 };
 use ssh_agent_lib::ssh_key::Signature;
 use tokio::net::UnixStream;
@@ -37,6 +37,10 @@ use crate::socket::PeerCheckedListener;
 /// Agent protocol extension that drops all cached PINs and keeps the keys.
 /// `skagent forget` sends it; screen lockers can run that.
 pub const FORGET_PINS_EXTENSION: &str = "forget-pins@skagent";
+
+/// No-argument request to load one selected device's resident SSH keys.
+/// The reply carries the number loaded as a big-endian u32, never a PIN.
+pub const LOAD_KEYS_EXTENSION: &str = "load-resident-keys@skagent";
 
 /// Extra wait per consecutive failed unlock attempt.
 pub const UNLOCK_DELAY_STEP: Duration = Duration::from_millis(100);
@@ -202,6 +206,43 @@ impl AgentSession {
         Ok(signature)
     }
 
+    async fn load_resident(&self, details: &[u8]) -> Result<Extension> {
+        ensure!(
+            details.is_empty(),
+            "resident loading takes no extension arguments"
+        );
+        let ticket = {
+            let state = self.shared.state.lock().await;
+            ensure!(state.lock.is_none(), "the agent is locked");
+            self.shared.signer.ticket()
+        };
+        let mut loaded = self.shared.signer.prepare_load(ticket).await?;
+        let mut state = self.shared.state.lock().await;
+        ensure!(
+            state.lock.is_none(),
+            "the agent was locked during resident loading"
+        );
+        loaded.ticket.check()?;
+        let imports = state
+            .identities
+            .resident_imports(&loaded.identities, Instant::now())?;
+        let count = u32::try_from(imports.len())
+            .context("too many resident identities for the loading reply")?;
+        self.shared
+            .signer
+            .prime_loaded(&mut loaded, &imports)
+            .await?;
+        // No awaits from cache commit through identity insertion.
+        for identity in imports {
+            tracing::info!(fingerprint = %identity.fingerprint(), comment = %identity.comment(), "loaded resident SSH key");
+            state.identities.add(identity);
+        }
+        Ok(Extension {
+            name: LOAD_KEYS_EXTENSION.to_owned(),
+            details: Unparsed::from(count.to_be_bytes().to_vec()),
+        })
+    }
+
     async fn lock_with(&self, mut passphrase: String) -> Result<()> {
         let stored = Self::store_passphrase(passphrase.as_bytes());
         passphrase.zeroize();
@@ -318,6 +359,13 @@ impl Session for AgentSession {
             let forgotten = self.shared.signer.forget_all().await;
             tracing::info!(forgotten, reason = "forget request", "dropped cached PINs");
             return Ok(None);
+        }
+        if extension.name == LOAD_KEYS_EXTENSION {
+            return self
+                .load_resident(extension.details.as_ref())
+                .await
+                .map(Some)
+                .map_err(|reason| refuse("loading resident keys", &reason));
         }
         // ssh sends session-bind@openssh.com on every connection; not
         // implemented yet, so not worth a warning each time.

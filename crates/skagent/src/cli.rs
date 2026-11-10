@@ -29,6 +29,9 @@ pub enum Command {
     /// Drop all cached PINs of a running agent; the keys stay loaded. Meant
     /// for screen lockers, e.g. `swayidle lock 'skagent forget; swaylock'`.
     Forget(SocketArgs),
+    /// Load resident Ed25519 SSH keys from one security key. With multiple
+    /// devices, touch the one to load. The running agent asks for its PIN.
+    Load(SocketArgs),
 }
 
 /// Where the agent socket is.

@@ -12,6 +12,7 @@ pub mod client;
 pub mod device;
 pub mod hardening;
 pub mod identities;
+mod loading;
 pub mod logging;
 pub mod logind;
 pub mod output;

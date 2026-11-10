@@ -164,6 +164,25 @@ fn entries_are_independent() -> Result<()> {
 }
 
 #[test]
+fn rejected_loading_pin_evicts_only_that_device() -> Result<()> {
+    let start = Instant::now();
+    let mut cache = cache_with_work_pin(CachePolicy::default(), start)?;
+    cache.store(
+        personal(),
+        SecretBuffer::from_slice(b"135790")?,
+        replugged(),
+        8,
+        start,
+    );
+    cache.evict_device(&replugged());
+    expect_hit(cache.lookup(&work(), &device(), 8, start)?)?;
+    expect_miss(
+        &cache.lookup(&personal(), &replugged(), 8, start)?,
+        Miss::NotCached,
+    )
+}
+
+#[test]
 fn expire_drops_only_ended_entries() -> Result<()> {
     let start = Instant::now();
     let mut cache = cache_with_work_pin(policy(100, None), start)?;

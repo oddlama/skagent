@@ -16,7 +16,7 @@ fn serve(args: &[&str]) -> Result<ServeArgs> {
         Cli::try_parse_from(["skagent", "serve"].iter().chain(args)).context("parsing serve")?;
     match cli.command {
         Command::Serve(args) => Ok(args),
-        Command::Forget(_) => bail!("parsed as forget"),
+        Command::Forget(_) | Command::Load(_) => bail!("not parsed as serve"),
     }
 }
 
