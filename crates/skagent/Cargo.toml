@@ -17,6 +17,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 clap.workspace = true
 colored.workspace = true
+futures-util.workspace = true
 rustix.workspace = true
 sha2.workspace = true
 skagent-fido.workspace = true
@@ -26,6 +27,7 @@ tempfile.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+zbus.workspace = true
 zeroize.workspace = true
 
 [lints]

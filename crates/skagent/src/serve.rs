@@ -9,6 +9,7 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 
 use crate::agent::SkAgent;
 use crate::cli::{ServeArgs, SocketArgs};
+use crate::logind;
 use crate::pin_cache::CachePolicy;
 use crate::pinentry::Pinentry;
 use crate::prompt::{Askpass, PinPrompt};
@@ -102,6 +103,7 @@ where
             })
         }
         result = sweep_expired_pins(agent.clone()) => result,
+        result = logind::watch(agent.clone()) => result,
         result = shutdown => result,
     };
     agent.forget_pins("shutdown").await;
