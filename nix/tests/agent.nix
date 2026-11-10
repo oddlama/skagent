@@ -3,11 +3,19 @@
 let
   socketDir = "/run/skagent-alice";
   socket = "${socketDir}/agent.sock";
+  lockPassphrase = "hunter2-lock-passphrase";
   # Every agent runs as a transient unit owned by alice. Trace logging is on,
-  # so the redaction subtest proves the filter holds at the most verbose level.
+  # so the redaction subtests prove the filter holds at the most verbose level.
   startAgent =
     unit:
     "systemd-run --unit ${unit} --uid alice --setenv SKAGENT_LOG=trace ${package}/bin/skagent serve --socket ${socket}";
+
+  makeSkStub = pkgs.writers.writePython3Bin "make-sk-stub" { } (builtins.readFile ./make-sk-stub.py);
+  # ssh-add -x/-X read the lock passphrase through askpass when forced to.
+  lockAskpass = pkgs.writeShellApplication {
+    name = "lock-askpass";
+    text = ''printf '%s\n' "$SKAGENT_TEST_LOCK_PASSPHRASE"'';
+  };
 in
 pkgs.testers.runNixOSTest {
   name = "skagent-agent";
@@ -15,6 +23,8 @@ pkgs.testers.runNixOSTest {
   nodes.machine = {
     environment.systemPackages = [
       package
+      makeSkStub
+      lockAskpass
       pkgs.openssh
       pkgs.util-linux
     ];
@@ -25,11 +35,43 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    def as_user(user: str, command: str) -> str:
-        return f"su - {user} -c '{command}'"
+    import shlex
+
+    def as_user(user: str, command: str) -> tuple[int, str]:
+        return machine.execute(f"su - {user} -c {shlex.quote(command)} 2>&1")
+
+    def alice(command: str) -> tuple[int, str]:
+        return as_user("alice", f"SSH_AUTH_SOCK=${socket} {command}")
+
+    def alice_ok(command: str) -> str:
+        status, out = alice(command)
+        assert status == 0, f"{command!r} exited {status}: {out}"
+        return out
+
+    def key_fields(line: str) -> str:
+        """Key type and base64 blob, without the comment."""
+        return " ".join(line.split()[:2])
 
     def ssh_add_list(prefix: str = "") -> tuple[int, str]:
         return machine.execute(f"{prefix} env SSH_AUTH_SOCK=${socket} ssh-add -l 2>&1")
+
+    def has_no_identities() -> bool:
+        status, out = alice("ssh-add -l")
+        return status == 1 and "The agent has no identities." in out
+
+    def assert_no_identities() -> None:
+        status, out = alice("ssh-add -l")
+        assert status == 1 and "The agent has no identities." in out, f"exited {status}: {out}"
+
+    # Waiting happens in Python: the driver runs shell commands with pipefail,
+    # so `cmd | grep -q` fails whenever cmd exits non-zero or gets SIGPIPE.
+    def journal(unit: str) -> str:
+        return machine.succeed(f"journalctl -u {unit} --no-pager -o cat")
+
+    def wait_for_journal(unit: str, text: str) -> None:
+        retry(lambda _last_try: text in journal(unit), timeout_seconds=30)
+
+    lock = "SSH_ASKPASS=lock-askpass SSH_ASKPASS_REQUIRE=force SKAGENT_TEST_LOCK_PASSPHRASE="
 
     machine.wait_for_unit("multi-user.target")
     machine.succeed("install -d -m 0700 -o alice -g users ${socketDir}")
@@ -37,13 +79,11 @@ pkgs.testers.runNixOSTest {
     with subtest("the owner gets an empty identity list"):
         machine.succeed("${startAgent "skagent"}")
         machine.wait_for_file("${socket}")
-        status, out = machine.execute(as_user("alice", "SSH_AUTH_SOCK=${socket} ssh-add -l"))
-        assert status == 1, f"ssh-add -l exited {status}: {out}"
-        assert "The agent has no identities." in out, out
+        assert_no_identities()
 
     with subtest("the socket is private to its owner"):
         machine.succeed("test \"$(stat -c '%a %U' ${socket})\" = '600 alice'")
-        status, out = machine.execute(as_user("bob", "SSH_AUTH_SOCK=${socket} ssh-add -l"))
+        status, out = as_user("bob", "SSH_AUTH_SOCK=${socket} ssh-add -l")
         assert status == 2, f"bob: ssh-add -l exited {status}: {out}"
 
     with subtest("root may connect, like with OpenSSH's ssh-agent"):
@@ -62,25 +102,86 @@ pkgs.testers.runNixOSTest {
         assert status != 0, f"bob with dac_override was served: {out}"
         assert "Permission denied" not in out, f"file permissions stopped bob, not the agent: {out}"
         assert "communication with agent failed" in out, f"bob with dac_override: exited {status}: {out}"
-        machine.wait_until_succeeds(
-            "journalctl -u skagent --no-pager | grep -q 'refused agent connection from another user'"
+        wait_for_journal("skagent", "refused agent connection from another user")
+
+    with subtest("sk key files are added, listed and removed with ssh-add"):
+        alice_ok("make-sk-stub ~/work 1 'alice@example.com yubikey:1'")
+        alice_ok("make-sk-stub ~/personal 2 'alice personal'")
+
+        out = alice_ok("ssh-add ~/work ~/personal")
+        assert out.count("Identity added") == 2, out
+
+        listed = alice_ok("ssh-add -l").splitlines()
+        expected = [
+            alice_ok(f"ssh-keygen -lf ~/{name}").strip() for name in ["work", "personal"]
+        ]
+        assert listed == expected, f"ssh-add -l: {listed}, ssh-keygen -lf: {expected}"
+        assert "alice@example.com yubikey:1 (ED25519-SK)" in listed[0], listed
+
+        public = alice_ok("ssh-add -L").splitlines()
+        derived = [alice_ok(f"ssh-keygen -y -f ~/{name}").strip() for name in ["work", "personal"]]
+        assert [key_fields(line) for line in public] == [key_fields(line) for line in derived], (
+            f"ssh-add -L: {public}, ssh-keygen -y: {derived}"
         )
+
+        alice_ok("ssh-add -d ~/work")
+        listed = alice_ok("ssh-add -l")
+        assert "yubikey:1" not in listed and "alice personal" in listed, listed
+
+        out = alice_ok("ssh-add -D")
+        assert "All identities removed." in out, out
+        assert_no_identities()
+
+    with subtest("ssh-add -t removes the key when its lifetime ends"):
+        out = alice_ok("ssh-add -t 2 ~/work")
+        assert "Lifetime set to 00:00:02" in out, out
+        assert "yubikey:1" in alice_ok("ssh-add -l")
+        retry(lambda _last_try: has_no_identities(), timeout_seconds=15)
+        assert "key lifetime ended" in journal("skagent")
+
+    with subtest("confirm constraints and non-sk keys are refused"):
+        status, out = alice("ssh-add -c ~/work")
+        assert status != 0 and "agent refused operation" in out, f"exited {status}: {out}"
+
+        alice_ok("ssh-keygen -q -t ed25519 -N ''' -f ~/plain")
+        status, out = alice("ssh-add ~/plain")
+        assert status != 0 and "agent refused operation" in out, f"exited {status}: {out}"
+        assert_no_identities()
+        assert "only sk-ssh-ed25519@openssh.com keys are accepted" in journal("skagent")
+
+    with subtest("a locked agent hides its keys until unlocked with the passphrase"):
+        alice_ok("ssh-add ~/work")
+        out = alice_ok(f"{lock}${lockPassphrase} ssh-add -x")
+        assert "Agent locked." in out, out
+        assert_no_identities()
+
+        status, out = alice(f"{lock}wrong-guess ssh-add -X")
+        assert status != 0 and "Failed to unlock agent: agent refused operation" in out, f"exited {status}: {out}"
+        assert_no_identities()
+
+        out = alice_ok(f"{lock}${lockPassphrase} ssh-add -X")
+        assert "Agent unlocked." in out, out
+        assert "yubikey:1" in alice_ok("ssh-add -l")
+        alice_ok("ssh-add -D")
 
     with subtest("the agent process is hardened"):
         pid = machine.succeed("systemctl show -p MainPID --value skagent").strip()
         machine.succeed(f"grep -E '^Max core file size +0 +0 ' /proc/{pid}/limits")
         # Non-dumpable: not even the same user may read the process environment.
-        machine.fail(as_user("alice", f"cat /proc/{pid}/environ"))
+        status, _ = as_user("alice", f"cat /proc/{pid}/environ")
+        assert status != 0, "alice could read the agent's environment"
 
-    with subtest("protocol library debug output never reaches the log"):
-        journal = machine.succeed("journalctl -u skagent --no-pager -o cat")
+    with subtest("secrets and protocol library debug output never reach the log"):
+        agent_log = journal("skagent")
         # Positive control: the library's info output is bridged into the log...
-        assert "Listening; socket" in journal, journal
+        assert "Listening; socket" in agent_log, agent_log
         # ...but its per-request debug output is not, even at trace level.
-        assert "Request:" not in journal, journal
+        assert "Request:" not in agent_log, agent_log
+        assert "${lockPassphrase}" not in agent_log, "lock passphrase in the journal"
+        assert "wrong-guess" not in agent_log, "unlock guess in the journal"
 
     with subtest("a second agent on the same socket is refused"):
-        status, out = machine.execute(as_user("alice", "skagent serve --socket ${socket} 2>&1"))
+        status, out = as_user("alice", "skagent serve --socket ${socket}")
         assert status == 1, f"second agent exited {status}: {out}"
         assert "already listening" in out, out
         machine.succeed("test -S ${socket}")
@@ -88,8 +189,7 @@ pkgs.testers.runNixOSTest {
     with subtest("SIGTERM shuts down cleanly and removes the socket"):
         machine.succeed("systemctl stop skagent")
         machine.fail("test -e ${socket}")
-        journal = machine.succeed("journalctl -u skagent --no-pager -o cat")
-        assert "received SIGTERM, shutting down" in journal, journal
+        assert "received SIGTERM, shutting down" in journal("skagent")
 
     with subtest("the socket of a killed agent is replaced on the next start"):
         machine.succeed("${startAgent "skagent-killed"}")
@@ -99,13 +199,8 @@ pkgs.testers.runNixOSTest {
         machine.succeed("test -S ${socket}")
 
         machine.succeed("${startAgent "skagent-restarted"}")
-        machine.wait_until_succeeds(
-            "journalctl -u skagent-restarted --no-pager | grep -q 'removing stale agent socket'"
-        )
-        machine.wait_until_succeeds(
-            "journalctl -u skagent-restarted --no-pager | grep -q 'agent listening'"
-        )
-        status, out = machine.execute(as_user("alice", "SSH_AUTH_SOCK=${socket} ssh-add -l"))
-        assert status == 1, f"ssh-add -l after restart exited {status}: {out}"
+        wait_for_journal("skagent-restarted", "removing stale agent socket")
+        wait_for_journal("skagent-restarted", "agent listening")
+        assert_no_identities()
   '';
 }
