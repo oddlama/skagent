@@ -25,6 +25,8 @@ pub enum ErrorKind {
     TouchTimeout,
     /// The user (or the device) refused the operation.
     OperationDenied,
+    /// The request was cancelled (`CTAPHID_CANCEL`) while it waited.
+    Cancelled,
     /// The device was unplugged or stopped answering.
     Transport,
     /// Anything else.
@@ -45,6 +47,7 @@ impl ErrorKind {
             sys::FIDO_ERR_NO_CREDENTIALS => Self::NoCredentials,
             sys::FIDO_ERR_ACTION_TIMEOUT | sys::FIDO_ERR_USER_ACTION_TIMEOUT => Self::TouchTimeout,
             sys::FIDO_ERR_OPERATION_DENIED => Self::OperationDenied,
+            sys::FIDO_ERR_KEEPALIVE_CANCEL => Self::Cancelled,
             sys::FIDO_ERR_TX | sys::FIDO_ERR_RX => Self::Transport,
             _ => Self::Other,
         }

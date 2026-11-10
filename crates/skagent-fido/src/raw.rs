@@ -6,7 +6,7 @@
 
 use std::ffi::{CStr, CString, c_int};
 use std::ptr::NonNull;
-use std::sync::Once;
+use std::sync::{Arc, Mutex, Once, PoisonError};
 
 use libfido2_sys as sys;
 
@@ -112,6 +112,48 @@ pub(crate) fn list_devices(max: usize) -> Result<Vec<ListedDevice>, FidoError> {
 pub(crate) struct Device {
     raw: NonNull<sys::fido_dev_t>,
     touch_pending: bool,
+    /// Lets other threads cancel the request running on this handle.
+    cancel: Arc<CancelSlot>,
+}
+
+/// The device handle as seen by cancellers: present while the device is
+/// open, cleared (under the lock) before it is closed and freed.
+pub(crate) struct CancelSlot(Mutex<Option<SharedHandle>>);
+
+struct SharedHandle(NonNull<sys::fido_dev_t>);
+
+// SAFETY: the pointer is only used through `CancelSlot::cancel`, under the
+// slot's lock, for the one libfido2 call that may run concurrently with the
+// owner's operations (see there).
+unsafe impl Send for SharedHandle {}
+
+impl CancelSlot {
+    /// Sends `CTAPHID_CANCEL` on the device's channel, from any thread. A
+    /// request waiting for a touch then fails with `KEEPALIVE_CANCEL`; with
+    /// nothing pending the authenticator ignores it.
+    pub(crate) fn cancel(&self) -> Result<(), FidoError> {
+        let handle = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(SharedHandle(raw)) = handle.as_ref() else {
+            return Err(FidoError::new(
+                "fido_dev_cancel",
+                sys::FIDO_ERR_INVALID_ARGUMENT,
+            ));
+        };
+        // SAFETY: the handle is open: `Device::drop` empties the slot under
+        // this lock before closing it, so it can't be closed or freed while
+        // we hold the lock. The owner may be inside another libfido2 call on
+        // the same handle on another thread; that is what this is for, and
+        // it is free of data races in libfido2 1.17: fido_dev_cancel only
+        // reads fields that are written by fido_dev_open, fido_dev_set_timeout,
+        // fido_dev_set_pin and fido_dev_force_* (cid, tx_len, attr.flags,
+        // io, io_handle, transport, timeout_ms), and this crate calls none of
+        // those after `Device::open` returned. It then writes a single HID
+        // report with write(2); concurrent read(2)/write(2) on one hidraw fd
+        // are fine. Debug logging, which uses global state, is never enabled.
+        check("fido_dev_cancel", unsafe {
+            sys::fido_dev_cancel(raw.as_ptr())
+        })
+    }
 }
 
 // SAFETY: a fido_dev_t is used by one thread at a time; `Device` is only
@@ -128,12 +170,19 @@ impl Device {
         let device = Self {
             raw,
             touch_pending: false,
+            cancel: Arc::new(CancelSlot(Mutex::new(Some(SharedHandle(raw))))),
         };
         // SAFETY: `raw` is a fresh handle and `path` is NUL-terminated.
         check("fido_dev_open", unsafe {
             sys::fido_dev_open(device.raw.as_ptr(), path.as_ptr())
         })?;
         Ok(device)
+    }
+
+    /// The cancel slot of this handle. Must only be handed out after
+    /// `set_timeout`, see `CancelSlot::cancel`.
+    pub(crate) fn cancel_slot(&self) -> Arc<CancelSlot> {
+        Arc::clone(&self.cancel)
     }
 
     pub(crate) fn set_timeout(&mut self, milliseconds: c_int) -> Result<(), FidoError> {
@@ -296,6 +345,13 @@ impl Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
+        // First, so no canceller can reach the handle any more; waits for a
+        // cancel that is being sent right now.
+        self.cancel
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         let mut raw = self.raw.as_ptr();
         // SAFETY: `raw` is owned by `self` and used for the last time. Closing
         // an already closed device is harmless; free nulls our copy.

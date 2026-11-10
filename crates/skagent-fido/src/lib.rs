@@ -16,6 +16,7 @@ mod resident;
 pub use resident::ResidentCredential;
 
 use std::ffi::{CStr, CString};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -142,6 +143,16 @@ impl Device {
     #[must_use]
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// A handle that cancels the request running on this device from
+    /// another thread, e.g. an assertion waiting for a touch.
+    #[must_use]
+    pub fn canceller(&self) -> Canceller {
+        Canceller {
+            slot: self.inner.cancel_slot(),
+            path: self.path.clone(),
+        }
     }
 
     /// Enumerates Ed25519 resident credentials in SSH relying parties.
@@ -285,6 +296,40 @@ impl Device {
             flags,
             counter,
         })
+    }
+}
+
+/// Cancels the request running on a [`Device`], from any thread.
+#[derive(Clone)]
+pub struct Canceller {
+    slot: Arc<raw::CancelSlot>,
+    path: String,
+}
+
+impl std::fmt::Debug for Canceller {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Canceller")
+            .field("path", &self.path)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Canceller {
+    /// Sends `CTAPHID_CANCEL`: a request waiting for a touch fails promptly
+    /// with [`ErrorKind::Cancelled`]. Requests that don't wait (PIN token,
+    /// retry counter) aren't affected, and with nothing pending the device
+    /// ignores it, so callers repeat it until the operation ended. Only
+    /// writes one HID report, it doesn't wait for the device.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the device is already closed or the report
+    /// couldn't be sent.
+    pub fn cancel(&self) -> Result<()> {
+        self.slot
+            .cancel()
+            .with_context(|| format!("cancelling the request on {}", self.path))
     }
 }
 
