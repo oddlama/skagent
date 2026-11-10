@@ -134,6 +134,7 @@ async fn the_pin_prompt_checks_the_pin_length() -> Result<()> {
         key: "work key",
         retries: Some(8),
         error: None,
+        then_touch: true,
     };
     ensure!(
         PinPrompt::Pinentry(Pinentry::new(short))
@@ -189,6 +190,7 @@ fn prompts_mention_errors_and_low_retries_only() {
         key: "work key",
         retries: Some(8),
         error: None,
+        then_touch: true,
     };
     assert_eq!(
         calm.askpass_text(),
@@ -200,6 +202,7 @@ fn prompts_mention_errors_and_low_retries_only() {
         key: "work key",
         retries: Some(2),
         error: Some("The previous PIN was wrong"),
+        then_touch: true,
     };
     assert_eq!(
         worried.askpass_text(),
@@ -210,4 +213,56 @@ fn prompts_mention_errors_and_low_retries_only() {
             .pinentry_description()
             .contains("2 PIN attempts left")
     );
+}
+
+#[test]
+fn loading_prompts_dont_ask_for_a_touch() {
+    let loading = PinRequest {
+        key: "resident SSH credentials on /dev/hidraw3",
+        retries: Some(8),
+        error: None,
+        then_touch: false,
+    };
+    assert_eq!(
+        loading.askpass_text(),
+        "Enter PIN for resident SSH credentials on /dev/hidraw3"
+    );
+    assert!(!loading.pinentry_description().contains("touch"));
+}
+
+#[tokio::test]
+async fn an_abandoned_prompt_times_out_and_is_killed() -> Result<()> {
+    let dir = tempfile::tempdir().context("creating temp dir")?;
+    let marker = dir.path().join("still-running");
+    let (program, _) = fake_pinentry(
+        dir.path(),
+        "OK",
+        &format!(
+            "sleep 2; touch '{}'; echo 'D 246810'; echo OK",
+            marker.display()
+        ),
+    )?;
+    let request = PinRequest {
+        key: "work key",
+        retries: Some(8),
+        error: None,
+        then_touch: true,
+    };
+    let started = std::time::Instant::now();
+    let error = match PinPrompt::Pinentry(Pinentry::new(program))
+        .ask_within(&request, std::time::Duration::from_millis(300))
+        .await
+    {
+        Ok(_) => bail!("a PIN arrived after the timeout"),
+        Err(error) => format!("{error:#}"),
+    };
+    ensure!(error.contains("no PIN was entered"), "{error}");
+    ensure!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "waited for the prompt instead of timing out"
+    );
+    // The prompt was killed, so it never got to answer.
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    ensure!(!marker.exists(), "the timed-out prompt kept running");
+    Ok(())
 }

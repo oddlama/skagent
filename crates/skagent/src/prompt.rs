@@ -4,8 +4,9 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use skagent_fido::PIN_MAX_BYTES;
 use skagent_secret::SecretBuffer;
 use tokio::io::AsyncReadExt as _;
@@ -17,6 +18,12 @@ use crate::pinentry::{Dialog, Pinentry};
 /// At or below this many retries left, prompts warn about them.
 pub const LOW_RETRIES: u32 = 3;
 
+/// Longest a PIN prompt may stay open. The request holds its security key
+/// (and shared access to all keys) while the prompt is open, so an abandoned
+/// dialog would otherwise block touch selection, and through the
+/// writer-preferring lock every other signature, indefinitely.
+pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// What the user is asked about.
 #[derive(Debug, Clone, Copy)]
 pub struct PinRequest<'a> {
@@ -26,6 +33,9 @@ pub struct PinRequest<'a> {
     pub retries: Option<u32>,
     /// What went wrong last time, e.g. a wrong PIN.
     pub error: Option<&'a str>,
+    /// Whether a touch follows the PIN: yes for signatures, no for loading
+    /// resident keys (credential management needs no touch).
+    pub then_touch: bool,
 }
 
 impl PinRequest<'_> {
@@ -45,7 +55,9 @@ impl PinRequest<'_> {
         }
         text.push_str("Enter PIN for ");
         text.push_str(self.key);
-        text.push_str(", then touch the key");
+        if self.then_touch {
+            text.push_str(", then touch the key");
+        }
         if let Some(warning) = self.retries_warning() {
             text.push_str(" (");
             text.push_str(&warning);
@@ -57,10 +69,10 @@ impl PinRequest<'_> {
     /// Description for the pinentry dialog.
     #[must_use]
     pub fn pinentry_description(&self) -> String {
-        let mut text = format!(
-            "Enter the PIN of the security key holding\n{}\n\nThen touch the key when it blinks.",
-            self.key
-        );
+        let mut text = format!("Enter the PIN of the security key holding\n{}", self.key);
+        if self.then_touch {
+            text.push_str("\n\nThen touch the key when it blinks.");
+        }
         if let Some(warning) = self.retries_warning() {
             text.push_str("\n\n");
             text.push_str(&warning);
@@ -80,13 +92,39 @@ pub enum PinPrompt {
 }
 
 impl PinPrompt {
-    /// Asks the user for the PIN described by `request`.
+    /// Asks the user for the PIN described by `request`, for at most
+    /// [`PROMPT_TIMEOUT`].
     ///
     /// # Errors
     ///
-    /// Returns an error if the prompt fails or is cancelled, or the answer
-    /// isn't a valid FIDO PIN.
+    /// Returns an error if the prompt fails, is cancelled or times out, or
+    /// the answer isn't a valid FIDO PIN.
     pub async fn ask(&self, request: &PinRequest<'_>) -> Result<SecretBuffer> {
+        self.ask_within(request, PROMPT_TIMEOUT).await
+    }
+
+    /// [`PinPrompt::ask`] with an explicit time limit. On timeout the prompt
+    /// program is killed (`kill_on_drop`), which closes its dialog.
+    ///
+    /// # Errors
+    ///
+    /// Like [`PinPrompt::ask`].
+    pub async fn ask_within(
+        &self,
+        request: &PinRequest<'_>,
+        timeout: Duration,
+    ) -> Result<SecretBuffer> {
+        tokio::time::timeout(timeout, self.ask_unbounded(request))
+            .await
+            .map_err(|_elapsed| {
+                anyhow!(
+                    "no PIN was entered within {} s, the prompt was closed",
+                    timeout.as_secs()
+                )
+            })?
+    }
+
+    async fn ask_unbounded(&self, request: &PinRequest<'_>) -> Result<SecretBuffer> {
         match self {
             Self::Askpass(askpass) => askpass.ask_pin(&request.askpass_text()).await,
             Self::Pinentry(pinentry) => {
