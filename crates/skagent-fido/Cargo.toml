@@ -1,0 +1,17 @@
+[package]
+name = "skagent-fido"
+description = "Safe wrapper over the parts of libfido2 skagent needs"
+edition.workspace = true
+publish.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+libfido2-sys.workspace = true
+skagent-secret.workspace = true
+
+[dev-dependencies]
+libfido2-sys.workspace = true
+
+[lints]
+workspace = true

@@ -12,8 +12,10 @@ anyhow = "1"
 async-trait = "0.1"
 ciborium = "0.2"
 clap = { version = "4", features = ["derive", "env"] }
+libfido2-sys = "0.5"
 colored = "3"
 rustix = { version = "1", features = ["fs", "mm", "param", "process"] }
+skagent-fido = { path = "crates/skagent-fido" }
 skagent-secret = { path = "crates/skagent-secret" }
 sha2 = "0.10"
 # AGPL-3.0, test-only: only skagent-testkey may depend on these.
