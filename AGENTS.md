@@ -11,7 +11,9 @@ skagent is an ssh-agent for FIDO2 `sk-ssh-ed25519@openssh.com` keys created with
 - `Cargo.toml`: workspace, shared dependency versions and shared lints.
 - `crates/skagent`: the agent (lib + `skagent` binary). `#![forbid(unsafe_code)]`.
 - `crates/skagent-secret`: `SecretBuffer`, locked/guarded/zeroizing memory for PINs and passphrases. Its `unsafe` is confined to `src/mapping.rs`.
-- `nix/tests/`: NixOS VM tests (end to end, real OpenSSH tools against the real binary).
+- `crates/skagent-testkey`: **test-only** virtual FIDO2 key on uhid (soft-fido2, AGPL-3.0). Used inside VM tests only. `checks.license-boundary` (`nix/license-boundary.nix`) fails if `skagent` or `skagent-secret` ever reach it or soft-fido2 through `Cargo.lock`; add new shipped crates to its `shippedCrates`.
+- `nix/tests/`: NixOS VM tests (end to end, real OpenSSH tools against the real binary). `common.nix` has the shared helpers (stub key writer, askpass that logs prompts, uhid/hidraw setup).
+- `clippy.toml`: proper names allowed without backticks in doc comments.
 - `docs/design.md`: architecture, PIN cache rules, threat model. `docs/research/`: findings with source references.
 
 ## commands
@@ -45,6 +47,8 @@ nix build                # release binary
 
 - `crates/skagent/tests/*.rs`: Rust tests, which also run inside every nix package build (a failing test fails `nix build`).
 - `nix/tests/agent.nix` (`checks.vm-agent`): the release binary as a transient systemd unit in a NixOS VM, driven by stock `ssh-add`. Build one VM test alone with `nix build -L .#checks.x86_64-linux.vm-agent`.
+- `nix/tests/testkey.nix` (`checks.vm-testkey`): the virtual key against stock OpenSSH, no skagent. If this fails, no FIDO VM test means anything. Its quirks and workarounds: `docs/research/test-key.md`.
+- VM test scripts: the driver runs shell commands with `pipefail` and type-checks/lints the Python. Wait with `retry(fn, timeout_seconds=...)` in Python instead of `cmd | grep -q` in shell, and don't shadow driver globals (`log`, `machine`, ...).
 - When adding a safety property, check that a test fails without it. Break the code, watch the test fail, restore. The log redaction is covered twice: the rule by `tests/logging.rs`, the wiring by the VM test.
 
 ## known ssh-agent-lib behavior
