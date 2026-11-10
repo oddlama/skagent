@@ -2,8 +2,9 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![forbid(unsafe_code)]
 
+mod support;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail, ensure};
@@ -14,10 +15,8 @@ use skagent_secret::SecretBuffer;
 /// A pinentry that logs every command it gets and answers GETPIN with `getpin`.
 fn fake_pinentry(dir: &Path, greeting: &str, getpin: &str) -> Result<(PathBuf, PathBuf)> {
     let log = dir.join("commands");
-    let path = dir.join("pinentry");
-    let script = format!(
-        r#"#!/bin/sh
-echo '{greeting}'
+    let body = format!(
+        r#"echo '{greeting}'
 while IFS= read -r line; do
   printf '%s\n' "$line" >> '{log}'
   case "$line" in
@@ -25,13 +24,10 @@ while IFS= read -r line; do
     BYE) echo 'OK closing connection'; exit 0;;
     *) echo OK;;
   esac
-done
-"#,
+done"#,
         log = log.display()
     );
-    fs::write(&path, script).context("writing fake pinentry")?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
-        .context("making it executable")?;
+    let path = support::executable_script(dir, "pinentry", &body)?;
     Ok((path, log))
 }
 

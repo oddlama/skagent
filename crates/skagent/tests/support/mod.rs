@@ -124,3 +124,26 @@ pub fn ed25519_credential() -> PrivateCredential {
         comment: "plain ed25519".to_owned(),
     }
 }
+
+/// Writes an executable script at `dir/name`.
+///
+/// The script must never be open for writing in this process: tests run in
+/// parallel threads, a child forked by another thread inherits open file
+/// descriptors until it execs, and executing a file that is open for writing
+/// fails with ETXTBSY. So the content goes to a plain file first, and the
+/// external `install` command creates the executable.
+pub fn executable_script(dir: &Path, name: &str, body: &str) -> Result<PathBuf> {
+    let source = dir.join(format!("{name}.source"));
+    std::fs::write(&source, format!("#!/bin/sh\n{body}\n"))
+        .with_context(|| format!("writing {}", source.display()))?;
+    let path = dir.join(name);
+    let status = std::process::Command::new("install")
+        .arg("-m")
+        .arg("0700")
+        .arg(&source)
+        .arg(&path)
+        .status()
+        .context("running install")?;
+    anyhow::ensure!(status.success(), "install exited with {status}");
+    Ok(path)
+}

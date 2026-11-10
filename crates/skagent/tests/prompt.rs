@@ -2,8 +2,9 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![forbid(unsafe_code)]
 
+mod support;
+
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, ensure};
@@ -15,11 +16,7 @@ fn answer(bytes: &[u8]) -> Result<SecretBuffer> {
 }
 
 fn script(dir: &Path, name: &str, body: &str) -> Result<PathBuf> {
-    let path = dir.join(name);
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).context("writing askpass script")?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
-        .context("making it executable")?;
-    Ok(path)
+    support::executable_script(dir, name, body)
 }
 
 #[test]
