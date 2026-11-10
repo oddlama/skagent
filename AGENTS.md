@@ -9,7 +9,7 @@ skagent is an ssh-agent for FIDO2 `sk-ssh-ed25519@openssh.com` keys created with
 - `flake.nix`: flake-parts, numtide devshell, treefmt-nix, nci (nix-cargo-integration). The nci project is called `workspace` so it doesn't collide with the `skagent` crate in `nci.outputs`.
 - `rust-toolchain.toml`: the toolchain nci builds with and the devshell provides (incl. rust-analyzer + rust-src from the same release). It's pinned through `flake.lock`.
 - `Cargo.toml`: workspace, shared dependency versions and shared lints.
-- `crates/skagent`: the agent (lib + `skagent` binary). `#![forbid(unsafe_code)]`.
+- `crates/skagent`: the agent (lib + `skagent` binary). `#![forbid(unsafe_code)]`. `routing.rs` holds device bindings, per-device/per-credential locks and exclusive touch selection.
 - `crates/skagent-secret`: `SecretBuffer`, locked/guarded/zeroizing memory for PINs and passphrases. Its `unsafe` is confined to `src/mapping.rs`.
 - `crates/skagent-fido`: safe wrapper over libfido2 (via `libfido2-sys`, bindgen against the system headers). Its `unsafe` is confined to `src/raw.rs`. Only `/dev/hidraw*` devices are used; libfido2 also lists YubiKeys over `pcsc://`.
 - `crates/skagent-testkey`: **test-only** virtual FIDO2 key on uhid (soft-fido2, AGPL-3.0). Used inside VM tests only. `checks.license-boundary` (`nix/license-boundary.nix`) fails if `skagent` or `skagent-secret` ever reach it or soft-fido2 through `Cargo.lock`; add new shipped crates to its `shippedCrates`.
@@ -49,6 +49,7 @@ nix build                # release binary
 - `crates/skagent/tests/*.rs`: Rust tests, which also run inside every nix package build (a failing test fails `nix build`).
 - `nix/tests/agent.nix` (`checks.vm-agent`): the release binary as a transient systemd unit in a NixOS VM, driven by stock `ssh-add`. Build one VM test alone with `nix build -L .#checks.x86_64-linux.vm-agent`.
 - `nix/tests/signing.nix` (`checks.vm-signing`): signing with the virtual key, sshd `verify-required`, touch/PIN counting, retry/device guards, expiry, pinentry, eviction during prompts/assertions, logind lock/sleep/outage handling. Suspend uses real logind but replaces systemd-suspend's kernel action with a short sleep.
+- `nix/tests/multiple-keys.nix` (`checks.vm-multiple-keys`): two keys with different PINs; selection before prompting, independent caches, parallel bound signing, removal, cancellation and replacement. Checks retry counters stay at 8.
 - `nix/tests/testkey.nix` (`checks.vm-testkey`): the virtual key against stock OpenSSH, no skagent. If this fails, no FIDO VM test means anything. Its quirks and workarounds: `docs/research/test-key.md`.
 - VM test scripts: the driver runs shell commands with `pipefail` and type-checks/lints the Python. Wait with `retry(fn, timeout_seconds=...)` in Python instead of `cmd | grep -q` in shell, and don't shadow driver globals (`log`, `machine`, ...).
 - When adding a safety property, check that a test fails without it. Break the code, watch the test fail, restore. The log redaction is covered twice: the rule by `tests/logging.rs`, the wiring by the VM test.
@@ -66,4 +67,5 @@ nix build                # release binary
 - Fail closed: if a safety check can't be performed (peer credentials, retry counter, socket ownership), refuse the operation. If logind monitoring or the sleep delay inhibitor fails, disable caching until it recovers; uncached signing is still allowed.
 - Eviction must invalidate signing tickets as well as wipe cache entries. A pending prompt or late assertion must never refill an evicted cache. Blocking libfido2 cancellation is still pending: an active call retains its temporary PIN copy until it returns.
 - Never send a PIN to a device that isn't known to hold the credential. Wrong-device PIN attempts cost that device a retry, and `verify-required` credentials can't be found by a silent probe (see `docs/design.md`, multiple keys).
-- Don't hold the agent state lock across device operations or prompts; they block for up to ~35 s.
+- Don't hold the agent state lock across device operations or prompts; they block for up to ~35 s. Per-device locks must travel with the device into blocking workers, never be dropped with an async caller while hardware is still in use.
+- PIN eviction preserves bindings; identity removal drops them. A stale binding requires touch selection, not automatic substitution of another connected key.

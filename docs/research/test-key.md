@@ -30,6 +30,12 @@ The test key therefore decides about touch itself, in front of soft-fido2 (`src/
 
 Every touch request is logged as `touch requested`, so tests count touches in the journal. `--touch auto|deny|file` selects the policy; `file` waits up to 10 s for a trigger file and consumes it, one file per touch.
 
+### touch selection and cancellation
+
+libfido2 1.17's `src/touch.c` implements touch-begin/status with a dummy `makeCredential` carrying an empty `pinUvAuthParam` (not `authenticatorSelection`). CTAP requires touch before rejecting that empty parameter. The test key handles it before soft-fido2: request `select` touch, then return `PIN_AUTH_INVALID` without checking a PIN, changing retries or creating a credential. libfido2 recognizes that status as a successful selection.
+
+The transport loop is synchronous: while waiting for a touch it cannot process a CTAPHID CANCEL. Unselected test devices therefore wait out their 10s timeout; the multi-key suite waits for that before its next operation. Production sends `fido_dev_cancel` before closing outstanding probes, but prompt hardware cancellation still needs a real-key test.
+
 ### credential management listing is incomplete
 
 soft-fido2 0.17's `enumerateCredentialsBegin/GetNextCredential` responses carry user and credential id, but not `publicKey` (0x08) or `credProtect` (0x0A), although both keys are defined in `credential_management.rs`. libfido2 then reports key type 0, and OpenSSH skips the credential:

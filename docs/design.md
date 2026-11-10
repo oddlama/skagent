@@ -41,22 +41,23 @@ ssh / git / ssh-add ── ssh-agent protocol (unix socket, peer-checked) ──
 Crates:
 
 - `skagent`: CLI, socket and process hardening, protocol handling via `ssh-agent-lib`, identity store, cache policy. `unsafe` is forbidden.
-- `skagent-fido`: safe wrapper over `libfido2-sys`, the same libfido2 OpenSSH uses. Enumerates devices, reads the PIN retry counter and asserts with up/uv/pin. Touch selection and resident credential enumeration are pending. Unsafe code is confined to `raw.rs`.
+- `skagent-fido`: safe wrapper over `libfido2-sys`, the same libfido2 OpenSSH uses. Enumerates devices, reads the PIN retry counter, selects devices by touch and asserts with up/uv/pin. Resident credential enumeration is pending. Unsafe code is confined to `raw.rs`.
 - `skagent-secret`: guarded, locked, zeroizing memory. Unsafe code is confined to `mapping.rs`.
 
 Why libfido2 and not a pure Rust CTAP stack: OpenSSH signs with exactly the libfido2 assertion semantics (raw client data, `ssh:` rp ids, credProtect), and libfido2 handles hidraw, pcsc and all PIN protocol versions. Matching OpenSSH byte for byte is the point.
 
 ## multiple keys
 
-The identity store and PIN cache support multiple credentials. Device selection currently requires exactly one connected authenticator; signing is globally serialized. The target for several connected keys (work + personal):
+The identity store, device bindings and PIN cache support multiple credentials and connected authenticators (work + personal):
 
 - The identity store holds keys from any number of authenticators.
 - Finding the device that holds a key is the hard part. **A silent probe doesn't work for our keys**: credProtect `UV_REQUIRED` hides the credential from every request without user verification, so a probe with the key handle says "no credentials" on every device, the right one included. That's why OpenSSH falls back to "touch the key you mean" (`sk_probe: selecting sk by touch`). And verifying with a PIN on the wrong device costs that device a retry.
-- So skagent remembers where a key lives: after a signature succeeded on a device, the key is bound to that device's identity (its `/dev/hidrawN` node: device number, inode and change time, which change on every replug). With one device connected and no binding yet, that device is used. With several and no binding, the user picks by touch (libfido2's touch-begin/status, the device that gets touched wins), then the PIN is asked for.
+- So skagent remembers where a key lives: after a signature succeeded on a device, the key is bound to that device's identity (its `/dev/hidrawN` node: device number, inode and change time, which change on every replug). With one device connected and no binding yet, that device is used. With several and no binding, the user picks by touch (libfido2's touch-begin/status), then the PIN is asked for. A lost binding always requires selection, even with one remaining device; another device is never silently substituted. Two detected touches in one polling round are refused as ambiguous.
 - **A cached PIN is only ever sent to the device it was verified on.** The cache entry carries the device identity; if it no longer matches (replug, other device on that node), the entry is dropped and the user is asked again. This also covers "personal key plugged in where the work key was".
 - The PIN cache is per credential and device. Work and personal key have independent entries, lifetimes and retry guards. Evicting one never touches the other.
-- There's one lock per device, so signatures on different keys run in parallel and two requests for the same key queue.
-- Unplugging a device evicts the cache entries bound to it (checked on every use through the device identity, and eagerly on hidraw remove events), like gpg forgetting the PIN on card removal.
+- There's one lock per device and per credential, so bound devices sign in parallel and duplicate requests queue without duplicate prompts. Touch selection takes exclusive access across devices to avoid consuming a touch intended for an assertion. Device locks travel into blocking workers; dropping an async request cannot release the hardware early.
+- Bindings survive PIN expiry, lock and `skagent forget`. Removing an identity drops its binding; `ssh-add -D` drops all bindings.
+- Device identity changes evict the PIN on its next lookup. Eager eviction on hidraw remove events is still pending. Permission/ACL changes also change ctime, conservatively requiring selection and a fresh PIN.
 - Later: per-key policy (lifetime, idle timeout) selected by application, comment or fingerprint, e.g. 8h for work and 1h for personal.
 
 ## secret memory
@@ -108,7 +109,8 @@ Expiry is enforced on lookup; a 15s sweep also wipes unused expired entries from
 ## concurrency
 
 - libfido2 calls block for up to the touch timeout, so they run on `spawn_blocking`.
-- Currently one global operation mutex; per-device locks and queue timeouts are pending.
+- Per-device and per-credential locks; bound devices operate independently. Selection takes a global write lock and is polled for at most 30s. Queue timeouts are pending.
+- Selection sends no PIN. libfido2 uses a dummy makeCredential with empty pinUvAuthParam, which requires touch before rejection and consumes no PIN retry. A second touch is required for the actual signature. Outstanding probes are cancelled on drop, on the same thread that owns each device.
 - Signing tickets are captured under the agent state lock. Eviction invalidates queued requests, cancels prompts, and prevents late signatures from being returned or cached. No agent state lock is held over device operations or prompts.
 - A blocking libfido2 assertion cannot yet be cancelled: the operation and its temporary PIN copy remain until it returns or times out (~35s). Eviction clears cache entries immediately but not this copy. Active-operation cancellation (`fido_dev_cancel`), including on disconnect and before suspend, is pending.
 
@@ -132,4 +134,4 @@ Expiry is enforced on lookup; a 15s sweep also wipes unused expired entries from
 4. ~~PIN cache + pinentry.~~ Done: lifetime/idle limits, retry/device guards, Assuan/askpass, eviction races, Rust and VM tests.
 5. ~~Virtual authenticator + full sign path in VM tests.~~ Done early (`skagent-testkey`, `checks.vm-testkey`, `checks.vm-signing`). Open: soft-fido2's credential listing gap (`docs/research/test-key.md`).
 6. Logind eviction and `skagent forget` done (VM-tested, including mocked suspend execution through real logind). `skagent load` pending.
-7. Multiple devices: device binding, select by touch.
+7. ~~Multiple devices: device binding, select by touch.~~ Done, with per-device locking and a two-key VM suite using distinct PINs. Eager unplug eviction is pending.
