@@ -28,7 +28,7 @@ The test key therefore decides about touch itself, in front of soft-fido2 (`src/
 - If the touch is refused or times out, the response is replaced by `CTAP2_ERR_OPERATION_DENIED` / `CTAP2_ERR_USER_ACTION_TIMEOUT`, and credentials the request created are removed again.
 - soft-fido2's own `request_up` callback always accepts.
 
-Every touch request is logged as `touch requested`, so tests count touches in the journal. `--touch auto|deny|file` selects the policy; `file` waits up to 10 s for a trigger file and consumes it, one file per touch.
+Every touch request is logged as `touch requested`, so tests count touches in the journal. `--touch auto|deny|file` selects the policy; `file` waits for a trigger file and consumes it, one file per touch. It gives up after `--touch-timeout` seconds (default 10) and answers `USER_ACTION_TIMEOUT`, like a key that stops blinking; the multi-key VM test uses a 1 s key to check that selection survives a key giving up.
 
 ### touch selection and cancellation
 
