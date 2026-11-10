@@ -45,6 +45,19 @@
           # `skagent` crate.
           projectName = "workspace";
           crateOutputs = lib.filterAttrs (name: _: name != projectName) config.nci.outputs;
+
+          fidoBuildInputs = {
+            nativeBuildInputs = [
+              pkgs.pkg-config
+              pkgs.rustPlatform.bindgenHook
+            ];
+            buildInputs = [
+              pkgs.libfido2
+              pkgs.openssl
+              pkgs.zlib
+            ];
+          };
+          inherit (pkgs.llvmPackages) libclang;
         in
         {
           nci = {
@@ -57,9 +70,16 @@
               # Warnings fail every nix build of our crates, including the clippy
               # check. Registry dependencies cap their own lints, so this only
               # applies to code in this repository. Both derivations get the same
-              # flags so cargo can reuse the prebuilt dependencies.
-              drvConfig.env.RUSTFLAGS = "-D warnings";
-              depsDrvConfig.env.RUSTFLAGS = "-D warnings";
+              # flags and inputs so cargo can reuse the prebuilt dependencies.
+              # libfido2-sys runs bindgen against the system libfido2 headers.
+              drvConfig = {
+                env.RUSTFLAGS = "-D warnings";
+                mkDerivation = fidoBuildInputs;
+              };
+              depsDrvConfig = {
+                env.RUSTFLAGS = "-D warnings";
+                mkDerivation = fidoBuildInputs;
+              };
             };
           };
 
@@ -91,6 +111,7 @@
                 cargoLock = ./Cargo.lock;
                 shippedCrates = [
                   "skagent"
+                  "skagent-fido"
                   "skagent-secret"
                 ];
                 forbiddenPrefixes = [
@@ -105,6 +126,20 @@
               config.treefmt.build.wrapper
               # ssh-add / ssh-keygen to poke at a running agent
               pkgs.openssh
+              pkgs.libfido2
+              pkgs.pkg-config
+            ];
+            # What rustPlatform.bindgenHook sets up inside nix builds, for
+            # cargo builds of libfido2-sys in the shell.
+            env = [
+              {
+                name = "LIBCLANG_PATH";
+                value = "${lib.getLib libclang}/lib";
+              }
+              {
+                name = "BINDGEN_EXTRA_CLANG_ARGS";
+                value = "-isystem ${lib.getLib libclang}/lib/clang/${lib.versions.major libclang.version}/include -isystem ${lib.getDev pkgs.stdenv.cc.libc}/include -isystem ${lib.getDev pkgs.openssl}/include";
+              }
             ];
           };
 
