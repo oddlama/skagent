@@ -19,7 +19,9 @@ use anyhow::{Context as _, Result};
 use futures_util::StreamExt as _;
 use rustix::process::geteuid;
 use zbus::message::Type as MessageType;
-use zbus::{Connection, MatchRule, Message, MessageStream, OwnedObjectPath, OwnedVariant, Proxy};
+use zbus::{
+    Connection, MatchRule, Message, MessageStream, OwnedFd, OwnedObjectPath, OwnedVariant, Proxy,
+};
 
 use crate::agent::SkAgent;
 
@@ -35,9 +37,8 @@ const RETRY_DELAY: Duration = Duration::from_secs(30);
 
 /// Watches logind until the process ends.
 ///
-/// While not connected, a lock can't be noticed. So every lost or failed
-/// connection drops all PINs, and the first failure after a working
-/// connection is logged as a warning.
+/// While disconnected, signing asks for the PIN every time. Caching only
+/// resumes once subscriptions and a sleep delay inhibitor are in place.
 ///
 /// # Errors
 ///
@@ -51,13 +52,14 @@ pub async fn watch(agent: SkAgent) -> Result<()> {
             Ok(never) => match never {},
             Err(error) => error,
         };
+        agent.set_caching_available(false).await;
         let forgotten = agent.forget_pins("logind connection lost").await;
         if connected || warn_on_failure {
             tracing::warn!(
                 error = %format!("{error:#}"),
                 forgotten,
                 retry_seconds = RETRY_DELAY.as_secs(),
-                "can't watch logind, cached PINs are not dropped on screen lock or suspend until it works again"
+                "can't watch logind; PIN caching is disabled until it works again"
             );
         } else {
             tracing::debug!(error = %format!("{error:#}"), "still can't watch logind");
@@ -71,11 +73,21 @@ async fn run(agent: &SkAgent, uid: u32, connected: &mut bool) -> Result<Infallib
     let connection = Connection::system()
         .await
         .context("connecting to the system D-Bus")?;
+    let mut owners = owner_changes(&connection).await?;
+    let manager = Proxy::new(&connection, LOGIND, MANAGER_PATH, MANAGER_INTERFACE)
+        .await
+        .context("opening the logind manager")?;
+    let mut inhibitor = Some(inhibit(&manager).await?);
+    let owner = zbus::fdo::DBusProxy::new(&connection)
+        .await?
+        .get_name_owner(LOGIND.try_into()?)
+        .await
+        .context("finding logind's bus owner")?;
     let mut locks = subscribe(
         &connection,
         MatchRule::builder()
             .msg_type(MessageType::Signal)
-            .sender(LOGIND)
+            .sender(owner.as_str())
             .interface(SESSION_INTERFACE)
             .member("Lock")
             .path_namespace(SESSIONS_PATH),
@@ -86,7 +98,7 @@ async fn run(agent: &SkAgent, uid: u32, connected: &mut bool) -> Result<Infallib
         &connection,
         MatchRule::builder()
             .msg_type(MessageType::Signal)
-            .sender(LOGIND)
+            .sender(owner.as_str())
             .interface(PROPERTIES_INTERFACE)
             .member("PropertiesChanged")
             .path_namespace(SESSIONS_PATH)
@@ -98,13 +110,21 @@ async fn run(agent: &SkAgent, uid: u32, connected: &mut bool) -> Result<Infallib
         &connection,
         MatchRule::builder()
             .msg_type(MessageType::Signal)
-            .sender(LOGIND)
+            .sender(owner.as_str())
             .interface(MANAGER_INTERFACE)
             .member("PrepareForSleep")
             .path(MANAGER_PATH),
         "Manager.PrepareForSleep",
     )
     .await?;
+    let sleeping: bool = manager
+        .get_property("PreparingForSleep")
+        .await
+        .context("reading logind's sleep state")?;
+    if sleeping {
+        drop(inhibitor.take());
+    }
+    agent.set_caching_available(!sleeping).await;
     *connected = true;
     tracing::info!(
         uid,
@@ -113,6 +133,7 @@ async fn run(agent: &SkAgent, uid: u32, connected: &mut bool) -> Result<Infallib
 
     loop {
         tokio::select! {
+            _ = owners.next() => anyhow::bail!("logind's bus owner changed; reconnecting"),
             message = locks.next() => {
                 let message = message.context("the Session.Lock subscription ended")?.context("receiving Session.Lock")?;
                 if ours(&connection, &message, uid).await {
@@ -121,11 +142,12 @@ async fn run(agent: &SkAgent, uid: u32, connected: &mut bool) -> Result<Infallib
             }
             message = hints.next() => {
                 let message = message.context("the session property subscription ended")?.context("receiving PropertiesChanged")?;
-                let (_interface, changed, _invalidated): (String, HashMap<String, OwnedVariant>, Vec<String>) =
+                let (_interface, changed, invalidated): (String, HashMap<String, OwnedVariant>, Vec<String>) =
                     message.body().deserialize().context("decoding PropertiesChanged")?;
                 let locked = changed
                     .get("LockedHint")
-                    .is_some_and(|hint| bool::try_from(hint).unwrap_or(false));
+                    .is_some_and(|hint| bool::try_from(hint).unwrap_or(true))
+                    || invalidated.iter().any(|name| name == "LockedHint");
                 if locked && ours(&connection, &message, uid).await {
                     agent.forget_pins("session locked (LockedHint)").await;
                 }
@@ -134,11 +156,41 @@ async fn run(agent: &SkAgent, uid: u32, connected: &mut bool) -> Result<Infallib
                 let message = message.context("the PrepareForSleep subscription ended")?.context("receiving PrepareForSleep")?;
                 let suspending: bool = message.body().deserialize().context("decoding PrepareForSleep")?;
                 if suspending {
+                    agent.set_caching_available(false).await;
                     agent.forget_pins("suspending").await;
+                    // logind waits for this fd to close (up to its delay limit).
+                    drop(inhibitor.take());
+                } else {
+                    inhibitor = Some(inhibit(&manager).await?);
+                    agent.set_caching_available(true).await;
                 }
             }
         }
     }
+}
+
+async fn owner_changes(connection: &Connection) -> Result<MessageStream> {
+    subscribe(
+        connection,
+        MatchRule::builder()
+            .msg_type(MessageType::Signal)
+            .sender("org.freedesktop.DBus")
+            .interface("org.freedesktop.DBus")
+            .member("NameOwnerChanged")
+            .arg(0, LOGIND),
+        "logind owner changes",
+    )
+    .await
+}
+
+async fn inhibit(manager: &Proxy<'_>) -> Result<OwnedFd> {
+    manager
+        .call(
+            "Inhibit",
+            &("sleep", "skagent", "Drop cached PINs before sleep", "delay"),
+        )
+        .await
+        .context("taking logind's sleep delay inhibitor")
 }
 
 async fn subscribe(

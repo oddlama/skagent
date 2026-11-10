@@ -69,6 +69,11 @@ impl SkAgent {
         forgotten
     }
 
+    /// Allows caching only while lock/sleep monitoring is available.
+    pub async fn set_caching_available(&self, available: bool) {
+        self.shared.signer.set_caching_available(available).await;
+    }
+
     /// Drops cached PINs whose lifetime or idle timeout ended.
     pub async fn expire_pins(&self) {
         let expired = self.shared.signer.expire(Instant::now()).await;
@@ -156,8 +161,8 @@ impl AgentSession {
             .identities
             .remove(key, Instant::now())
             .ok_or_else(|| anyhow!("the key is not in the agent"))?;
-        drop(state);
         let pin_dropped = self.shared.signer.forget(&removed).await;
+        drop(state);
         tracing::info!(
             fingerprint = %removed.fingerprint(),
             comment = %removed.comment(),
@@ -172,18 +177,23 @@ impl AgentSession {
             bail!("certificates are never held by this agent");
         };
         // Copied out, so the state isn't locked while the device waits for a touch.
-        let identity = {
+        let (identity, ticket) = {
             let mut state = self.shared.state.lock().await;
             if state.lock.is_some() {
                 bail!("the agent is locked");
             }
-            state
+            let identity = state
                 .identities
                 .find(key, Instant::now())
                 .ok_or_else(|| anyhow!("the key is not in the agent"))?
-                .clone()
+                .clone();
+            (identity, self.shared.signer.ticket())
         };
-        let signature = self.shared.signer.sign(&identity, &request.data).await?;
+        let signature = self
+            .shared
+            .signer
+            .sign(&identity, &request.data, ticket)
+            .await?;
         tracing::info!(
             fingerprint = %identity.fingerprint(),
             comment = %identity.comment(),
@@ -202,8 +212,8 @@ impl AgentSession {
             bail!("the agent is already locked");
         }
         state.lock = Some(stored);
-        drop(state);
         let forgotten = self.shared.signer.forget_all().await;
+        drop(state);
         tracing::info!(forgotten_pins = forgotten, "agent locked");
         Ok(())
     }
@@ -297,8 +307,8 @@ impl Session for AgentSession {
             return Err(refuse("removing all keys", &anyhow!("the agent is locked")));
         }
         let removed = state.identities.clear();
-        drop(state);
         let forgotten = self.shared.signer.forget_all().await;
+        drop(state);
         tracing::info!(removed, forgotten_pins = forgotten, "removed all keys");
         Ok(())
     }

@@ -6,12 +6,12 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use sha2::{Digest as _, Sha256};
 use skagent_fido::{AssertRequest, Device, ErrorKind, Statement, error_kind, hid_devices};
 use skagent_secret::SecretBuffer;
 use ssh_agent_lib::ssh_key::{Algorithm, Signature};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 use crate::device::DeviceIdentity;
 use crate::identities::SkIdentity;
@@ -33,6 +33,29 @@ pub struct Signer {
     state: Mutex<State>,
     /// Held for a whole signature: prompt, device operation, cache update.
     operation: Mutex<()>,
+    invalidation: watch::Sender<()>,
+}
+
+/// Captured while the agent authorizes a request, before it queues for the
+/// device. Any eviction invalidates outstanding requests, including prompts.
+#[derive(Debug)]
+pub struct SigningTicket(watch::Receiver<()>);
+
+impl SigningTicket {
+    /// Refuses a request authorized before an eviction.
+    ///
+    /// # Errors
+    /// Returns an error after removal, lock, forget or watcher failure.
+    pub fn check(&self) -> Result<()> {
+        ensure!(
+            !self
+                .0
+                .has_changed()
+                .context("checking signature authorization")?,
+            "signature cancelled by PIN eviction; request a new signature"
+        );
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -40,6 +63,7 @@ struct State {
     cache: PinCache,
     /// Shown with the next prompt for that credential, e.g. "wrong PIN".
     last_failure: HashMap<CredentialKey, String>,
+    caching_available: bool,
 }
 
 /// Where the PIN for one signature came from.
@@ -74,23 +98,42 @@ impl Signer {
             state: Mutex::new(State {
                 cache: PinCache::new(policy),
                 last_failure: HashMap::new(),
+                caching_available: true,
             }),
             operation: Mutex::new(()),
+            invalidation: watch::channel(()).0,
         }
     }
 
-    /// Drops all cached PINs. Returns how many there were.
+    /// Authorizes a request in the current eviction generation.
+    #[must_use]
+    pub fn ticket(&self) -> SigningTicket {
+        SigningTicket(self.invalidation.subscribe())
+    }
+
+    /// Drops all cached PINs and invalidates outstanding signatures.
     pub async fn forget_all(&self) -> usize {
-        self.state.lock().await.cache.clear()
+        let mut state = self.state.lock().await;
+        self.invalidation.send_replace(());
+        state.cache.clear()
+    }
+
+    /// Disables caching while logind cannot be watched. Signing still works,
+    /// but asks every time. Changes also invalidate in-flight requests.
+    pub async fn set_caching_available(&self, available: bool) {
+        let mut state = self.state.lock().await;
+        if state.caching_available != available {
+            state.caching_available = available;
+            self.invalidation.send_replace(());
+            state.cache.clear();
+        }
     }
 
     /// Drops the cached PIN of `identity`. Returns whether there was one.
     pub async fn forget(&self, identity: &SkIdentity) -> bool {
-        self.state
-            .lock()
-            .await
-            .cache
-            .evict(&credential_key(identity))
+        let mut state = self.state.lock().await;
+        self.invalidation.send_replace(());
+        state.cache.evict(&credential_key(identity))
     }
 
     /// Drops PINs whose lifetime or idle timeout ended. Returns how many.
@@ -112,38 +155,88 @@ impl Signer {
     ///
     /// Returns an error if no unique device is connected, the PIN prompt fails,
     /// or the device refuses (wrong PIN, no touch, unknown credential).
-    pub async fn sign(&self, identity: &SkIdentity, data: &[u8]) -> Result<Signature> {
-        let _operation = self.operation.lock().await;
+    pub async fn sign(
+        &self,
+        identity: &SkIdentity,
+        data: &[u8],
+        mut ticket: SigningTicket,
+    ) -> Result<Signature> {
+        let _operation = tokio::select! {
+            biased;
+            _ = ticket.0.changed() => bail!("queued signature cancelled by PIN eviction"),
+            guard = self.operation.lock() => guard,
+        };
+        ticket.check()?;
         let key = credential_key(identity);
         let path = only_device().await?;
         let device = DeviceIdentity::of(&path)?;
+        let needs_pin = identity.flags() & SK_USER_VERIFICATION_REQUIRED != 0;
+        let (opened, retries) = {
+            let expected = device.clone();
+            tokio::task::spawn_blocking(move || {
+                let mut opened = Device::open(expected.path())?;
+                ensure!(
+                    DeviceIdentity::of(expected.path())? == expected,
+                    "security key changed while opening it"
+                );
+                let retries = if needs_pin {
+                    Some(opened.pin_retries()?)
+                } else {
+                    None
+                };
+                Ok::<_, anyhow::Error>((opened, retries))
+            })
+            .await
+            .context("opening the security key in the device thread")??
+        };
 
         let source = if identity.flags() & SK_USER_VERIFICATION_REQUIRED == 0 {
             PinSource::None
         } else {
-            self.pin_for(identity, &key, &device).await?
+            tokio::select! {
+                biased;
+                _ = ticket.0.changed() => bail!("PIN prompt cancelled by PIN eviction"),
+                source = self.pin_for(identity, &key, &device, retries.context("missing PIN retry counter")?) => source?,
+            }
         };
 
         let request = OwnedAssertRequest {
             rp_id: identity.application().to_owned(),
             client_data_hash: Sha256::digest(data).into(),
             key_handle: identity.key_handle().to_vec(),
-            user_presence: identity.flags() & SK_USER_PRESENCE_REQUIRED != 0,
+            user_presence: true,
         };
+        ticket.check()?;
+        let retry_guard = matches!(source, PinSource::Cache(_))
+            .then_some(retries)
+            .flatten();
         let (source, outcome) = {
-            let path = path.clone();
+            let device = device.clone();
             tokio::task::spawn_blocking(move || {
-                let outcome = assert_on(&path, &request, source.pin());
+                let outcome = assert_on(opened, &device, &request, source.pin(), retry_guard);
                 (source, outcome)
             })
             .await
             .context("the signing thread panicked or was cancelled")?
         };
 
+        // A blocking libfido2 call cannot yet be cancelled. Wait for it, but
+        // never return its signature or repopulate the cache after eviction.
+        ticket.check()?;
         match outcome {
             Ok((statement, retries_after)) => {
-                self.remember(&key, source, &device, retries_after).await;
-                ssh_signature(&statement)
+                let signature = ssh_signature(&statement)?;
+                ensure!(
+                    statement.flags & SK_USER_PRESENCE_REQUIRED != 0,
+                    "the assertion lacks user presence"
+                );
+                ensure!(
+                    source.pin().is_none() || statement.flags & SK_USER_VERIFICATION_REQUIRED != 0,
+                    "the assertion lacks user verification"
+                );
+                self.remember(&key, source, &device, retries_after, &ticket)
+                    .await?;
+                Ok(signature)
             }
             Err(error) => {
                 self.record_failure(identity, &key, &source, &error).await;
@@ -158,12 +251,8 @@ impl Signer {
         identity: &SkIdentity,
         key: &CredentialKey,
         device: &DeviceIdentity,
+        retries: u32,
     ) -> Result<PinSource> {
-        let path = device.path().to_owned();
-        let retries = tokio::task::spawn_blocking(move || Device::open(&path)?.pin_retries())
-            .await
-            .context("the device thread panicked or was cancelled")??;
-
         let (lookup, last_failure) = {
             let mut state = self.state.lock().await;
             if retries == 0 {
@@ -189,7 +278,7 @@ impl Signer {
 
         let prompt = self.prompt.as_ref().ok_or_else(|| {
             anyhow!(
-                "{} needs a PIN, but no PIN prompt is configured (--prompt, --pinentry, --askpass)",
+                "{} needs a PIN, but no PIN prompt is configured (--pinentry or --askpass)",
                 describe(identity)
             )
         })?;
@@ -211,9 +300,14 @@ impl Signer {
         source: PinSource,
         device: &DeviceIdentity,
         retries_after: Option<u32>,
-    ) {
+        ticket: &SigningTicket,
+    ) -> Result<()> {
         let mut state = self.state.lock().await;
+        ticket.check()?;
         state.last_failure.remove(key);
+        if !state.caching_available {
+            return Ok(());
+        }
         let still_same_device = DeviceIdentity::of(device.path()).is_ok_and(|now| now == *device);
         match source {
             PinSource::None => {}
@@ -237,6 +331,7 @@ impl Signer {
                 );
             }
         }
+        Ok(())
     }
 
     async fn record_failure(
@@ -308,11 +403,23 @@ struct OwnedAssertRequest {
 /// Signs on the device at `path`. With a PIN, also returns the retry counter
 /// right after, for the cache.
 fn assert_on(
-    path: &str,
+    mut device: Device,
+    expected: &DeviceIdentity,
     request: &OwnedAssertRequest,
     pin: Option<&SecretBuffer>,
+    retry_guard: Option<u32>,
 ) -> Result<(Statement, Option<u32>)> {
-    let mut device = Device::open(path)?;
+    let path = expected.path();
+    ensure!(
+        DeviceIdentity::of(path)? == *expected,
+        "security key changed before signing at {path}"
+    );
+    if let Some(expected_retries) = retry_guard {
+        ensure!(
+            device.pin_retries()? == expected_retries,
+            "PIN retry counter changed before signing at {path}"
+        );
+    }
     let result = device.assert(
         &AssertRequest {
             rp_id: &request.rp_id,
