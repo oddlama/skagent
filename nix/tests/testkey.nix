@@ -30,7 +30,7 @@ pkgs.testers.runNixOSTest {
 
     def alice_ok(command: str) -> str:
         status, out = alice(command)
-        assert status == 0, f"{command!r} exited {status}: {out}"
+        assert status == 0, f"{command!r} exited {status}: {out!r}"
         return out
 
     def touches() -> int:
@@ -75,9 +75,14 @@ pkgs.testers.runNixOSTest {
         info = machine.succeed(f"fido2-token -I {device}")
         assert "pin retries: 7" in info, info
 
-    # Not covered: ssh-keygen -K / ssh-add -K. soft-fido2 0.17 leaves publicKey
-    # and credProtect out of its credential management listing, so OpenSSH
-    # sees "key type 0" and downloads nothing. See docs/research/test-key.md.
+    with subtest("ssh-keygen downloads the resident key with its public key and UV policy"):
+        alice_ok("mkdir ~/download")
+        alice_ok("cd ~/download && ${askpass pin} ssh-keygen -K -N '''")
+        recovered = "~/download/id_ed25519_sk_rk_example"
+        original = alice_ok("ssh-keygen -lf ~/id_sk.pub").split()[1]
+        assert alice_ok(f"ssh-keygen -lf {recovered}.pub").split()[1] == original
+        alice_ok(f"rm -f ~/msg.sig && ${askpass pin} ssh-keygen -Y sign -f {recovered} -n test ~/msg")
+        alice_ok("ssh-keygen -Y verify -f ~/allowed -I alice -n test -s ~/msg.sig < ~/msg")
 
     with subtest("stock ssh-agent asks for the PIN on every signature"):
         machine.succeed(
@@ -88,7 +93,8 @@ pkgs.testers.runNixOSTest {
             " ssh-agent -D -a /tmp/ssh-agent.sock"
         )
         machine.wait_for_file("/tmp/ssh-agent.sock")
-        alice_ok("SSH_AUTH_SOCK=/tmp/ssh-agent.sock ssh-add ~/id_sk")
+        alice_ok("${askpass pin} SSH_AUTH_SOCK=/tmp/ssh-agent.sock ssh-add -K")
+        assert original in alice_ok("SSH_AUTH_SOCK=/tmp/ssh-agent.sock ssh-add -l")
         for _ in range(2):
             alice_ok("rm -f ~/msg.sig && SSH_AUTH_SOCK=/tmp/ssh-agent.sock ssh-keygen -Y sign -f ~/id_sk.pub -n test ~/msg")
             alice_ok("ssh-keygen -Y verify -f ~/allowed -I alice -n test -s ~/msg.sig < ~/msg")

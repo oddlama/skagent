@@ -43,6 +43,18 @@ pub struct UndoHandle {
 pub struct Snapshot(HashSet<Vec<u8>>);
 
 impl UndoHandle {
+    /// The public credProtect policy of a stored credential.
+    ///
+    /// # Errors
+    /// Refuses a poisoned store or an unknown credential id.
+    pub fn protection(&self, id: &[u8]) -> Result<u8> {
+        let store = self.credentials.lock().map_err(|_poisoned| Error::Other)?;
+        store
+            .get(id)
+            .map(|credential| credential.extensions.cred_protect.unwrap_or(1))
+            .ok_or(Error::Other)
+    }
+
     /// Records which credentials exist now.
     ///
     /// # Errors

@@ -10,6 +10,7 @@ use anyhow::{Result, anyhow, bail};
 use clap::{Parser, ValueEnum};
 use sha2::{Digest as _, Sha256};
 use skagent_testkey::callbacks::{Callbacks, UndoHandle};
+use skagent_testkey::catalog::Catalog;
 use skagent_testkey::ctap::{
     STATUS_INVALID_CBOR, STATUS_OK, STATUS_OPERATION_DENIED, STATUS_PIN_AUTH_INVALID,
     STATUS_USER_ACTION_TIMEOUT, TouchRequirement, touch_requirement,
@@ -121,6 +122,7 @@ fn run(cli: Cli) -> Result<()> {
         authenticator,
         touch,
         undo,
+        catalog: Catalog::default(),
     });
     tracing::info!(name = %cli.name, touch = ?cli.touch, "test key ready");
 
@@ -149,6 +151,7 @@ struct CborHandler {
     authenticator: Authenticator<Callbacks>,
     touch: Touch,
     undo: UndoHandle,
+    catalog: Catalog,
 }
 
 impl CborHandler {
@@ -159,7 +162,9 @@ impl CborHandler {
             .map_err(|error| {
                 soft_fido2_transport::Error::Other(format!("CTAP2 command failed: {error}"))
             })?;
-        Ok(response)
+        self.catalog.repair(request, response).map_err(|error| {
+            soft_fido2_transport::Error::Other(format!("completing credential listing: {error}"))
+        })
     }
 }
 
@@ -199,6 +204,19 @@ impl CommandHandler for CborHandler {
                     return Ok(response);
                 }
                 let Some(failure) = touch_failure(self.touch.request(operation, &rp_id)) else {
+                    if operation == "makeCredential" {
+                        self.catalog
+                            .record(&response, |id| {
+                                self.undo.protection(id).map_err(|error| {
+                                    anyhow!("reading credential protection: {error}")
+                                })
+                            })
+                            .map_err(|error| {
+                                soft_fido2_transport::Error::Other(format!(
+                                    "recording credential public key: {error}"
+                                ))
+                            })?;
+                    }
                     return Ok(response);
                 };
                 let removed = self.undo.undo_since(&snapshot).map_err(|error| {
