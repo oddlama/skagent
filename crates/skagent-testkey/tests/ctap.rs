@@ -88,6 +88,21 @@ fn other_commands_and_empty_requests_need_no_touch() -> Result<()> {
 }
 
 #[test]
+fn empty_pin_auth_selects_by_touch_without_a_pin_attempt() -> Result<()> {
+    let selection = request(0x01, vec![(Value::Integer(8.into()), Value::Bytes(vec![]))])?;
+    ensure!(touch_requirement(&selection)? == TouchRequirement::Selection);
+    let regular = request(
+        0x01,
+        vec![(Value::Integer(8.into()), Value::Bytes(vec![1; 16]))],
+    )?;
+    ensure!(matches!(
+        touch_requirement(&regular)?,
+        TouchRequirement::AfterSuccess { .. }
+    ));
+    Ok(())
+}
+
+#[test]
 fn malformed_requests_are_rejected() {
     assert!(
         touch_requirement(&[0x02, 0xff, 0x00]).is_err(),

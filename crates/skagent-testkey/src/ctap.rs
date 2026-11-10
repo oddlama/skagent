@@ -22,6 +22,7 @@ const GET_ASSERTION: u8 = 0x02;
 /// Map keys of the parameters we look at.
 const MAKE_CREDENTIAL_RP: i128 = 0x02;
 const MAKE_CREDENTIAL_OPTIONS: i128 = 0x07;
+const MAKE_CREDENTIAL_PIN_AUTH: i128 = 0x08;
 const GET_ASSERTION_RP_ID: i128 = 0x01;
 const GET_ASSERTION_OPTIONS: i128 = 0x05;
 
@@ -31,6 +32,8 @@ pub const STATUS_OK: u8 = 0x00;
 pub const STATUS_INVALID_CBOR: u8 = 0x12;
 /// CTAP2 status: the user refused (touch denied).
 pub const STATUS_OPERATION_DENIED: u8 = 0x27;
+/// Empty `pinUvAuthParam`: touch first, then `PIN_AUTH_INVALID` (no retry used).
+pub const STATUS_PIN_AUTH_INVALID: u8 = 0x33;
 /// CTAP2 status: no touch within the timeout.
 pub const STATUS_USER_ACTION_TIMEOUT: u8 = 0x2f;
 
@@ -39,6 +42,9 @@ pub const STATUS_USER_ACTION_TIMEOUT: u8 = 0x2f;
 pub enum TouchRequirement {
     /// No touch.
     None,
+    /// libfido2 selects a device with makeCredential + empty pinUvAuthParam.
+    /// CTAP requires a touch before rejecting it, without checking a PIN.
+    Selection,
     /// Run the request; release a successful result only after a touch.
     AfterSuccess {
         /// CTAP2 command name, for the log.
@@ -60,6 +66,12 @@ pub fn touch_requirement(request: &[u8]) -> Result<TouchRequirement> {
     match command {
         MAKE_CREDENTIAL => {
             let parameters = parse_map(parameters)?;
+            if lookup(&parameters, MAKE_CREDENTIAL_PIN_AUTH)
+                .and_then(Value::as_bytes)
+                .is_some_and(Vec::is_empty)
+            {
+                return Ok(TouchRequirement::Selection);
+            }
             let rp_id = lookup(&parameters, MAKE_CREDENTIAL_RP)
                 .and_then(Value::as_map)
                 .and_then(|rp| text_entry(rp, "id"))

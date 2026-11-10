@@ -11,8 +11,8 @@ use clap::{Parser, ValueEnum};
 use sha2::{Digest as _, Sha256};
 use skagent_testkey::callbacks::{Callbacks, UndoHandle};
 use skagent_testkey::ctap::{
-    STATUS_INVALID_CBOR, STATUS_OK, STATUS_OPERATION_DENIED, STATUS_USER_ACTION_TIMEOUT,
-    TouchRequirement, touch_requirement,
+    STATUS_INVALID_CBOR, STATUS_OK, STATUS_OPERATION_DENIED, STATUS_PIN_AUTH_INVALID,
+    STATUS_USER_ACTION_TIMEOUT, TouchRequirement, touch_requirement,
 };
 use skagent_testkey::touch::{Touch, TouchOutcome};
 use soft_fido2::{Authenticator, AuthenticatorConfig, AuthenticatorOptions};
@@ -186,6 +186,10 @@ impl CommandHandler for CborHandler {
         };
         match requirement {
             TouchRequirement::None => self.forward(data),
+            TouchRequirement::Selection => {
+                let outcome = self.touch.request("select", "");
+                Ok(touch_failure(outcome).unwrap_or_else(|| vec![STATUS_PIN_AUTH_INVALID]))
+            }
             TouchRequirement::AfterSuccess { operation, rp_id } => {
                 let snapshot = self.undo.snapshot().map_err(|error| {
                     soft_fido2_transport::Error::Other(format!("snapshotting credentials: {error}"))
