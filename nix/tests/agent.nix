@@ -10,12 +10,7 @@ let
     unit:
     "systemd-run --unit ${unit} --uid alice --setenv SKAGENT_LOG=trace ${package}/bin/skagent serve --socket ${socket}";
 
-  makeSkStub = pkgs.writers.writePython3Bin "make-sk-stub" { } (builtins.readFile ./make-sk-stub.py);
-  # ssh-add -x/-X read the lock passphrase through askpass when forced to.
-  lockAskpass = pkgs.writeShellApplication {
-    name = "lock-askpass";
-    text = ''printf '%s\n' "$SKAGENT_TEST_LOCK_PASSPHRASE"'';
-  };
+  common = import ./common.nix { inherit pkgs; };
 in
 pkgs.testers.runNixOSTest {
   name = "skagent-agent";
@@ -23,8 +18,8 @@ pkgs.testers.runNixOSTest {
   nodes.machine = {
     environment.systemPackages = [
       package
-      makeSkStub
-      lockAskpass
+      common.makeSkStub
+      common.testAskpass
       pkgs.openssh
       pkgs.util-linux
     ];
@@ -71,7 +66,8 @@ pkgs.testers.runNixOSTest {
     def wait_for_journal(unit: str, text: str) -> None:
         retry(lambda _last_try: text in journal(unit), timeout_seconds=30)
 
-    lock = "SSH_ASKPASS=lock-askpass SSH_ASKPASS_REQUIRE=force SKAGENT_TEST_LOCK_PASSPHRASE="
+    # ssh-add -x/-X read the lock passphrase through askpass when forced to.
+    lock = "SSH_ASKPASS=test-askpass SSH_ASKPASS_REQUIRE=force SKAGENT_TEST_ANSWER="
 
     machine.wait_for_unit("multi-user.target")
     machine.succeed("install -d -m 0700 -o alice -g users ${socketDir}")

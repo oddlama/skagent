@@ -63,9 +63,15 @@
             };
           };
 
-          packages.default = lib.addMetaAttrs {
-            mainProgram = "skagent";
-          } config.nci.outputs.skagent.packages.release;
+          packages = {
+            default = lib.addMetaAttrs {
+              mainProgram = "skagent";
+            } config.nci.outputs.skagent.packages.release;
+            # Test-only virtual security key (links AGPL-3.0 soft-fido2).
+            testkey = lib.addMetaAttrs {
+              mainProgram = "skagent-testkey";
+            } config.nci.outputs.skagent-testkey.packages.release;
+          };
 
           # Every crate contributes its test suite and its clippy run. The VM
           # tests drive the release binary with stock OpenSSH tools.
@@ -76,6 +82,10 @@
               vm-agent = import ./nix/tests/agent.nix {
                 inherit pkgs;
                 package = config.packages.default;
+              };
+              vm-testkey = import ./nix/tests/testkey.nix {
+                inherit pkgs;
+                testkey = config.packages.testkey;
               };
             };
 
