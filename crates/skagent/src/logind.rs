@@ -10,6 +10,13 @@
 //!
 //! A screen locker that does none of this needs `skagent forget` in its lock
 //! command.
+//!
+//! The signal loop must keep polling all streams: zbus blocks its socket
+//! reader when any subscription queue is full, which would also stall the
+//! reply to a method call made from inside the loop. So the only call made
+//! there (session ownership) is bounded by [`OWNER_LOOKUP_TIMEOUT`], and
+//! proxies don't cache properties (caching adds a match rule and a `GetAll`
+//! round trip per proxy).
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -19,6 +26,7 @@ use anyhow::{Context as _, Result};
 use futures_util::StreamExt as _;
 use rustix::process::geteuid;
 use zbus::message::Type as MessageType;
+use zbus::proxy::CacheProperties;
 use zbus::{
     Connection, MatchRule, Message, MessageStream, OwnedFd, OwnedObjectPath, OwnedVariant, Proxy,
 };
@@ -34,6 +42,11 @@ const SESSIONS_PATH: &str = "/org/freedesktop/login1/session";
 
 /// Pause before reconnecting after the bus or logind went away.
 const RETRY_DELAY: Duration = Duration::from_secs(30);
+
+/// Longest wait for a session's owner. Well below logind's default sleep
+/// delay (`InhibitDelayMaxSec=5`), so a slow lookup can't hold up the
+/// `PrepareForSleep` handling until the machine suspends anyway.
+const OWNER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Watches logind until the process ends.
 ///
@@ -74,7 +87,7 @@ async fn run(agent: &SkAgent, uid: u32, connected: &mut bool) -> Result<Infallib
         .await
         .context("connecting to the system D-Bus")?;
     let mut owners = owner_changes(&connection).await?;
-    let manager = Proxy::new(&connection, LOGIND, MANAGER_PATH, MANAGER_INTERFACE)
+    let manager = uncached_proxy(&connection, MANAGER_PATH.to_owned(), MANAGER_INTERFACE)
         .await
         .context("opening the logind manager")?;
     let mut inhibitor = Some(inhibit(&manager).await?);
@@ -169,6 +182,20 @@ async fn run(agent: &SkAgent, uid: u32, connected: &mut bool) -> Result<Infallib
     }
 }
 
+async fn uncached_proxy(
+    connection: &Connection,
+    path: String,
+    interface: &'static str,
+) -> zbus::Result<Proxy<'static>> {
+    zbus::proxy::Builder::<Proxy<'static>>::new(connection)
+        .destination(LOGIND)
+        .path(path)
+        .interface(interface)
+        .cache_properties(CacheProperties::No)
+        .build()
+        .await
+}
+
 async fn owner_changes(connection: &Connection) -> Result<MessageStream> {
     subscribe(
         connection,
@@ -207,28 +234,27 @@ async fn subscribe(
 }
 
 /// Whether the session that sent `message` belongs to `uid`. If that can't
-/// be found out, it counts as ours: dropping PINs once too often only costs
-/// a prompt.
+/// be found out in time, it counts as ours: dropping PINs once too often only
+/// costs a prompt.
 async fn ours(connection: &Connection, message: &Message, uid: u32) -> bool {
     let header = message.header();
     let Some(path) = header.path() else {
         return true;
     };
     let owner = async {
-        let session = Proxy::new(
-            connection,
-            LOGIND,
-            path.as_str().to_owned(),
-            SESSION_INTERFACE,
-        )
-        .await?;
+        let session =
+            uncached_proxy(connection, path.as_str().to_owned(), SESSION_INTERFACE).await?;
         let (owner, _user_path): (u32, OwnedObjectPath) = session.get_property("User").await?;
         Ok::<u32, zbus::Error>(owner)
     };
-    match owner.await {
-        Ok(owner) => owner == uid,
-        Err(error) => {
+    match tokio::time::timeout(OWNER_LOOKUP_TIMEOUT, owner).await {
+        Ok(Ok(owner)) => owner == uid,
+        Ok(Err(error)) => {
             tracing::debug!(%error, session = %path, "can't tell whose session locked, assuming ours");
+            true
+        }
+        Err(_elapsed) => {
+            tracing::warn!(session = %path, "looking up whose session locked timed out, assuming ours");
             true
         }
     }
