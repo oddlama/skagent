@@ -76,6 +76,7 @@ nix build                # release binary
 
 - The PIN and anything derived from it never get logged, `Debug`-printed or written to disk. Store secrets in `skagent_secret::SecretBuffer` (locked, guarded, zeroized, redacted `Debug`, no `Clone`), never in `String`/`Vec<u8>` longer than unavoidable, and compare them with `constant_time_eq`.
 - ssh-agent-lib logs every request at `debug` level (key handles, lock passphrases). Its `debug`/`trace` output must stay filtered no matter what log filter the user passes.
+- libfido2 writes every HID message to stderr whenever `FIDO_DEBUG` is set, whatever `fido_init` gets. `skagent_fido::ensure_debug_off` refuses device access then, and `serve` refuses to start; keep every new entry point into libfido2 behind it.
 - Fail closed: if a safety check can't be performed (peer credentials, retry counter, socket ownership), refuse the operation. If logind monitoring or the sleep delay inhibitor fails, disable caching until it recovers; uncached signing is still allowed.
 - Eviction must revoke signing tickets as well as wipe cache entries. A pending prompt or late assertion must never refill an evicted cache. Global evictions revoke every ticket; removing or expiring one identity (`Signer::forget`) revokes only that credential's tickets, so unrelated signatures keep going.
 - Every agent request locks its state through `Shared::state_now`, which removes expired identities with their PINs and bindings, and uses the returned `now` for all lookups under that lock.

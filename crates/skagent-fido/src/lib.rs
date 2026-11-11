@@ -39,6 +39,28 @@ const OPERATION_TIMEOUT_MS: i32 = 35_000;
 /// The FIDO PIN is 4 to 63 bytes of UTF-8 (CTAP 2.1, `authenticatorClientPIN`).
 pub const PIN_MAX_BYTES: usize = 63;
 
+/// Environment variable that turns on libfido2's debug output on stderr,
+/// whatever flags `fido_init` gets (see `fido_init(3)`).
+pub const DEBUG_VARIABLE: &str = "FIDO_DEBUG";
+
+/// Refuses to use libfido2 while [`DEBUG_VARIABLE`] is set. Its debug
+/// output dumps every message to and from the security key, key handles
+/// included, and would bypass the agent's log redaction. Logging also uses
+/// global state that the concurrent cancel in `raw.rs` assumes untouched.
+///
+/// # Errors
+///
+/// Returns an error if the variable is set, even to an empty value.
+pub fn ensure_debug_off() -> Result<()> {
+    if std::env::var_os(DEBUG_VARIABLE).is_some() {
+        bail!(
+            "{DEBUG_VARIABLE} is set: libfido2 would write every message exchanged with \
+             security keys, key handles included, to stderr; unset it"
+        );
+    }
+    Ok(())
+}
+
 /// The [`ErrorKind`] of the libfido2 failure inside `error`, if there is one.
 #[must_use]
 pub fn error_kind(error: &anyhow::Error) -> Option<ErrorKind> {
@@ -63,8 +85,10 @@ pub struct DeviceInfo {
 ///
 /// # Errors
 ///
-/// Returns an error if libfido2 can't enumerate devices.
+/// Returns an error if libfido2 can't enumerate devices, or if
+/// [`DEBUG_VARIABLE`] is set.
 pub fn hid_devices() -> Result<Vec<DeviceInfo>> {
+    ensure_debug_off()?;
     let listed = raw::list_devices(MAX_DEVICES).map_err(anyhow::Error::new)?;
     Ok(listed
         .into_iter()
@@ -121,8 +145,10 @@ impl Device {
     ///
     /// # Errors
     ///
-    /// Returns an error if the device can't be opened or doesn't speak CTAP2.
+    /// Returns an error if the device can't be opened or doesn't speak CTAP2,
+    /// or if [`DEBUG_VARIABLE`] is set.
     pub fn open(path: &str) -> Result<Self> {
+        ensure_debug_off()?;
         let c_path = CString::new(path)
             .with_context(|| format!("device path {path:?} contains a NUL byte"))?;
         let mut inner =

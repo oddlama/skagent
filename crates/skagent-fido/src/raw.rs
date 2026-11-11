@@ -149,7 +149,9 @@ impl CancelSlot {
         // io, io_handle, transport, timeout_ms), and this crate calls none of
         // those after `Device::open` returned. It then writes a single HID
         // report with write(2); concurrent read(2)/write(2) on one hidraw fd
-        // are fine. Debug logging, which uses global state, is never enabled.
+        // are fine. Debug logging, which uses global state, is never enabled:
+        // `fido_init` gets no flags, and the safe wrapper refuses to touch
+        // libfido2 while FIDO_DEBUG is set (`ensure_debug_off`).
         check("fido_dev_cancel", unsafe {
             sys::fido_dev_cancel(raw.as_ptr())
         })

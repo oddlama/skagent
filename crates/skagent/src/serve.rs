@@ -76,13 +76,15 @@ pub fn activated_path(listener: &std::os::unix::net::UnixListener) -> Result<Pat
 ///
 /// # Errors
 ///
-/// Returns an error if the socket path can't be resolved or bound, or
+/// Returns an error if `FIDO_DEBUG` is set, the socket path can't be
+/// resolved or bound, or
 /// `--socket` names another socket than the one systemd passed, the signal
 /// handlers can't be installed, or serving fails.
 pub async fn run(
     args: ServeArgs,
     activated: Option<std::os::unix::net::UnixListener>,
 ) -> Result<()> {
+    skagent_fido::ensure_debug_off().context("refusing to serve")?;
     // Before any secret exists: the first buffer fixes where all of them live.
     if args.secret_memory == SecretMemory::MemfdSecret {
         skagent_secret::use_secretmem().context("--secret-memory memfd-secret")?;
