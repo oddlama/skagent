@@ -34,6 +34,8 @@ use ssh_agent_lib::ssh_encoding::{self, Decode as _, Reader};
 use ssh_agent_lib::ssh_key::public::KeyData;
 use ssh_agent_lib::ssh_key::{self, Algorithm, HashAlg, Signature};
 
+use crate::display::{self, MAX_NAME_CHARS};
+
 /// Agent extension that binds a connection to an SSH session.
 pub const SESSION_BIND_EXTENSION: &str = "session-bind@openssh.com";
 
@@ -52,8 +54,6 @@ const MAX_USER_PATTERN_LEN: usize = 256;
 const USERAUTH_REQUEST: u8 = 50;
 /// Applications that aren't a web origin.
 const SSH_APPLICATION_PREFIX: &str = "ssh:";
-/// Longest user, host or namespace shown in a prompt.
-const MAX_SHOWN_CHARS: usize = 64;
 
 /// One verified hop: a host key that signed the session ID.
 #[derive(Debug, Clone)]
@@ -527,8 +527,8 @@ pub fn parse_sshsig_request(data: &[u8]) -> Option<String> {
 }
 
 /// What a signature request is for, as shown in PIN prompts and touch
-/// notifications. User, host and namespace names are sanitized for display:
-/// on a forwarded agent they come from another machine.
+/// notifications. User, host and namespace names are sanitized for display
+/// ([`display::shown`]): on a forwarded agent they come from another machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Purpose {
     /// Logging in somewhere over SSH.
@@ -689,23 +689,9 @@ fn fingerprint(key: &KeyData) -> String {
     key.fingerprint(HashAlg::Sha256).to_string()
 }
 
-/// `text` safe to show: control characters replaced, length capped.
+/// `text` from the signed data or a constraint, safe to show.
 fn shown(text: &str) -> String {
-    let mut shown: String = text
-        .chars()
-        .take(MAX_SHOWN_CHARS)
-        .map(|character| {
-            if character.is_control() {
-                '?'
-            } else {
-                character
-            }
-        })
-        .collect();
-    if text.chars().nth(MAX_SHOWN_CHARS).is_some() {
-        shown.push('…');
-    }
-    shown
+    display::shown(text, MAX_NAME_CHARS)
 }
 
 /// The fields of a `session-bind@openssh.com` request, nothing after them.

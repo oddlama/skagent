@@ -18,6 +18,7 @@ use ssh_agent_lib::ssh_key::public::{Ed25519PublicKey, KeyData, SkEd25519};
 use crate::destination::{
     DestinationConstraint, RESTRICT_DESTINATION_CONSTRAINT, parse_destination_constraints,
 };
+use crate::display::{self, MAX_NAME_CHARS};
 use crate::signer::{SK_USER_PRESENCE_REQUIRED, SK_USER_VERIFICATION_REQUIRED};
 
 /// Extension constraint `ssh-add` attaches to sk keys, naming the security
@@ -72,8 +73,8 @@ pub fn evaluate_constraints(constraints: &[KeyConstraint]) -> Result<AcceptedCon
                 provider_seen = true;
                 if details.as_ref() != BUILT_IN_SK_PROVIDER {
                     bail!(
-                        "security key provider {:?} is not supported, only the built-in one",
-                        String::from_utf8_lossy(details.as_ref())
+                        "security key provider \"{}\" is not supported, only the built-in one",
+                        display::shown(&String::from_utf8_lossy(details.as_ref()), MAX_NAME_CHARS)
                     );
                 }
             }
@@ -89,7 +90,10 @@ pub fn evaluate_constraints(constraints: &[KeyConstraint]) -> Result<AcceptedCon
                 }
             }
             KeyConstraint::Extension(Extension { name, .. }) => {
-                bail!("key constraint {name} is not supported");
+                bail!(
+                    "key constraint \"{}\" is not supported",
+                    display::shown(name, MAX_NAME_CHARS)
+                );
             }
         }
     }

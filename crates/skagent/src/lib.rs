@@ -12,6 +12,7 @@ pub mod cli;
 pub mod client;
 pub mod destination;
 pub mod device;
+pub mod display;
 pub mod frames;
 pub mod hardening;
 pub mod identities;

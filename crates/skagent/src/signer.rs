@@ -17,6 +17,7 @@ use tokio::sync::{Mutex, watch};
 
 use crate::cancel::DeviceInterrupt;
 use crate::device::DeviceIdentity;
+use crate::display::{self, MAX_COMMENT_CHARS};
 use crate::identities::SkIdentity;
 use crate::loading::PreparedLoad;
 use crate::notify::Notifier;
@@ -508,7 +509,7 @@ impl Signer {
         let touch = self.notifier.as_ref().map(|notifier| {
             notifier.show(
                 "Touch your security key",
-                &format!("{}: {purpose}", identity.comment()),
+                &format!("{}: {purpose}", shown_comment(identity)),
             )
         });
         let (interrupt, finished) = DeviceInterrupt::new(routed.device.canceller());
@@ -691,9 +692,16 @@ fn credential_key(identity: &SkIdentity) -> CredentialKey {
     CredentialKey::new(identity.application(), identity.key_handle())
 }
 
-/// The key as the user knows it: comment and fingerprint.
-fn describe(identity: &SkIdentity) -> String {
-    format!("{} ({})", identity.comment(), identity.fingerprint())
+/// The key as the user knows it, for prompts, notifications and logs:
+/// comment and fingerprint. A forwarded agent may have added the key, so the
+/// comment is made safe to show ([`display::shown`]).
+#[must_use]
+pub fn describe(identity: &SkIdentity) -> String {
+    format!("{} ({})", shown_comment(identity), identity.fingerprint())
+}
+
+fn shown_comment(identity: &SkIdentity) -> String {
+    display::shown(identity.comment(), MAX_COMMENT_CHARS)
 }
 
 struct OwnedAssertRequest {

@@ -70,7 +70,7 @@ nix build                # release binary
 
 - `destination.rs` follows OpenSSH's ssh-agent rules for `session-bind@openssh.com` and `restrict-destination-v00@openssh.com`; check changes against `ssh-agent.c` (`identity_permitted`, `process_ext_session_bind`, `process_sign_request2`). Decode those messages with the strict decoders there, not ssh-agent-lib's types: they drop reserved fields and don't check trailing data, which would accept constraints skagent doesn't understand.
 - Anything skagent can't decode must only ever narrow where a key may be used: a failed bind hides constrained keys, unknown host key types and CA entries never match.
-- Text from signed data (users, namespaces) is shown to the user; pass it through the sanitizer (`Purpose`), it can come from another machine.
+- Text from signed data (users, namespaces) and key comments is shown to the user; pass it through `display::shown` (`Purpose`, `signer::describe` do), it can come from another machine.
 
 ## secrets
 
