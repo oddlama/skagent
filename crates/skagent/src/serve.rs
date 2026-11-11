@@ -9,7 +9,7 @@ use anyhow::{Context as _, Result};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
 use crate::agent::SkAgent;
-use crate::cli::{ServeArgs, SocketArgs};
+use crate::cli::{SecretMemory, ServeArgs, SocketArgs};
 use crate::logind;
 use crate::notify::Notifier;
 use crate::pin_cache::CachePolicy;
@@ -52,6 +52,13 @@ pub fn pin_prompt(args: &ServeArgs) -> PinPrompt {
 /// Returns an error if the socket path can't be resolved or bound, the signal
 /// handlers can't be installed, or serving fails.
 pub async fn run(args: ServeArgs) -> Result<()> {
+    // Before any secret exists: the first buffer fixes where all of them live.
+    if args.secret_memory == SecretMemory::MemfdSecret {
+        skagent_secret::use_secretmem().context("--secret-memory memfd-secret")?;
+        tracing::info!(
+            "keeping secrets in memfd_secret memory; the system can't hibernate while the agent holds any"
+        );
+    }
     let prompt = pin_prompt(&args);
     let policy = CachePolicy {
         lifetime: args.pin_lifetime,

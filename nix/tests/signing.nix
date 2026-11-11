@@ -404,6 +404,15 @@ pkgs.testers.runNixOSTest {
         expect_prompt()
         stop_agent("skagent-policy")
 
+    with subtest("with memfd_secret, the cached PIN lives outside the kernel's direct map"):
+        start_agent("skagent-secretmem", askpass_agent, "--secret-memory memfd-secret")
+        expect_prompt()
+        expect_cached()
+        pid = machine.succeed("systemctl show skagent-secretmem -p MainPID --value").strip()
+        maps = machine.succeed(f"cat /proc/{pid}/maps")
+        assert "secretmem" in maps, "no memfd_secret memory in the agent"
+        stop_agent("skagent-secretmem")
+
     with subtest("pinentry asks, shows errors, and its PIN is cached too"):
         start_agent("skagent-pinentry", "--pinentry /run/current-system/sw/bin/test-pinentry")
         expect_prompt()
@@ -440,7 +449,7 @@ pkgs.testers.runNixOSTest {
         assert prompts() == before + 1, "the cached PIN went to a replugged device"
 
     with subtest("PINs never reach the journal"):
-        for unit in ["skagent", "skagent-short", "skagent-idle", "skagent-no-cache", "skagent-policy", "skagent-pinentry"]:
+        for unit in ["skagent", "skagent-short", "skagent-idle", "skagent-no-cache", "skagent-policy", "skagent-secretmem", "skagent-pinentry"]:
             assert "${pin}" not in journal(unit), f"PIN in the journal of {unit}"
   '';
 }

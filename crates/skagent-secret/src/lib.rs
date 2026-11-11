@@ -20,6 +20,13 @@
 //!
 //! Allocation fails closed. If any step fails, e.g. because `RLIMIT_MEMLOCK`
 //! is exhausted, no buffer is returned.
+//!
+//! [`use_secretmem`] switches a process to `memfd_secret(2)` pages instead:
+//! they are also removed from the kernel's direct map, so neither the kernel
+//! nor a kernel exploit reading through it sees the secret. Forked children
+//! don't get the pages at all (`MADV_DONTFORK`; `MADV_WIPEONFORK` needs
+//! private memory). The catch: the kernel refuses to hibernate while any
+//! such memory exists, hence opt-in.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 // Raw memory mappings need `unsafe`. It is confined to `mapping.rs`, and
 // every block there carries a SAFETY comment.
@@ -29,11 +36,51 @@ mod mapping;
 
 use std::fmt;
 use std::ops::Range;
+use std::sync::OnceLock;
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail, ensure};
 use subtle::ConstantTimeEq as _;
 
 use crate::mapping::LockedPages;
+
+/// Where a process keeps its secret buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    /// Anonymous memory: locked, not dumped, wiped in forked children.
+    Locked,
+    /// `memfd_secret(2)` memory: also gone from the kernel's direct map,
+    /// absent in forked children; blocks hibernation while any exists.
+    Secretmem,
+}
+
+static BACKEND: OnceLock<Backend> = OnceLock::new();
+
+/// The backend of this process. Fixed by the first buffer, or by
+/// [`use_secretmem`] before it.
+#[must_use]
+pub fn backend() -> Backend {
+    *BACKEND.get_or_init(|| Backend::Locked)
+}
+
+/// Puts every secret buffer of this process into `memfd_secret(2)` memory.
+/// Call it before the first buffer is allocated; calling it again is fine.
+///
+/// # Errors
+///
+/// Returns an error if the kernel doesn't provide such memory (probed with a
+/// test allocation), or if buffers were allocated in locked memory already.
+pub fn use_secretmem() -> Result<()> {
+    drop(
+        LockedPages::allocate(1, Backend::Secretmem)
+            .context("memfd_secret memory isn't available on this system")?,
+    );
+    let chosen = *BACKEND.get_or_init(|| Backend::Secretmem);
+    ensure!(
+        chosen == Backend::Secretmem,
+        "secret buffers were already allocated in locked memory; choose memfd_secret before the first one"
+    );
+    Ok(())
+}
 
 /// Fixed-capacity byte buffer for a secret, backed by locked, guarded pages.
 ///
@@ -58,7 +105,7 @@ impl SecretBuffer {
             bail!("a secret buffer needs a capacity of at least one byte");
         }
         Ok(Self {
-            pages: LockedPages::allocate(capacity)?,
+            pages: LockedPages::allocate(capacity, backend())?,
             capacity,
             len: 0,
         })

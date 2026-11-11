@@ -1804,6 +1804,7 @@ name = "skagent-secret"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "libc",
  "rustix",
  "subtle",
  "zeroize",

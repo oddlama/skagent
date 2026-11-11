@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::pin_cache::{KeyPinPolicy, KeySelector};
 
@@ -79,10 +79,26 @@ pub struct ServeArgs {
     #[arg(long = "pin-policy", value_name = "RULE", value_parser = parse_pin_policy)]
     pub pin_policies: Vec<KeyPinPolicy>,
 
+    /// Where cached PINs and other secrets live. `memfd-secret` uses
+    /// `memfd_secret(2)` memory, which is also removed from the kernel's direct
+    /// map; the system can't hibernate while any exists.
+    #[arg(long, value_enum, default_value_t = SecretMemory::Locked)]
+    pub secret_memory: SecretMemory,
+
     /// Don't show a desktop notification while a security key waits for a
     /// touch (`org.freedesktop.Notifications` on the session bus).
     #[arg(long)]
     pub no_touch_notification: bool,
+}
+
+/// Where secrets live (`--secret-memory`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SecretMemory {
+    /// Locked anonymous memory, not dumped, wiped in forked children.
+    Locked,
+    /// `memfd_secret(2)` memory.
+    #[value(name = "memfd-secret")]
+    MemfdSecret,
 }
 
 /// Parses a `--pin-policy` rule: comma-separated `name=value` settings.

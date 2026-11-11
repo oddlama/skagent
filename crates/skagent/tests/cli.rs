@@ -163,3 +163,15 @@ fn pin_policies_need_one_selector_and_an_override() -> Result<()> {
     ensure!(args.pin_policies.len() == 2);
     Ok(())
 }
+
+#[test]
+fn secret_memory_is_locked_unless_memfd_secret_is_asked_for() -> Result<()> {
+    use skagent::cli::SecretMemory;
+
+    ensure!(serve(&[])?.secret_memory == SecretMemory::Locked);
+    ensure!(
+        serve(&["--secret-memory", "memfd-secret"])?.secret_memory == SecretMemory::MemfdSecret
+    );
+    ensure!(serve(&["--secret-memory", "swap"]).is_err());
+    Ok(())
+}
