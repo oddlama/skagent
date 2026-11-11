@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow};
 use skagent::agent::SkAgent;
-use skagent::serve::serve_until;
+use skagent::serve::{Listening, serve_until};
 use ssh_agent_lib::client::Client;
 use ssh_agent_lib::proto::{AddIdentity, PrivateCredential};
 use ssh_agent_lib::ssh_key::private::{
@@ -36,7 +36,7 @@ impl RunningAgent {
         let (shutdown, shutdown_received) = oneshot::channel::<()>();
         let path = socket.to_owned();
         let task = tokio::spawn(async move {
-            serve_until(&path, SkAgent::default(), async move {
+            serve_until(Listening::Bind(path), SkAgent::default(), async move {
                 shutdown_received
                     .await
                     .context("shutdown sender dropped before signalling")

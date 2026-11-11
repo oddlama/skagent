@@ -1,0 +1,16 @@
+[package]
+name = "skagent-fds"
+description = "File descriptors crossing exec: the socket systemd passes in"
+edition.workspace = true
+publish.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rustix = { workspace = true, features = ["net"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

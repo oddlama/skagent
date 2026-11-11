@@ -34,12 +34,20 @@ fn run(cli: Cli, color: bool) -> Result<()> {
     hardening::harden_process()?;
     logging::init(&cli.log, color)?;
 
+    // Before the runtime opens descriptors of its own, while the passed
+    // socket is the only unowned one.
+    let activated = match &cli.command {
+        Command::Serve(_) => {
+            skagent_fds::activated_listener().context("taking over the socket systemd passed")?
+        }
+        Command::Forget(_) | Command::Load(_) => None,
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("starting the tokio runtime")?;
     match cli.command {
-        Command::Serve(args) => runtime.block_on(serve::run(args)),
+        Command::Serve(args) => runtime.block_on(serve::run(args, activated)),
         Command::Forget(args) => runtime.block_on(client::forget_pins(&serve::socket_path(args)?)),
         Command::Load(args) => {
             let count = runtime.block_on(client::load_keys(&serve::socket_path(args)?))?;

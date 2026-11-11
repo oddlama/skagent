@@ -191,6 +191,10 @@ impl Askpass {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
+            // systemd's socket activation variables are the agent's.
+            .env_remove("LISTEN_PID")
+            .env_remove("LISTEN_FDS")
+            .env_remove("LISTEN_FDNAMES")
             // A client that disconnects drops the request, and with it the prompt.
             .kill_on_drop(true)
             .spawn()

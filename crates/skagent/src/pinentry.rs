@@ -65,6 +65,10 @@ impl Pinentry {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            // systemd's socket activation variables are the agent's.
+            .env_remove("LISTEN_PID")
+            .env_remove("LISTEN_FDS")
+            .env_remove("LISTEN_FDNAMES")
             // A client that disconnects drops the request, and with it the dialog.
             .kill_on_drop(true)
             .spawn()

@@ -132,6 +132,7 @@
                 shippedCrates = [
                   "skagent"
                   "skagent-fido"
+                  "skagent-fds"
                   "skagent-secret"
                 ];
                 forbiddenPrefixes = [

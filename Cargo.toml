@@ -17,6 +17,7 @@ colored = "3"
 futures-util = { version = "0.3", default-features = false }
 libc = "0.2"
 rustix = { version = "1", features = ["fs", "mm", "param", "process"] }
+skagent-fds = { path = "crates/skagent-fds" }
 skagent-fido = { path = "crates/skagent-fido" }
 skagent-secret = { path = "crates/skagent-secret" }
 sha2 = "0.10"

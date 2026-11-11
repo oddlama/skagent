@@ -1779,6 +1779,7 @@ dependencies = [
  "rustix",
  "sha2 0.10.9",
  "signature 2.2.0",
+ "skagent-fds",
  "skagent-fido",
  "skagent-secret",
  "ssh-agent-lib",
@@ -1788,6 +1789,15 @@ dependencies = [
  "tracing-subscriber",
  "zbus",
  "zeroize",
+]
+
+[[package]]
+name = "skagent-fds"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rustix",
+ "tempfile",
 ]
 
 [[package]]

@@ -20,6 +20,7 @@ colored.workspace = true
 futures-util.workspace = true
 rustix.workspace = true
 sha2.workspace = true
+skagent-fds.workspace = true
 skagent-fido.workspace = true
 skagent-secret.workspace = true
 ssh-agent-lib.workspace = true

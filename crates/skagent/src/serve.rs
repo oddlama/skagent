@@ -45,13 +45,44 @@ pub fn pin_prompt(args: &ServeArgs) -> PinPrompt {
     }
 }
 
-/// Runs `skagent serve` until SIGINT or SIGTERM.
+/// Where the agent gets its socket.
+#[derive(Debug)]
+pub enum Listening {
+    /// Bind a socket at this path; it is removed on shutdown.
+    Bind(PathBuf),
+    /// The socket systemd passed (socket activation). It stays on shutdown:
+    /// systemd owns it and starts the agent again on the next connection.
+    Activated(std::os::unix::net::UnixListener),
+}
+
+/// Path of a socket systemd passed.
 ///
 /// # Errors
 ///
-/// Returns an error if the socket path can't be resolved or bound, the signal
+/// Returns an error if the socket has no path (abstract or unnamed), which
+/// `SSH_AUTH_SOCK` couldn't point at.
+pub fn activated_path(listener: &std::os::unix::net::UnixListener) -> Result<PathBuf> {
+    let address = listener
+        .local_addr()
+        .context("reading the address of the socket systemd passed")?;
+    address
+        .as_pathname()
+        .map(Path::to_path_buf)
+        .context("the socket systemd passed has no path; use ListenStream=%t/skagent.sock")
+}
+
+/// Runs `skagent serve` until SIGINT or SIGTERM, on `activated` if systemd
+/// passed a socket, else on one it binds.
+///
+/// # Errors
+///
+/// Returns an error if the socket path can't be resolved or bound, or
+/// `--socket` names another socket than the one systemd passed, the signal
 /// handlers can't be installed, or serving fails.
-pub async fn run(args: ServeArgs) -> Result<()> {
+pub async fn run(
+    args: ServeArgs,
+    activated: Option<std::os::unix::net::UnixListener>,
+) -> Result<()> {
     // Before any secret exists: the first buffer fixes where all of them live.
     if args.secret_memory == SecretMemory::MemfdSecret {
         skagent_secret::use_secretmem().context("--secret-memory memfd-secret")?;
@@ -81,7 +112,21 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     } else {
         tracing::info!("PIN caching disabled, asking for every signature");
     }
-    let socket_path = socket_path(args.socket)?;
+    let listening = match activated {
+        Some(listener) => {
+            let passed = activated_path(&listener)?;
+            if let Some(given) = &args.socket.socket {
+                anyhow::ensure!(
+                    *given == passed,
+                    "systemd passed the socket {}, but --socket or SKAGENT_SOCKET names {}",
+                    passed.display(),
+                    given.display()
+                );
+            }
+            Listening::Activated(listener)
+        }
+        None => Listening::Bind(socket_path(args.socket)?),
+    };
     for rule in &args.pin_policies {
         tracing::info!(?rule, "caching the PINs of matching keys differently");
     }
@@ -95,29 +140,41 @@ pub async fn run(args: ServeArgs) -> Result<()> {
     // Installed before the socket exists, so a signal can't kill the process
     // between binding and serving and leave a stale socket behind.
     let signals = ShutdownSignals::install()?;
-    serve_until(&socket_path, agent, signals.wait()).await
+    serve_until(listening, agent, signals.wait()).await
 }
 
-/// Serves `agent` on `socket_path` until `shutdown` completes, then drops all
-/// cached PINs and removes the socket file.
+/// Serves `agent` until `shutdown` completes, then drops all cached PINs and
+/// removes the socket file if the agent bound it.
 ///
 /// # Errors
 ///
 /// Returns an error if binding or serving fails, if `shutdown` resolves to an
 /// error, or if the socket file can't be removed afterwards.
-pub async fn serve_until<F>(socket_path: &Path, agent: SkAgent, shutdown: F) -> Result<()>
+pub async fn serve_until<F>(listening: Listening, agent: SkAgent, shutdown: F) -> Result<()>
 where
     F: Future<Output = Result<()>>,
 {
     agent.caching_pending().await;
-    let (listener, bound) = socket::bind(socket_path)?;
+    let (listener, socket_path, bound) = match listening {
+        Listening::Bind(path) => {
+            let (listener, bound) = socket::bind(&path)?;
+            (listener, path, Some(bound))
+        }
+        Listening::Activated(listener) => {
+            let path = activated_path(&listener)?;
+            let listener = tokio::net::UnixListener::from_std(listener)
+                .context("serving the socket systemd passed")?;
+            (listener, path, None)
+        }
+    };
     tracing::info!(
-        socket = %bound.path().display(),
+        socket = %socket_path.display(),
+        activated = bound.is_none(),
         "agent listening, point SSH_AUTH_SOCK at the socket"
     );
 
     let served = tokio::select! {
-        result = ssh_agent_lib::agent::listen(PeerCheckedListener::new(listener, bound.path()), agent.clone()) => {
+        result = ssh_agent_lib::agent::listen(PeerCheckedListener::new(listener, &socket_path), agent.clone()) => {
             result.with_context(|| {
                 format!("serving the ssh-agent protocol on {}", socket_path.display())
             })
@@ -128,7 +185,7 @@ where
     };
     agent.forget_pins("shutdown").await;
 
-    let removed = bound.remove();
+    let removed = bound.as_ref().map_or(Ok(()), socket::BoundSocket::remove);
     match (served, removed) {
         (Ok(()), removed) => removed,
         (Err(error), Ok(())) => Err(error),
