@@ -24,6 +24,7 @@ soft-fido2 = { version = "0.17", default-features = false, features = ["std"] }
 soft-fido2-transport = "0.17"
 ssh-agent-lib = "0.6"
 subtle = "2"
+signature = "2.2"
 tempfile = "3"
 tokio = { version = "1", features = [
   "macros",

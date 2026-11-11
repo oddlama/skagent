@@ -40,7 +40,8 @@ fn what_ssh_add_sends_for_sk_keys_is_accepted() -> Result<()> {
     ensure!(
         accepted
             == AcceptedConstraints {
-                lifetime: Some(Duration::from_secs(3600))
+                lifetime: Some(Duration::from_secs(3600)),
+                destinations: Vec::new(),
             }
     );
     ensure!(evaluate_constraints(&[])? == AcceptedConstraints::default());
@@ -71,7 +72,7 @@ fn constraints_that_cannot_be_honored_refuse_the_key() {
             ],
         ),
         (
-            "destination constraint",
+            "destination restriction without destinations",
             vec![extension("restrict-destination-v00@openssh.com", b"")],
         ),
         (

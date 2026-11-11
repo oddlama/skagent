@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use skagent_secret::SecretBuffer;
 use ssh_agent_lib::agent::{Agent, Session};
 use ssh_agent_lib::error::AgentError;
+use ssh_agent_lib::proto::extension::QueryResponse;
 use ssh_agent_lib::proto::{
     AddIdentity, AddIdentityConstrained, Extension, Identity, PublicCredential, RemoveIdentity,
     SignRequest, Unparsed,
@@ -31,7 +32,8 @@ use tokio::sync::{Mutex, MutexGuard};
 use zeroize::Zeroize as _;
 
 use crate::cancel::Hangup;
-use crate::identities::{IdentityStore, SkIdentity, evaluate_constraints};
+use crate::destination::{self, Bound, SESSION_BIND_EXTENSION, SessionBindings};
+use crate::identities::{AcceptedConstraints, IdentityStore, SkIdentity, evaluate_constraints};
 use crate::signer::Signer;
 use crate::socket::PeerCheckedListener;
 
@@ -42,6 +44,17 @@ pub const FORGET_PINS_EXTENSION: &str = "forget-pins@skagent";
 /// No-argument request to load one selected device's resident SSH keys.
 /// The reply carries the number loaded as a big-endian u32, never a PIN.
 pub const LOAD_KEYS_EXTENSION: &str = "load-resident-keys@skagent";
+
+/// Asks the agent which extensions it supports.
+const QUERY_EXTENSION: &str = "query";
+
+/// What `query` answers.
+const SUPPORTED_EXTENSIONS: [&str; 4] = [
+    QUERY_EXTENSION,
+    SESSION_BIND_EXTENSION,
+    FORGET_PINS_EXTENSION,
+    LOAD_KEYS_EXTENSION,
+];
 
 /// Extra wait per consecutive failed unlock attempt.
 pub const UNLOCK_DELAY_STEP: Duration = Duration::from_millis(100);
@@ -144,6 +157,7 @@ impl Agent<PeerCheckedListener> for SkAgent {
         AgentSession {
             shared: Arc::clone(&self.shared),
             hangup,
+            bindings: SessionBindings::default(),
         }
     }
 }
@@ -154,6 +168,8 @@ pub struct AgentSession {
     shared: Arc<Shared>,
     /// Lets long requests (signing, loading) stop when the client is gone.
     hangup: Option<Hangup>,
+    /// The SSH sessions ssh bound this connection to (`session-bind`).
+    bindings: SessionBindings,
 }
 
 /// Logs why a request is refused and turns it into a protocol `FAILURE`.
@@ -163,7 +179,11 @@ fn refuse(request: &str, reason: &anyhow::Error) -> AgentError {
 }
 
 impl AgentSession {
-    async fn add(&self, identity: AddIdentity, lifetime: Option<Duration>) -> Result<()> {
+    async fn add(&self, identity: AddIdentity, constraints: AcceptedConstraints) -> Result<()> {
+        let AcceptedConstraints {
+            lifetime,
+            destinations,
+        } = constraints;
         let (mut state, now) = self.shared.state_now().await;
         let expires_at = lifetime
             .map(|lifetime| {
@@ -171,21 +191,50 @@ impl AgentSession {
                     .ok_or_else(|| anyhow!("key lifetime of {} s is too large", lifetime.as_secs()))
             })
             .transpose()?;
-        let identity = SkIdentity::from_credential(identity.credential, expires_at)?;
+        let identity = SkIdentity::from_credential(identity.credential, expires_at)?
+            .with_destinations(destinations);
 
         if state.lock.is_some() {
             bail!("the agent is locked");
         }
+        // Like OpenSSH: a key this connection can't see can't be replaced
+        // through it either, e.g. to drop its destination constraints.
+        if let Some(existing) = state.identities.find(&identity.key_data(), now) {
+            self.visible(existing)?;
+        }
         let (fingerprint, comment) = (identity.fingerprint(), identity.comment().to_owned());
+        let destination_constraints = identity.destinations().len();
+        let unknown_host_keys: usize = identity
+            .destinations()
+            .iter()
+            .map(destination::DestinationConstraint::skipped_host_keys)
+            .sum();
         let replaced = state.identities.add(identity);
         tracing::info!(
             %fingerprint,
             %comment,
             lifetime_seconds = lifetime.map(|lifetime| lifetime.as_secs()),
+            destination_constraints,
             replaced,
             "added key"
         );
+        if unknown_host_keys > 0 {
+            tracing::info!(
+                %fingerprint,
+                unknown_host_keys,
+                "left host keys of types skagent doesn't know out of the key's destination constraints; \
+                 sessions to hosts with only such keys can't use it"
+            );
+        }
         Ok(())
+    }
+
+    /// Whether `identity` exists for this connection: its destination
+    /// constraints allow the hops the connection is bound to.
+    fn visible(&self, identity: &SkIdentity) -> Result<()> {
+        destination::permitted(identity.destinations(), &self.bindings, None)
+            .map(|_| ())
+            .context("the key is not in the agent (as seen from this connection)")
     }
 
     async fn remove(&self, credential: &PublicCredential) -> Result<()> {
@@ -196,6 +245,11 @@ impl AgentSession {
         if state.lock.is_some() {
             bail!("the agent is locked");
         }
+        let existing = state
+            .identities
+            .find(key, now)
+            .ok_or_else(|| anyhow!("the key is not in the agent"))?;
+        self.visible(existing)?;
         let removed = state
             .identities
             .remove(key, now)
@@ -229,16 +283,27 @@ impl AgentSession {
             let ticket = self.shared.signer.ticket_for(&identity).await;
             (identity, ticket)
         };
+        // Destination constraints and the websafe rule, before the device.
+        let purpose = destination::authorize_signature(
+            &identity.key_data(),
+            identity.application(),
+            identity.destinations(),
+            &self.bindings,
+            &request.data,
+        )?;
         // Only the device work is cut short when the client leaves; finding
         // the identity above (which reaps expired ones) always completes.
         let signature = Hangup::unless_closed(
             self.hangup.as_ref(),
-            self.shared.signer.sign(&identity, &request.data, ticket),
+            self.shared
+                .signer
+                .sign(&identity, &request.data, ticket, &purpose.to_string()),
         )
         .await?;
         tracing::info!(
             fingerprint = %identity.fingerprint(),
             comment = %identity.comment(),
+            %purpose,
             "signed"
         );
         Ok(signature)
@@ -248,6 +313,12 @@ impl AgentSession {
         ensure!(
             details.is_empty(),
             "resident loading takes no extension arguments"
+        );
+        // Through a forwarded agent, another machine could make a PIN prompt
+        // pop up here; only `skagent load` on this machine may.
+        ensure!(
+            !self.bindings.is_remote(),
+            "resident keys are only loaded on request from this machine, not through a forwarded agent"
         );
         let ticket = {
             let state = self.shared.state.lock().await;
@@ -351,6 +422,7 @@ impl Session for AgentSession {
             .identities
             .identities(now)
             .iter()
+            .filter(|identity| self.visible(identity).is_ok())
             .map(SkIdentity::identity)
             .collect())
     }
@@ -362,7 +434,7 @@ impl Session for AgentSession {
     }
 
     async fn add_identity(&mut self, identity: AddIdentity) -> Result<(), AgentError> {
-        self.add(identity, None)
+        self.add(identity, AcceptedConstraints::default())
             .await
             .map_err(|reason| refuse("adding a key", &reason))
     }
@@ -372,7 +444,7 @@ impl Session for AgentSession {
         request: AddIdentityConstrained,
     ) -> Result<(), AgentError> {
         let added = match evaluate_constraints(&request.constraints) {
-            Ok(accepted) => self.add(request.identity, accepted.lifetime).await,
+            Ok(accepted) => self.add(request.identity, accepted).await,
             Err(reason) => Err(reason),
         };
         added.map_err(|reason| refuse("adding a key", &reason))
@@ -397,6 +469,39 @@ impl Session for AgentSession {
     }
 
     async fn extension(&mut self, extension: Extension) -> Result<Option<Extension>, AgentError> {
+        // Processed while locked too, like OpenSSH: binding a new forwarded
+        // connection must work before the agent is unlocked.
+        if extension.name == SESSION_BIND_EXTENSION {
+            return match self.bindings.bind(extension.details.as_ref()) {
+                Ok(Bound::New { forwarding }) => {
+                    tracing::debug!(
+                        hops = self.bindings.len(),
+                        forwarding,
+                        "bound the connection to an SSH session"
+                    );
+                    Ok(None)
+                }
+                Ok(Bound::AlreadyBound) => Ok(None),
+                Err(reason) => {
+                    // Destination-constrained keys stay off this connection.
+                    tracing::warn!(
+                        reason = %format!("{reason:#}"),
+                        "refused to bind a connection to its SSH session"
+                    );
+                    Err(AgentError::ExtensionFailure)
+                }
+            };
+        }
+        if extension.name == QUERY_EXTENSION {
+            return Extension::new_message(QueryResponse {
+                extensions: SUPPORTED_EXTENSIONS
+                    .iter()
+                    .map(|&name| name.to_owned())
+                    .collect(),
+            })
+            .map(Some)
+            .map_err(|error| refuse("answering a query", &anyhow!("{error}")));
+        }
         if extension.name == FORGET_PINS_EXTENSION {
             let forgotten = self.shared.signer.forget_all().await;
             tracing::info!(forgotten, reason = "forget request", "dropped cached PINs");
@@ -409,8 +514,6 @@ impl Session for AgentSession {
                 .map(Some)
                 .map_err(|reason| refuse("loading resident keys", &reason));
         }
-        // ssh sends session-bind@openssh.com on every connection; not
-        // implemented yet, so not worth a warning each time.
         tracing::debug!(name = %extension.name, "unsupported extension");
         Err(AgentError::Failure)
     }

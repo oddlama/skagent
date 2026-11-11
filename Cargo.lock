@@ -1778,6 +1778,7 @@ dependencies = [
  "futures-util",
  "rustix",
  "sha2 0.10.9",
+ "signature 2.2.0",
  "skagent-fido",
  "skagent-secret",
  "ssh-agent-lib",

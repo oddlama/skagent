@@ -6,8 +6,7 @@
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use crate::signer::{SK_USER_PRESENCE_REQUIRED, SK_USER_VERIFICATION_REQUIRED};
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use skagent_fido::ResidentCredential;
 use ssh_agent_lib::proto::{
     Extension, Identity, KeyConstraint, PrivateCredential, PublicCredential,
@@ -15,6 +14,11 @@ use ssh_agent_lib::proto::{
 use ssh_agent_lib::ssh_key::HashAlg;
 use ssh_agent_lib::ssh_key::private::KeypairData;
 use ssh_agent_lib::ssh_key::public::{Ed25519PublicKey, KeyData, SkEd25519};
+
+use crate::destination::{
+    DestinationConstraint, RESTRICT_DESTINATION_CONSTRAINT, parse_destination_constraints,
+};
+use crate::signer::{SK_USER_PRESENCE_REQUIRED, SK_USER_VERIFICATION_REQUIRED};
 
 /// Extension constraint `ssh-add` attaches to sk keys, naming the security
 /// key middleware that should drive the device.
@@ -25,10 +29,12 @@ pub const SK_PROVIDER_CONSTRAINT: &str = "sk-provider@openssh.com";
 pub const BUILT_IN_SK_PROVIDER: &[u8] = b"internal";
 
 /// What the constraints of an `ADD_IDENTITY_CONSTRAINED` request amount to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AcceptedConstraints {
     /// Remove the key after this long (`ssh-add -t`).
     pub lifetime: Option<Duration>,
+    /// Where the key may be used (`ssh-add -h`); empty means anywhere.
+    pub destinations: Vec<DestinationConstraint>,
 }
 
 /// Checks key constraints. Anything skagent doesn't implement refuses the
@@ -41,6 +47,7 @@ pub struct AcceptedConstraints {
 pub fn evaluate_constraints(constraints: &[KeyConstraint]) -> Result<AcceptedConstraints> {
     let mut lifetime = None;
     let mut provider_seen = false;
+    let mut destinations: Option<Vec<DestinationConstraint>> = None;
     for constraint in constraints {
         match constraint {
             KeyConstraint::Lifetime(0) => bail!("a key lifetime of 0 seconds is not valid"),
@@ -70,12 +77,26 @@ pub fn evaluate_constraints(constraints: &[KeyConstraint]) -> Result<AcceptedCon
                     );
                 }
             }
+            KeyConstraint::Extension(Extension { name, details })
+                if name == RESTRICT_DESTINATION_CONSTRAINT =>
+            {
+                let parsed = parse_destination_constraints(details.as_ref())
+                    .context("refusing a key with unusable destination constraints")?;
+                if destinations.replace(parsed).is_some() {
+                    bail!(
+                        "the {RESTRICT_DESTINATION_CONSTRAINT} constraint is given more than once"
+                    );
+                }
+            }
             KeyConstraint::Extension(Extension { name, .. }) => {
                 bail!("key constraint {name} is not supported");
             }
         }
     }
-    Ok(AcceptedConstraints { lifetime })
+    Ok(AcceptedConstraints {
+        lifetime,
+        destinations: destinations.unwrap_or_default(),
+    })
 }
 
 /// An sk key the agent can sign with.
@@ -89,6 +110,8 @@ pub struct SkIdentity {
     key_handle: Vec<u8>,
     comment: String,
     expires_at: Option<Instant>,
+    /// Where the key may be used; empty means anywhere.
+    destinations: Vec<DestinationConstraint>,
 }
 
 impl SkIdentity {
@@ -113,6 +136,7 @@ impl SkIdentity {
                 .trim_end()
                 .to_owned(),
             expires_at: None,
+            destinations: Vec::new(),
         }
     }
 
@@ -135,6 +159,7 @@ impl SkIdentity {
                 key_handle: keypair.key_handle().to_vec(),
                 comment,
                 expires_at,
+                destinations: Vec::new(),
             }),
             PrivateCredential::Key { privkey, .. } => {
                 let algorithm = privkey.algorithm().map_or_else(
@@ -209,6 +234,19 @@ impl SkIdentity {
     fn is_expired(&self, now: Instant) -> bool {
         self.expires_at.is_some_and(|expires_at| now >= expires_at)
     }
+
+    /// The same identity, restricted to `destinations` (`ssh-add -h`).
+    #[must_use]
+    pub fn with_destinations(mut self, destinations: Vec<DestinationConstraint>) -> Self {
+        self.destinations = destinations;
+        self
+    }
+
+    /// Where the key may be used; empty means anywhere.
+    #[must_use]
+    pub fn destinations(&self) -> &[DestinationConstraint] {
+        &self.destinations
+    }
 }
 
 impl fmt::Debug for SkIdentity {
@@ -221,6 +259,7 @@ impl fmt::Debug for SkIdentity {
             .field("flags", &self.flags)
             .field("key_handle_len", &self.key_handle.len())
             .field("expires_at", &self.expires_at)
+            .field("destinations", &self.destinations.len())
             // public key and key handle are represented by fingerprint and length
             .finish_non_exhaustive()
     }

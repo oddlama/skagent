@@ -30,5 +30,8 @@ tracing-subscriber.workspace = true
 zbus.workspace = true
 zeroize.workspace = true
 
+[dev-dependencies]
+signature.workspace = true
+
 [lints]
 workspace = true

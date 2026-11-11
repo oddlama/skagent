@@ -36,6 +36,8 @@ pub struct PinRequest<'a> {
     /// Whether a touch follows the PIN: yes for signatures, no for loading
     /// resident keys (credential management needs no touch).
     pub then_touch: bool,
+    /// What the signature is for, e.g. `log in as "git" to …`.
+    pub purpose: Option<&'a str>,
 }
 
 impl PinRequest<'_> {
@@ -55,6 +57,10 @@ impl PinRequest<'_> {
         }
         text.push_str("Enter PIN for ");
         text.push_str(self.key);
+        if let Some(purpose) = self.purpose {
+            text.push_str(" to ");
+            text.push_str(purpose);
+        }
         if self.then_touch {
             text.push_str(", then touch the key");
         }
@@ -70,6 +76,11 @@ impl PinRequest<'_> {
     #[must_use]
     pub fn pinentry_description(&self) -> String {
         let mut text = format!("Enter the PIN of the security key holding\n{}", self.key);
+        if let Some(purpose) = self.purpose {
+            text.push_str("\n\nRequest: ");
+            text.push_str(purpose);
+            text.push('.');
+        }
         if self.then_touch {
             text.push_str("\n\nThen touch the key when it blinks.");
         }

@@ -135,6 +135,7 @@ async fn the_pin_prompt_checks_the_pin_length() -> Result<()> {
         retries: Some(8),
         error: None,
         then_touch: true,
+        purpose: None,
     };
     ensure!(
         PinPrompt::Pinentry(Pinentry::new(short))
@@ -191,6 +192,7 @@ fn prompts_mention_errors_and_low_retries_only() {
         retries: Some(8),
         error: None,
         then_touch: true,
+        purpose: None,
     };
     assert_eq!(
         calm.askpass_text(),
@@ -203,6 +205,7 @@ fn prompts_mention_errors_and_low_retries_only() {
         retries: Some(2),
         error: Some("The previous PIN was wrong"),
         then_touch: true,
+        purpose: None,
     };
     assert_eq!(
         worried.askpass_text(),
@@ -222,6 +225,7 @@ fn loading_prompts_dont_ask_for_a_touch() {
         retries: Some(8),
         error: None,
         then_touch: false,
+        purpose: None,
     };
     assert_eq!(
         loading.askpass_text(),
@@ -247,6 +251,7 @@ async fn an_abandoned_prompt_times_out_and_is_killed() -> Result<()> {
         retries: Some(8),
         error: None,
         then_touch: true,
+        purpose: None,
     };
     let started = std::time::Instant::now();
     let error = match PinPrompt::Pinentry(Pinentry::new(program))

@@ -257,6 +257,7 @@ impl Signer {
             retries: Some(retries),
             error: None,
             then_touch: false,
+            purpose: None,
         };
         let pin = tokio::select! {
             biased;
@@ -363,6 +364,7 @@ impl Signer {
         identity: &SkIdentity,
         data: &[u8],
         mut ticket: SigningTicket,
+        purpose: &str,
     ) -> Result<Signature> {
         let key = credential_key(identity);
         let _credential = tokio::select! {
@@ -397,7 +399,7 @@ impl Signer {
             tokio::select! {
                 biased;
                 () = ticket.revoked() => bail!("PIN prompt cancelled by PIN eviction or key removal"),
-                source = self.pin_for(identity, &key, &device, retries.context("missing PIN retry counter")?) => source?,
+                source = self.pin_for(identity, &key, &device, retries.context("missing PIN retry counter")?, purpose) => source?,
             }
         };
 
@@ -455,6 +457,7 @@ impl Signer {
         key: &CredentialKey,
         device: &DeviceIdentity,
         retries: u32,
+        purpose: &str,
     ) -> Result<PinSource> {
         let (lookup, last_failure) = {
             let mut state = self.state.lock().await;
@@ -491,6 +494,7 @@ impl Signer {
                 retries: Some(retries),
                 error: last_failure.as_deref(),
                 then_touch: true,
+                purpose: Some(purpose),
             })
             .await?;
         Ok(PinSource::User(pin))
