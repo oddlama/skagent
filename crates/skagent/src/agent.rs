@@ -92,6 +92,14 @@ impl SkAgent {
         self.shared.signer.set_caching_available(available).await;
     }
 
+    /// Disables caching until monitoring starts, without revoking the
+    /// requests that arrive meanwhile when it does (see
+    /// [`Signer::caching_pending`]). Socket activation hands the agent its
+    /// first request right at startup.
+    pub async fn caching_pending(&self) {
+        self.shared.signer.caching_pending().await;
+    }
+
     /// Removes identities whose `ssh-add -t` lifetime ended (with their PINs
     /// and device bindings), and drops cached PINs whose own lifetime or idle
     /// timeout ended.

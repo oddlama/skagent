@@ -33,6 +33,39 @@ async fn monitoring_transitions_revoke_in_flight_requests() -> Result<()> {
     signer.ticket().check()
 }
 
+#[tokio::test]
+async fn requests_from_before_monitoring_survive_its_start() -> Result<()> {
+    let signer = Signer::default();
+    let cached_era = signer.ticket();
+    signer.caching_pending().await;
+    ensure!(
+        cached_era.check().is_err(),
+        "leaving available caching must revoke like a loss"
+    );
+    let startup = signer.ticket();
+    signer.set_caching_available(true).await;
+    startup.check()?;
+    // From now on transitions revoke again.
+    signer.set_caching_available(false).await;
+    ensure!(startup.check().is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn failing_to_watch_at_startup_revokes_nothing_until_recovery() -> Result<()> {
+    let signer = Signer::default();
+    signer.caching_pending().await;
+    let startup = signer.ticket();
+    signer.set_caching_available(false).await;
+    startup.check()?;
+    signer.set_caching_available(true).await;
+    ensure!(
+        startup.check().is_err(),
+        "a request spanning the recovery survived"
+    );
+    Ok(())
+}
+
 fn identity(seed: u8, comment: &str) -> Result<SkIdentity> {
     SkIdentity::from_credential(support::sk_credential(seed, comment)?, None)
 }

@@ -109,7 +109,7 @@ pub async fn serve_until<F>(socket_path: &Path, agent: SkAgent, shutdown: F) -> 
 where
     F: Future<Output = Result<()>>,
 {
-    agent.set_caching_available(false).await;
+    agent.caching_pending().await;
     let (listener, bound) = socket::bind(socket_path)?;
     tracing::info!(
         socket = %bound.path().display(),

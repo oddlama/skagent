@@ -101,9 +101,20 @@ struct State {
     cache: PinCache,
     /// Shown with the next prompt for that credential, e.g. "wrong PIN".
     last_failure: HashMap<CredentialKey, String>,
-    caching_available: bool,
+    caching: Caching,
     /// Per-credential revocation; dropping a sender revokes its tickets.
     revocations: HashMap<CredentialKey, watch::Sender<()>>,
+}
+
+/// Whether PINs may be cached, which depends on watching logind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Caching {
+    /// Not watching yet: the agent just started. Requests run uncached.
+    Pending,
+    /// Lock and sleep events are watched.
+    Available,
+    /// Watching failed, or the machine is about to sleep.
+    Unavailable,
 }
 
 /// Where the PIN for one signature came from.
@@ -138,7 +149,7 @@ impl Signer {
             state: Mutex::new(State {
                 cache: PinCache::new(policy),
                 last_failure: HashMap::new(),
-                caching_available: true,
+                caching: Caching::Available,
                 revocations: HashMap::new(),
             }),
             router: Router::default(),
@@ -225,11 +236,33 @@ impl Signer {
     }
 
     /// Disables caching while logind cannot be watched. Signing still works,
-    /// but asks every time. Changes also invalidate in-flight requests.
+    /// but asks every time. Changes also invalidate in-flight requests, so
+    /// none spans a lost connection or a suspend. Except the first change
+    /// after [`Self::caching_pending`]: requests that came in before logind
+    /// was watched for the first time missed no event.
     pub async fn set_caching_available(&self, available: bool) {
         let mut state = self.state.lock().await;
-        if state.caching_available != available {
-            state.caching_available = available;
+        let next = if available {
+            Caching::Available
+        } else {
+            Caching::Unavailable
+        };
+        let revoke = state.caching != next && state.caching != Caching::Pending;
+        state.caching = next;
+        if revoke {
+            self.invalidation.send_replace(());
+            state.cache.clear();
+        }
+    }
+
+    /// Disables caching until logind is watched, for agent startup: requests
+    /// meanwhile run uncached, and the first [`Self::set_caching_available`]
+    /// doesn't revoke them. Leaving another state revokes and evicts like
+    /// losing logind.
+    pub async fn caching_pending(&self) {
+        let mut state = self.state.lock().await;
+        if state.caching != Caching::Pending {
+            state.caching = Caching::Pending;
             self.invalidation.send_replace(());
             state.cache.clear();
         }
@@ -366,7 +399,7 @@ impl Signer {
         // Allocate every copy before modifying state. An mlock failure cannot
         // leave a partially primed cache or partially loaded identity list.
         let mut pins = Vec::new();
-        if state.caching_available {
+        if state.caching == Caching::Available {
             for identity in identities
                 .iter()
                 .filter(|identity| identity.flags() & SK_USER_VERIFICATION_REQUIRED != 0)
@@ -580,7 +613,7 @@ impl Signer {
         if still_same_device {
             bindings.bind(key.clone(), device.clone());
         }
-        if !state.caching_available {
+        if state.caching != Caching::Available {
             return Ok(());
         }
         match source {
