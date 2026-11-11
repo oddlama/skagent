@@ -3,6 +3,7 @@ name = "skagent"
 description = "ssh-agent for FIDO2 (sk) keys that caches the PIN and still requires a touch per signature"
 edition.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 version.workspace = true
 
 [lib]

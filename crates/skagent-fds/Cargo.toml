@@ -3,6 +3,7 @@ name = "skagent-fds"
 description = "File descriptors crossing exec: the socket systemd passes in"
 edition.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 version.workspace = true
 
 [dependencies]

@@ -3,6 +3,7 @@ name = "skagent-secret"
 description = "Locked, guarded, zeroizing memory for small secrets such as FIDO2 PINs"
 edition.workspace = true
 publish.workspace = true
+rust-version.workspace = true
 version.workspace = true
 
 [dependencies]
