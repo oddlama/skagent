@@ -13,10 +13,12 @@
 //!
 //! The signal loop must keep polling all streams: zbus blocks its socket
 //! reader when any subscription queue is full, which would also stall the
-//! reply to a method call made from inside the loop. So the only call made
-//! there (session ownership) is bounded by [`OWNER_LOOKUP_TIMEOUT`], and
-//! proxies don't cache properties (caching adds a match rule and a `GetAll`
-//! round trip per proxy).
+//! reply to a method call made from inside the loop. So the calls made
+//! there (session ownership, the sleep inhibitor after resuming) are
+//! bounded by [`CALL_IN_LOOP_TIMEOUT`], and proxies don't cache properties
+//! (caching adds a match rule and a `GetAll` round trip per proxy). A
+//! timed-out inhibitor ends the watch like a lost connection: caching stays
+//! off until the next attempt succeeds.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -44,10 +46,11 @@ const SESSIONS_PATH: &str = "/org/freedesktop/login1/session";
 /// Pause before reconnecting after the bus or logind went away.
 const RETRY_DELAY: Duration = Duration::from_secs(30);
 
-/// Longest wait for a session's owner. Well below logind's default sleep
-/// delay (`InhibitDelayMaxSec=5`), so a slow lookup can't hold up the
-/// `PrepareForSleep` handling until the machine suspends anyway.
-const OWNER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(1);
+/// Longest wait for a method call made inside the signal loop. Well below
+/// logind's default sleep delay (`InhibitDelayMaxSec=5`), so a slow call
+/// can't hold up the `PrepareForSleep` handling until the machine suspends
+/// anyway.
+const CALL_IN_LOOP_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Watches logind on the system bus until the process ends.
 ///
@@ -203,7 +206,11 @@ async fn run(
                     // logind waits for this fd to close (up to its delay limit).
                     drop(inhibitor.take());
                 } else {
-                    inhibitor = Some(inhibit(&manager).await?);
+                    // A method call inside the loop: bounded, see above.
+                    let taken = tokio::time::timeout(CALL_IN_LOOP_TIMEOUT, inhibit(&manager))
+                        .await
+                        .context("taking logind's sleep delay inhibitor after resuming timed out")??;
+                    inhibitor = Some(taken);
                     agent.set_caching_available(true).await;
                 }
             }
@@ -276,7 +283,7 @@ async fn ours(connection: &Connection, message: &Message, uid: u32) -> bool {
         let (owner, _user_path): (u32, OwnedObjectPath) = session.get_property("User").await?;
         Ok::<u32, zbus::Error>(owner)
     };
-    match tokio::time::timeout(OWNER_LOOKUP_TIMEOUT, owner).await {
+    match tokio::time::timeout(CALL_IN_LOOP_TIMEOUT, owner).await {
         Ok(Ok(owner)) => owner == uid,
         Ok(Err(error)) => {
             tracing::debug!(%error, session = %path, "can't tell whose session locked, assuming ours");
