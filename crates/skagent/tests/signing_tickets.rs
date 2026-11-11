@@ -94,8 +94,8 @@ async fn removing_one_key_revokes_only_its_own_requests() -> Result<()> {
 async fn revocation_wakes_waiters() -> Result<()> {
     let signer = Signer::default();
     let work = identity(1, "work")?;
-    let mut waiting = signer.ticket_for(&work).await;
-    let mut global = signer.ticket_for(&identity(2, "personal")?).await;
+    let waiting = signer.ticket_for(&work).await;
+    let global = signer.ticket_for(&identity(2, "personal")?).await;
     signer.forget(&work).await;
     tokio::time::timeout(std::time::Duration::from_secs(1), waiting.revoked()).await?;
     ensure!(
@@ -106,6 +106,25 @@ async fn revocation_wakes_waiters() -> Result<()> {
     );
     signer.forget_all().await;
     tokio::time::timeout(std::time::Duration::from_secs(1), global.revoked()).await?;
+    Ok(())
+}
+
+/// A request whose device work noticed the revocation (and cancelled the
+/// assertion) still checks its ticket after the worker returns. That check
+/// must not pass just because the wait already saw the revocation.
+#[tokio::test]
+async fn waiting_for_a_revocation_leaves_the_ticket_revoked() -> Result<()> {
+    let signer = Signer::default();
+    let global = signer.ticket();
+    let credential = signer.ticket_for(&identity(1, "work")?).await;
+    signer.forget_all().await;
+    for ticket in [&global, &credential] {
+        tokio::time::timeout(std::time::Duration::from_secs(1), ticket.revoked()).await?;
+        ensure!(
+            ticket.check().is_err(),
+            "a global revocation was forgotten once a waiter saw it"
+        );
+    }
     Ok(())
 }
 

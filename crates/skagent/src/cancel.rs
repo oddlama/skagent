@@ -108,7 +108,7 @@ impl DeviceInterrupt {
     /// # Errors
     ///
     /// Returns an error if the worker panicked.
-    pub async fn run<T>(self, worker: JoinHandle<T>, ticket: &mut SigningTicket) -> Result<T> {
+    pub async fn run<T>(self, worker: JoinHandle<T>, ticket: &SigningTicket) -> Result<T> {
         tokio::pin!(worker);
         let joined = tokio::select! {
             biased;

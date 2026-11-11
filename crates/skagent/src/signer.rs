@@ -80,10 +80,14 @@ impl SigningTicket {
     }
 
     /// Completes when the ticket is revoked. Cancel-safe.
-    pub async fn revoked(&mut self) {
-        let Self { all, credential } = self;
-        match credential {
-            Some(credential) => {
+    ///
+    /// Waits on copies of the receivers: `changed()` marks the value seen,
+    /// and on the ticket's own receivers that would make a later
+    /// [`SigningTicket::check`] pass again after a global revocation.
+    pub async fn revoked(&self) {
+        let mut all = self.all.clone();
+        match self.credential.clone() {
+            Some(mut credential) => {
                 tokio::select! {
                     _ = all.changed() => {}
                     _ = credential.changed() => {}
@@ -307,7 +311,7 @@ impl Signer {
     }
 
     /// Authenticates and lists one selected device, without mutating identities.
-    pub(crate) async fn prepare_load(&self, mut ticket: SigningTicket) -> Result<PreparedLoad> {
+    pub(crate) async fn prepare_load(&self, ticket: SigningTicket) -> Result<PreparedLoad> {
         let routing_ticket = ticket.clone();
         let mut routed = tokio::select! {
             biased;
@@ -447,7 +451,7 @@ impl Signer {
         &self,
         identity: &SkIdentity,
         data: &[u8],
-        mut ticket: SigningTicket,
+        ticket: SigningTicket,
         purpose: &str,
     ) -> Result<Signature> {
         let key = credential_key(identity);
@@ -515,7 +519,7 @@ impl Signer {
                 (source, outcome)
             })
         };
-        let (source, outcome) = interrupt.run(worker, &mut ticket).await?;
+        let (source, outcome) = interrupt.run(worker, &ticket).await?;
         drop(touch);
 
         // Revoked meanwhile: never return the signature or refill the cache.
