@@ -53,7 +53,8 @@ impl fmt::Debug for CredentialKey {
 pub struct CachePolicy {
     /// Hard limit since the PIN was entered. Zero disables caching.
     pub lifetime: Duration,
-    /// Drop the PIN if it wasn't used for this long.
+    /// Drop the PIN if it wasn't used for this long. `None` or zero: no
+    /// idle timeout (like `idle=0` in a `--pin-policy` rule).
     pub idle_timeout: Option<Duration>,
 }
 
@@ -65,6 +66,12 @@ impl CachePolicy {
     #[must_use]
     pub fn caches(self) -> bool {
         !self.lifetime.is_zero()
+    }
+
+    /// The idle timeout, if there is one: zero means none.
+    #[must_use]
+    pub fn idle(self) -> Option<Duration> {
+        self.idle_timeout.filter(|idle| !idle.is_zero())
     }
 }
 
@@ -204,7 +211,7 @@ impl Entry {
         if expired {
             return Some(Miss::Expired);
         }
-        let idle = policy.idle_timeout.is_some_and(|idle| {
+        let idle = policy.idle().is_some_and(|idle| {
             self.last_used
                 .checked_add(idle)
                 .is_none_or(|end| now >= end)

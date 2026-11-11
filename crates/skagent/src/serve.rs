@@ -108,7 +108,7 @@ pub async fn run(
     if policy.caches() {
         tracing::info!(
             lifetime_seconds = policy.lifetime.as_secs(),
-            idle_seconds = policy.idle_timeout.map(|idle| idle.as_secs()),
+            idle_seconds = policy.idle().map(|idle| idle.as_secs()),
             "caching PINs"
         );
     } else {

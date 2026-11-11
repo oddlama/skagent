@@ -127,6 +127,25 @@ fn the_lifetime_is_hard_and_not_extended_by_use() -> Result<()> {
     )
 }
 
+/// `--pin-idle 0` used to expire every PIN at once while the log said the
+/// agent caches; zero means no idle timeout, like `idle=0` in a rule.
+#[test]
+fn a_zero_idle_timeout_is_no_idle_timeout() -> Result<()> {
+    let start = Instant::now();
+    let zero = policy(3600, Some(0));
+    ensure!(zero.idle().is_none());
+    let mut cache = cache_with_work_pin(zero, start)?;
+    ensure!(
+        cache.expire(at(start, 600)?) == 0,
+        "the sweep dropped the PIN"
+    );
+    expect_hit(cache.lookup(&work(), &device(), 8, at(start, 600)?)?)?;
+    expect_miss(
+        &cache.lookup(&work(), &device(), 8, at(start, 3600)?)?,
+        Miss::Expired,
+    )
+}
+
 #[test]
 fn the_idle_timeout_counts_from_the_last_use() -> Result<()> {
     let start = Instant::now();

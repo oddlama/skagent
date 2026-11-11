@@ -67,6 +67,7 @@ pub struct ServeArgs {
     pub pin_lifetime: Duration,
 
     /// Also drop a cached PIN that wasn't used for this long, e.g. `1h`.
+    /// `0` means no idle timeout, the default.
     #[arg(long, value_parser = parse_duration)]
     pub pin_idle: Option<Duration>,
 

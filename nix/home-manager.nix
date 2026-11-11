@@ -119,7 +119,7 @@ in
       type = types.nullOr duration;
       default = null;
       example = "30m";
-      description = "Also drop a cached PIN that wasn't used for this long.";
+      description = "Also drop a cached PIN that wasn't used for this long; `0` means no idle timeout.";
     };
 
     pinPolicies = mkOption {
