@@ -8,7 +8,7 @@ mod support;
 use anyhow::{Context as _, Result, ensure};
 use signature::Signer as _;
 use skagent::destination::{
-    Bound, Destination, Purpose, SessionBindings, authorize_signature, glob_matches,
+    Bound, Destination, MAX_USER_LEN, Purpose, SessionBindings, authorize_signature, glob_matches,
     parse_destination_constraints, parse_sshsig_request, parse_userauth_request, permitted,
 };
 use ssh_agent_lib::proto::extension::{
@@ -560,6 +560,13 @@ fn only_well_formed_requests_for_this_key_count_as_logins() -> Result<()> {
     ensure!(
         parse_userauth_request(&userauth(b"", "git", &key, None)?, &key).is_none(),
         "empty session ID"
+    );
+    let longest = "u".repeat(MAX_USER_LEN);
+    ensure!(parse_userauth_request(&userauth(b"s1", &longest, &key, None)?, &key).is_some());
+    ensure!(
+        parse_userauth_request(&userauth(b"s1", &format!("{longest}u"), &key, None)?, &key)
+            .is_none(),
+        "an absurdly long user name counts as a login"
     );
     let mut trailing = userauth(b"s1", "git", &key, None)?;
     trailing.push(0);

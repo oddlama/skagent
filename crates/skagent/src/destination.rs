@@ -50,6 +50,10 @@ const MAX_SESSION_ID_LEN: usize = 128;
 const MAX_CONSTRAINTS: usize = 1024;
 /// Longest user pattern (OpenSSH: `AGENT_USER_CONSTRAINT_MAX_LEN`).
 const MAX_USER_PATTERN_LEN: usize = 256;
+/// Longest user name a login request may carry to count as one. Far above
+/// any real login name; it bounds the pattern matching (quadratic in the
+/// worst case) that names from another machine can cause.
+pub const MAX_USER_LEN: usize = 1024;
 /// `SSH2_MSG_USERAUTH_REQUEST`.
 const USERAUTH_REQUEST: u8 = 50;
 /// Applications that aren't a web origin.
@@ -426,12 +430,14 @@ fn matching_constraint<'a>(
             None => constraint.from.hostname.is_none() && constraint.from.keys.is_empty(),
             Some(key) => constraint.from.matches(key),
         };
-        let to_matches = to.is_none_or(|key| constraint.to.matches(key));
-        let user_matches = match (constraint.to.user.as_deref(), user) {
-            (Some(pattern), Some(user)) => glob_matches(pattern, user),
-            _ => true,
-        };
-        from_matches && to_matches && user_matches
+        // The user pattern last, and only for matching hosts: it's the
+        // costly part.
+        from_matches
+            && to.is_none_or(|key| constraint.to.matches(key))
+            && match (constraint.to.user.as_deref(), user) {
+                (Some(pattern), Some(user)) => glob_matches(pattern, user),
+                _ => true,
+            }
     })
 }
 
@@ -481,7 +487,8 @@ pub struct UserauthRequest {
 }
 
 /// `data` as the public key user authentication request (RFC 4252 7) it
-/// would be when ssh logs in with `key`, or `None`.
+/// would be when ssh logs in with `key`, or `None`. User names longer than
+/// [`MAX_USER_LEN`] bytes don't count as logins.
 #[must_use]
 pub fn parse_userauth_request(data: &[u8], key: &KeyData) -> Option<UserauthRequest> {
     let mut reader = data;
@@ -490,6 +497,9 @@ pub fn parse_userauth_request(data: &[u8], key: &KeyData) -> Option<UserauthRequ
         return None;
     }
     let user = decode_name(&mut reader).ok()?;
+    if user.len() > MAX_USER_LEN {
+        return None;
+    }
     let service = decode_name(&mut reader).ok()?;
     let method = decode_name(&mut reader).ok()?;
     let signature_follows = u8::decode(&mut reader).ok()?;
