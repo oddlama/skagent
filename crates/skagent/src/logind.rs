@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::future::Future;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -48,7 +49,7 @@ const RETRY_DELAY: Duration = Duration::from_secs(30);
 /// `PrepareForSleep` handling until the machine suspends anyway.
 const OWNER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Watches logind until the process ends.
+/// Watches logind on the system bus until the process ends.
 ///
 /// While disconnected, signing asks for the PIN every time. Caching only
 /// resumes once subscriptions and a sleep delay inhibitor are in place.
@@ -57,16 +58,42 @@ const OWNER_LOOKUP_TIMEOUT: Duration = Duration::from_secs(1);
 ///
 /// Never returns; the `Result` lets it run next to the agent in a `select!`.
 pub async fn watch(agent: SkAgent) -> Result<()> {
+    watch_with(agent, Connection::system).await
+}
+
+/// [`watch`], connecting to the bus with `connect` on every attempt.
+///
+/// Only losing an established watch evicts PINs and revokes requests.
+/// Attempts that fail before it was established change nothing: requests
+/// running meanwhile missed no lock or sleep event, and caching is already
+/// off. So a machine without logind still signs, just uncached.
+///
+/// # Errors
+///
+/// Never returns; the `Result` lets it run next to the agent in a `select!`.
+pub async fn watch_with<C, F>(agent: SkAgent, mut connect: C) -> Result<()>
+where
+    C: FnMut() -> F,
+    F: Future<Output = zbus::Result<Connection>>,
+{
     let uid = geteuid().as_raw();
     let mut warn_on_failure = true;
     loop {
         let mut connected = false;
-        let error = match run(&agent, uid, &mut connected).await {
+        let attempt = async {
+            let connection = connect().await.context("connecting to the system D-Bus")?;
+            run(&agent, &connection, uid, &mut connected).await
+        };
+        let error = match attempt.await {
             Ok(never) => match never {},
             Err(error) => error,
         };
         agent.set_caching_available(false).await;
-        let forgotten = agent.forget_pins("logind connection lost").await;
+        let forgotten = if connected {
+            agent.forget_pins("logind connection lost").await
+        } else {
+            0
+        };
         if connected || warn_on_failure {
             tracing::warn!(
                 error = %format!("{error:#}"),
@@ -82,22 +109,24 @@ pub async fn watch(agent: SkAgent) -> Result<()> {
     }
 }
 
-async fn run(agent: &SkAgent, uid: u32, connected: &mut bool) -> Result<Infallible> {
-    let connection = Connection::system()
-        .await
-        .context("connecting to the system D-Bus")?;
-    let mut owners = owner_changes(&connection).await?;
-    let manager = uncached_proxy(&connection, MANAGER_PATH.to_owned(), MANAGER_INTERFACE)
+async fn run(
+    agent: &SkAgent,
+    connection: &Connection,
+    uid: u32,
+    connected: &mut bool,
+) -> Result<Infallible> {
+    let mut owners = owner_changes(connection).await?;
+    let manager = uncached_proxy(connection, MANAGER_PATH.to_owned(), MANAGER_INTERFACE)
         .await
         .context("opening the logind manager")?;
     let mut inhibitor = Some(inhibit(&manager).await?);
-    let owner = zbus::fdo::DBusProxy::new(&connection)
+    let owner = zbus::fdo::DBusProxy::new(connection)
         .await?
         .get_name_owner(LOGIND.try_into()?)
         .await
         .context("finding logind's bus owner")?;
     let mut locks = subscribe(
-        &connection,
+        connection,
         MatchRule::builder()
             .msg_type(MessageType::Signal)
             .sender(owner.as_str())
@@ -108,7 +137,7 @@ async fn run(agent: &SkAgent, uid: u32, connected: &mut bool) -> Result<Infallib
     )
     .await?;
     let mut hints = subscribe(
-        &connection,
+        connection,
         MatchRule::builder()
             .msg_type(MessageType::Signal)
             .sender(owner.as_str())
@@ -120,7 +149,7 @@ async fn run(agent: &SkAgent, uid: u32, connected: &mut bool) -> Result<Infallib
     )
     .await?;
     let mut sleeps = subscribe(
-        &connection,
+        connection,
         MatchRule::builder()
             .msg_type(MessageType::Signal)
             .sender(owner.as_str())
@@ -149,7 +178,7 @@ async fn run(agent: &SkAgent, uid: u32, connected: &mut bool) -> Result<Infallib
             _ = owners.next() => anyhow::bail!("logind's bus owner changed; reconnecting"),
             message = locks.next() => {
                 let message = message.context("the Session.Lock subscription ended")?.context("receiving Session.Lock")?;
-                if ours(&connection, &message, uid).await {
+                if ours(connection, &message, uid).await {
                     agent.forget_pins("session locked").await;
                 }
             }
@@ -161,7 +190,7 @@ async fn run(agent: &SkAgent, uid: u32, connected: &mut bool) -> Result<Infallib
                     .get("LockedHint")
                     .is_some_and(|hint| bool::try_from(hint).unwrap_or(true))
                     || invalidated.iter().any(|name| name == "LockedHint");
-                if locked && ours(&connection, &message, uid).await {
+                if locked && ours(connection, &message, uid).await {
                     agent.forget_pins("session locked (LockedHint)").await;
                 }
             }

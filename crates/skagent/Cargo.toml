@@ -33,6 +33,8 @@ zeroize.workspace = true
 
 [dev-dependencies]
 signature.workspace = true
+# Paused time for the logind retry loop.
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

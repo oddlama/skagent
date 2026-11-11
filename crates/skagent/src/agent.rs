@@ -80,6 +80,12 @@ impl SkAgent {
         }
     }
 
+    /// The signer behind the agent, e.g. to authorize a request in tests.
+    #[must_use]
+    pub fn signer(&self) -> &Signer {
+        &self.shared.signer
+    }
+
     /// Drops all cached PINs, e.g. when the screen locks. Returns how many there were.
     pub async fn forget_pins(&self, reason: &str) -> usize {
         let forgotten = self.shared.signer.forget_all().await;
