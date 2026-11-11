@@ -7,6 +7,11 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     flake-parts.url = "github:hercules-ci/flake-parts";
+    # The home-manager module's VM test, and the typed `homeModules` output.
+    home-manager = {
+      url = "github:nix-community/home-manager";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     nci = {
       url = "github:90-008/nix-cargo-integration";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -23,9 +28,20 @@
     inputs.flake-parts.lib.mkFlake { inherit inputs; } {
       imports = [
         inputs.devshell.flakeModule
+        inputs.home-manager.flakeModules.home-manager
         inputs.nci.flakeModule
         inputs.treefmt-nix.flakeModule
       ];
+
+      # The package defaults to this flake's build for the host platform.
+      flake.homeModules.default =
+        { lib, pkgs, ... }:
+        {
+          imports = [ ./nix/home-manager.nix ];
+          services.skagent.package =
+            lib.mkDefault
+              inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+        };
 
       systems = [
         "x86_64-linux"
@@ -112,6 +128,12 @@
                 inherit pkgs;
                 package = config.packages.default;
                 testkey = config.packages.testkey;
+              };
+              vm-home-manager = import ./nix/tests/home-manager.nix {
+                inherit pkgs;
+                inherit (config.packages) testkey;
+                homeManager = inputs.home-manager.nixosModules.home-manager;
+                skagentModule = inputs.self.homeModules.default;
               };
               vm-loading = import ./nix/tests/loading.nix {
                 inherit pkgs;
