@@ -143,6 +143,10 @@ impl Default for Signer {
 impl Signer {
     /// A signer that asks through `prompt` and caches with `policy`. Without
     /// a prompt, keys that need a PIN can't sign.
+    ///
+    /// Caching starts disabled ([`Self::caching_pending`]): PINs are only
+    /// cached once lock and sleep events are watched and
+    /// [`Self::set_caching_available`] says so.
     #[must_use]
     pub fn new(prompt: Option<PinPrompt>, policy: CachePolicy) -> Self {
         Self {
@@ -150,7 +154,7 @@ impl Signer {
             state: Mutex::new(State {
                 cache: PinCache::new(policy),
                 last_failure: HashMap::new(),
-                caching: Caching::Available,
+                caching: Caching::Pending,
                 revocations: HashMap::new(),
             }),
             router: Router::default(),

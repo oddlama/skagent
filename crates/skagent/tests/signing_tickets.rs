@@ -20,9 +20,27 @@ async fn forget_revokes_old_tickets_but_not_new_ones() -> Result<()> {
     signer.ticket().check()
 }
 
+/// A signer whose lock and sleep monitoring is up.
+async fn watched() -> Signer {
+    let signer = Signer::default();
+    signer.set_caching_available(true).await;
+    signer
+}
+
+/// A new signer hasn't watched lock and sleep yet, so it must not cache:
+/// it starts like `caching_pending`, where failing to start watching is no
+/// transition that revokes. (Leaving available caching would revoke.)
+#[tokio::test]
+async fn a_new_signer_caches_nothing_until_monitoring_starts() -> Result<()> {
+    let signer = Signer::default();
+    let startup = signer.ticket();
+    signer.set_caching_available(false).await;
+    startup.check()
+}
+
 #[tokio::test]
 async fn monitoring_transitions_revoke_in_flight_requests() -> Result<()> {
-    let signer = Signer::default();
+    let signer = watched().await;
     let before_loss = signer.ticket();
     signer.set_caching_available(false).await;
     ensure!(before_loss.check().is_err());
@@ -35,7 +53,7 @@ async fn monitoring_transitions_revoke_in_flight_requests() -> Result<()> {
 
 #[tokio::test]
 async fn requests_from_before_monitoring_survive_its_start() -> Result<()> {
-    let signer = Signer::default();
+    let signer = watched().await;
     let cached_era = signer.ticket();
     signer.caching_pending().await;
     ensure!(
