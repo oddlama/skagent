@@ -67,6 +67,11 @@ pub struct ServeArgs {
     /// Also drop a cached PIN that wasn't used for this long, e.g. `1h`.
     #[arg(long, value_parser = parse_duration)]
     pub pin_idle: Option<Duration>,
+
+    /// Don't show a desktop notification while a security key waits for a
+    /// touch (`org.freedesktop.Notifications` on the session bus).
+    #[arg(long)]
+    pub no_touch_notification: bool,
 }
 
 /// Parses `0` or a whole number with a unit: `s`, `m` or `h`.

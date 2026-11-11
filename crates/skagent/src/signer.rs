@@ -4,6 +4,7 @@
 //! parallel; touch selection is exclusive across devices.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
@@ -17,6 +18,7 @@ use crate::cancel::DeviceInterrupt;
 use crate::device::DeviceIdentity;
 use crate::identities::SkIdentity;
 use crate::loading::PreparedLoad;
+use crate::notify::Notifier;
 use crate::pin_cache::{CachePolicy, CredentialKey, Lookup, Miss, PinCache};
 use crate::prompt::{PinPrompt, PinRequest};
 use crate::routing::{QUEUE_TIMEOUT, RoutedDevice, Router};
@@ -36,6 +38,8 @@ pub struct Signer {
     state: Mutex<State>,
     router: Router,
     invalidation: watch::Sender<()>,
+    /// Shows "touch your security key" while an assertion waits.
+    notifier: Option<Arc<Notifier>>,
 }
 
 /// Captured while the agent authorizes a request, before it queues for the
@@ -133,7 +137,17 @@ impl Signer {
             }),
             router: Router::default(),
             invalidation: watch::channel(()).0,
+            notifier: None,
         }
+    }
+
+    /// The same signer, showing desktop notifications while a key waits for
+    /// a touch.
+    #[must_use]
+    pub fn with_notifier(mut self, notifier: Arc<Notifier>) -> Self {
+        self.router.notifier = Some(Arc::clone(&notifier));
+        self.notifier = Some(notifier);
+        self
     }
 
     /// Authorizes a request that isn't about one credential (loading),
@@ -375,10 +389,11 @@ impl Signer {
         ticket.check()?;
         tracing::info!(key = %describe(identity), "resolving the signing device");
         let routing_ticket = ticket.clone();
+        let label = describe(identity);
         let mut routed = tokio::select! {
             biased;
             () = ticket.revoked() => bail!("device selection cancelled by PIN eviction or key removal"),
-            routed = self.router.route(&key, routing_ticket) => routed?,
+            routed = self.router.route(&key, routing_ticket, &label) => routed?,
         };
         let device = routed.identity.clone();
         let needs_pin = identity.flags() & SK_USER_VERIFICATION_REQUIRED != 0;
@@ -415,6 +430,12 @@ impl Signer {
             .flatten();
         // Revocation or a dropped request cancels the assertion on the
         // device, which ends the wait for a touch and with it the PIN copy.
+        let touch = self.notifier.as_ref().map(|notifier| {
+            notifier.show(
+                "Touch your security key",
+                &format!("{}: {purpose}", identity.comment()),
+            )
+        });
         let (interrupt, finished) = DeviceInterrupt::new(routed.device.canceller());
         let worker = {
             let device = device.clone();
@@ -425,6 +446,7 @@ impl Signer {
             })
         };
         let (source, outcome) = interrupt.run(worker, &mut ticket).await?;
+        drop(touch);
 
         // Revoked meanwhile: never return the signature or refill the cache.
         ticket.check()?;

@@ -112,3 +112,10 @@ fn forget_takes_the_socket() -> Result<()> {
     ensure!(args.socket.as_deref() == Some(Path::new("/run/a.sock")));
     Ok(())
 }
+
+#[test]
+fn touch_notifications_are_on_unless_switched_off() -> Result<()> {
+    ensure!(!serve(&[])?.no_touch_notification);
+    ensure!(serve(&["--no-touch-notification"])?.no_touch_notification);
+    Ok(())
+}

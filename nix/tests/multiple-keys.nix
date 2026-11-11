@@ -10,6 +10,7 @@ let
   dir = "/run/skagent-alice";
   socket = "${dir}/agent.sock";
   prompts = "${dir}/prompts";
+  notifications = common.notificationSetup dir;
   askpass = pkgs.writeShellApplication {
     name = "multi-askpass";
     runtimeInputs = [ pkgs.coreutils ];
@@ -31,6 +32,7 @@ pkgs.testers.runNixOSTest {
       package
       testkey
       common.testAskpass
+      common.fakeNotifications
       pkgs.openssh
       pkgs.libfido2
     ];
@@ -38,6 +40,7 @@ pkgs.testers.runNixOSTest {
     users.users.alice.isNormalUser = true;
   };
   testScript = ''
+    import re
     import shlex
 
     def alice(command: str) -> str:
@@ -128,6 +131,10 @@ pkgs.testers.runNixOSTest {
     machine.start()
     machine.wait_for_unit("multi-user.target")
     machine.succeed("install -d -m 0700 -o alice -g users ${dir}")
+    machine.succeed("${builtins.elemAt notifications.start 0}")
+    machine.wait_for_file("${dir}/bus")
+    machine.succeed("${builtins.elemAt notifications.start 1}")
+    machine.wait_until_succeeds("${notifications.ready}")
 
     with subtest("enroll two verify-required keys with different PINs"):
         for key, pin in [("work", "246810"), ("personal", "135790")]:
@@ -142,6 +149,7 @@ pkgs.testers.runNixOSTest {
             alice(f"echo \"alice $(cat ~/{key}.pub)\" > ~/{key}.allowed")
         machine.succeed(
             "systemd-run --unit skagent --uid alice"
+            " --setenv DBUS_SESSION_BUS_ADDRESS=${notifications.address}"
             " ${package}/bin/skagent serve --socket ${socket} --askpass ${askpass}/bin/multi-askpass"
         )
         machine.wait_for_file("${socket}")
@@ -160,6 +168,12 @@ pkgs.testers.runNixOSTest {
     with subtest("unknown credentials are selected by touch before asking for a PIN"):
         select_and_sign("work", "select-work")
         select_and_sign("personal", "select-personal")
+        shown = machine.succeed("cat ${dir}/notifications")
+        for key in ["work", "personal"]:
+            selection = re.search(rf"notify (\d+) Touch the security key to use \| The one holding {key} ", shown)
+            assert selection, shown
+            number = selection.group(1)
+            retry(lambda _last_try: f"close {number}\n" in machine.succeed("cat ${dir}/notifications"), timeout_seconds=5)
 
     with subtest("each cached PIN goes only to its bound device"):
         bound_sign("personal", "personal-cached")

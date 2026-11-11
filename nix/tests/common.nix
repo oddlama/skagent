@@ -52,6 +52,32 @@
     '';
   };
 
+  # A notification service on the session bus that records every call.
+  fakeNotifications = pkgs.writers.writePython3Bin "fake-notifications" {
+    libraries = [ pkgs.python3Packages.dbus-next ];
+    # dbus-next takes D-Bus signatures as annotations, like "a{sv}".
+    flakeIgnore = [
+      "F722"
+      "F821"
+    ];
+  } (builtins.readFile ./fake-notifications.py);
+
+  # A private session bus plus the fake notification service on it, owned
+  # by alice. The returned shell commands are for systemd-run in a test.
+  notificationSetup =
+    dir:
+    let
+      bus = "unix:path=${dir}/bus";
+    in
+    {
+      address = bus;
+      start = [
+        "systemd-run --unit session-bus --uid alice ${pkgs.dbus}/bin/dbus-daemon --session --nofork --address=${bus}"
+        "systemd-run --unit notifications --uid alice --setenv DBUS_SESSION_BUS_ADDRESS=${bus} /run/current-system/sw/bin/fake-notifications ${dir}/notifications"
+      ];
+      ready = "su alice -c '${pkgs.systemd}/bin/busctl --address=${bus} call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s org.freedesktop.Notifications' | grep -F 'b true'";
+    };
+
   # The virtual key appears as a hidraw device; make it usable by test users.
   virtualKeyMachine = {
     boot.kernelModules = [ "uhid" ];

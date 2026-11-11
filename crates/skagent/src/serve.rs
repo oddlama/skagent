@@ -2,6 +2,7 @@
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -10,6 +11,7 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 use crate::agent::SkAgent;
 use crate::cli::{ServeArgs, SocketArgs};
 use crate::logind;
+use crate::notify::Notifier;
 use crate::pin_cache::CachePolicy;
 use crate::pinentry::Pinentry;
 use crate::prompt::{Askpass, PinPrompt};
@@ -73,7 +75,13 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         tracing::info!("PIN caching disabled, asking for every signature");
     }
     let socket_path = socket_path(args.socket)?;
-    let agent = SkAgent::new(Signer::new(Some(prompt), policy));
+    let mut signer = Signer::new(Some(prompt), policy);
+    if args.no_touch_notification {
+        tracing::info!("not showing touch notifications");
+    } else {
+        signer = signer.with_notifier(Arc::new(Notifier::default()));
+    }
+    let agent = SkAgent::new(signer);
     // Installed before the socket exists, so a signal can't kill the process
     // between binding and serving and leave a stale socket behind.
     let signals = ShutdownSignals::install()?;

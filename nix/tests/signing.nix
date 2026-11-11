@@ -17,6 +17,7 @@ let
   answerFile = "${socketDir}/pin";
   promptLog = "${socketDir}/prompts";
   pinentryLog = "${socketDir}/pinentry";
+  notifications = common.notificationSetup socketDir;
   askpass = "SSH_ASKPASS=test-askpass SSH_ASKPASS_REQUIRE=force SKAGENT_TEST_ANSWER=${pin}";
   startTestkey =
     unit: name:
@@ -33,6 +34,7 @@ pkgs.testers.runNixOSTest {
       testkey
       common.testAskpass
       common.testPinentry
+      common.fakeNotifications
       pkgs.libfido2
       pkgs.openssh
     ];
@@ -51,6 +53,7 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
+    import re
     import shlex
 
     def alice(command: str) -> tuple[int, str]:
@@ -110,6 +113,7 @@ pkgs.testers.runNixOSTest {
             " --setenv SKAGENT_TEST_ASKPASS_LOG=${promptLog}"
             " --setenv SKAGENT_TEST_ASKPASS_GATE=${socketDir}/hold-prompt"
             " --setenv SKAGENT_TEST_PINENTRY_LOG=${pinentryLog}"
+            " --setenv DBUS_SESSION_BUS_ADDRESS=${notifications.address}"
             f" ${package}/bin/skagent serve --socket ${socket} {' '.join(args)}"
         )
         machine.wait_for_file("${socket}")
@@ -147,6 +151,16 @@ pkgs.testers.runNixOSTest {
         machine.succeed("install -d -m 0700 -o alice -g users ${socketDir}")
         machine.succeed("install -m 0600 -o alice -g users /dev/null ${answerFile}")
         machine.succeed("echo ${pin} > ${answerFile}")
+        machine.succeed("${builtins.elemAt notifications.start 0}")
+        machine.wait_for_file("${socketDir}/bus")
+        machine.succeed("${builtins.elemAt notifications.start 1}")
+        machine.wait_until_succeeds("${notifications.ready}")
+
+    def notifications() -> str:
+        return machine.succeed("cat ${socketDir}/notifications 2>/dev/null || true")
+
+    def touch_notifications() -> list[tuple[str, str]]:
+        return re.findall(r"notify (\d+) Touch your security key \| (.*)", notifications())
 
     with subtest("the first signature asks for the PIN, the next ones only need a touch"):
         start_agent("skagent", askpass_agent)
@@ -154,6 +168,13 @@ pkgs.testers.runNixOSTest {
         expect_prompt()
         expect_cached()
         expect_cached()
+
+    with subtest("a notification asks for each touch and is closed afterwards"):
+        shown = touch_notifications()
+        assert len(shown) == 3, notifications()
+        assert all(body == 'alice@virtual: sign "test" data' for _, body in shown), shown
+        for number, _ in shown:
+            retry(lambda _last_try: f"close {number}\n" in notifications(), timeout_seconds=5)
 
     with subtest("ssh logs in with the cached PIN, and sshd sees user verification"):
         before = (prompts(), touches())
@@ -345,12 +366,14 @@ pkgs.testers.runNixOSTest {
 
     with subtest("the PIN lifetime ends the cache"):
         stop_agent("skagent")
-        start_agent("skagent-short", askpass_agent, "--pin-lifetime 3s")
+        start_agent("skagent-short", askpass_agent, "--pin-lifetime 3s", "--no-touch-notification")
+        shown_before = len(touch_notifications())
         expect_prompt()
         expect_cached()
         machine.sleep(4)
         expect_prompt()
         stop_agent("skagent-short")
+        assert len(touch_notifications()) == shown_before, "notified despite --no-touch-notification"
 
     with subtest("the idle timeout expires an unused PIN"):
         start_agent("skagent-idle", askpass_agent, "--pin-idle 3s")

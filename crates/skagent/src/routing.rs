@@ -15,6 +15,7 @@ use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard, OwnedRwLockReadGuard, RwLo
 
 use crate::cancel::{Abandoned, AbandonedFlag};
 use crate::device::DeviceIdentity;
+use crate::notify::Notifier;
 use crate::pin_cache::CredentialKey;
 use crate::signer::SigningTicket;
 
@@ -123,6 +124,8 @@ pub(crate) struct Router {
     pub credentials: KeyedLocks<CredentialKey>,
     /// Readers are assertions; a writer is touch selection across devices.
     access: Arc<RwLock<()>>,
+    /// Shows "touch the key to use" while selecting.
+    pub notifier: Option<Arc<Notifier>>,
 }
 
 /// These locks travel with the open device into blocking workers. Dropping an
@@ -142,12 +145,19 @@ impl Router {
         self.bindings.lock().await
     }
 
-    pub async fn route(&self, key: &CredentialKey, ticket: SigningTicket) -> Result<RoutedDevice> {
-        self.route_key(Some(key), ticket).await
+    /// The device for `key`, described as `label` should the user have to
+    /// select it by touch.
+    pub async fn route(
+        &self,
+        key: &CredentialKey,
+        ticket: SigningTicket,
+        label: &str,
+    ) -> Result<RoutedDevice> {
+        self.route_key(Some(key), ticket, label).await
     }
 
     pub async fn for_load(&self, ticket: SigningTicket) -> Result<RoutedDevice> {
-        self.route_key(None, ticket).await
+        self.route_key(None, ticket, "").await
     }
 
     async fn resolve(
@@ -170,6 +180,7 @@ impl Router {
         &self,
         key: Option<&CredentialKey>,
         ticket: SigningTicket,
+        label: &str,
     ) -> Result<RoutedDevice> {
         let read = within_queue_timeout(Arc::clone(&self.access).read_owned()).await?;
         ticket.check()?;
@@ -189,15 +200,21 @@ impl Router {
         if let Resolution::Direct(identity) = decision {
             return self.open_direct(identity, exclusive.downgrade()).await;
         }
-        if key.is_some() {
+        let body = if key.is_some() {
             tracing::info!(
                 "touch the key holding the requested credential to select it; signing will need another touch"
             );
+            format!("The one holding {label}. Signing then needs another touch.")
         } else {
             tracing::info!(
                 "touch the security key whose resident SSH credentials you want to load"
             );
-        }
+            "The one to load resident SSH keys from.".to_owned()
+        };
+        let _selecting = self
+            .notifier
+            .as_ref()
+            .map(|notifier| notifier.show("Touch the security key to use", &body));
         // Set when this request is dropped (client gone): the selection then
         // stops at its next round instead of blocking everyone for 30 s.
         let abandoned = Abandoned::default();
