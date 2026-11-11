@@ -164,9 +164,11 @@ impl Drop for DeviceInterrupt {
 /// Notices when an agent client hangs up while its request is still
 /// running.
 ///
-/// Watches a duplicate of the connection's descriptor for read-side hangup
-/// (`EPOLLRDHUP`) and never reads from it, so the protocol stream that
-/// ssh-agent-lib reads through the original descriptor is untouched.
+/// Watches a duplicate of the connection's descriptor for the peer being
+/// gone (`EPOLLHUP`) and never reads from it, so the protocol stream that
+/// ssh-agent-lib reads through the original descriptor is untouched. A peer
+/// that only shut down its sending side (`EPOLLRDHUP`) may still wait for
+/// the reply, so that doesn't count.
 #[derive(Debug)]
 pub struct Hangup(UnixStream);
 
@@ -184,20 +186,24 @@ impl Hangup {
         UnixStream::from_std(duplicate).map(Self)
     }
 
-    /// Completes once the client hung up. Plain readability (the client
-    /// sent more data) doesn't count. Never completes if the watch fails.
+    /// Completes once the client is gone. Data from the client and a half
+    /// close don't count. Never completes if the watch fails.
     pub async fn closed(&self) {
         loop {
-            let Ok(ready) = self.0.ready(Interest::READABLE).await else {
+            // A unix socket whose peer closed reports EPOLLHUP, which tokio
+            // only passes on as write-closed, i.e. to writable interest. Read
+            // interest would wake up for every request and, after a half
+            // close, never stop.
+            let Ok(ready) = self.0.ready(Interest::WRITABLE).await else {
                 return std::future::pending().await;
             };
-            if ready.is_read_closed() {
+            if ready.is_write_closed() {
                 return;
             }
-            // Data for ssh-agent-lib, not for us: clear our readiness without
-            // reading and wait for the next event. Closed states survive
-            // clearing in tokio, so a hangup can't be lost here.
-            let _cleared = self.0.try_io(Interest::READABLE, || {
+            // Room to write, which says nothing about the peer: clear it
+            // without writing and wait for the next event. Closed states
+            // survive clearing in tokio, so a hangup can't be lost here.
+            let _cleared = self.0.try_io(Interest::WRITABLE, || {
                 Err::<(), _>(io::ErrorKind::WouldBlock.into())
             });
         }

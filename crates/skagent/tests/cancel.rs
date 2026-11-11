@@ -43,6 +43,34 @@ async fn data_from_the_client_is_no_hangup_and_stays_unread() -> Result<()> {
     Ok(())
 }
 
+/// A client may shut down its sending side after the request and still
+/// wait for the reply; only a client that is gone counts.
+#[tokio::test]
+async fn a_half_close_is_no_hangup() -> Result<()> {
+    let (mut agent_side, mut client) = UnixStream::pair().context("creating a socket pair")?;
+    let hangup = Hangup::watch(&agent_side)?;
+
+    client.write_all(b"request").await?;
+    client.shutdown().await?;
+    ensure!(
+        tokio::time::timeout(NOT_YET, hangup.closed())
+            .await
+            .is_err(),
+        "a half-closed client was taken for gone"
+    );
+    // It still gets its reply.
+    agent_side.write_all(b"reply").await?;
+    let mut reply = [0_u8; 5];
+    client.read_exact(&mut reply).await?;
+    ensure!(&reply == b"reply");
+
+    drop(client);
+    tokio::time::timeout(SOON, hangup.closed())
+        .await
+        .context("the hangup after the half close went unnoticed")?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_hangup_before_watching_counts_too() -> Result<()> {
     let (agent_side, client) = UnixStream::pair().context("creating a socket pair")?;
