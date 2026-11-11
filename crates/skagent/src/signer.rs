@@ -27,11 +27,6 @@ use crate::pin_cache::{
 use crate::prompt::{PinPrompt, PinRequest};
 use crate::routing::{QUEUE_TIMEOUT, RoutedDevice, Router};
 
-/// OpenSSH sk flag: the key needs a touch for every signature.
-pub const SK_USER_PRESENCE_REQUIRED: u8 = 0x01;
-/// OpenSSH sk flag: the key needs user verification (PIN) for every signature.
-pub const SK_USER_VERIFICATION_REQUIRED: u8 = 0x04;
-
 /// Length of an Ed25519 signature.
 const ED25519_SIGNATURE_BYTES: usize = 64;
 
@@ -406,10 +401,7 @@ impl Signer {
         // leave a partially primed cache or partially loaded identity list.
         let mut pins = Vec::new();
         if state.caching == Caching::Available {
-            for identity in identities
-                .iter()
-                .filter(|identity| identity.flags() & SK_USER_VERIFICATION_REQUIRED != 0)
-            {
+            for identity in identities.iter().filter(|identity| identity.requires_pin()) {
                 let policy = self.policy_for(identity);
                 if !policy.caches() {
                     continue;
@@ -472,7 +464,7 @@ impl Signer {
             routed = self.router.route(&key, routing_ticket, &label) => routed?,
         };
         let device = routed.identity.clone();
-        let needs_pin = identity.flags() & SK_USER_VERIFICATION_REQUIRED != 0;
+        let needs_pin = identity.requires_pin();
         let (mut routed, retries) = tokio::task::spawn_blocking(move || {
             let retries = if needs_pin {
                 Some(routed.device.pin_retries()?)
@@ -484,14 +476,14 @@ impl Signer {
         .await
         .context("reading the routed security key's PIN retry counter")??;
 
-        let source = if identity.flags() & SK_USER_VERIFICATION_REQUIRED == 0 {
-            PinSource::None
-        } else {
+        let source = if needs_pin {
             tokio::select! {
                 biased;
                 () = ticket.revoked() => bail!("PIN prompt cancelled by PIN eviction or key removal"),
                 source = self.pin_for(identity, &key, &device, retries.context("missing PIN retry counter")?, purpose) => source?,
             }
+        } else {
+            PinSource::None
         };
 
         let request = OwnedAssertRequest {
@@ -535,11 +527,11 @@ impl Signer {
                 let signature = verified_signature(identity, data, &statement)
                     .with_context(|| format!("signing with {}", describe(identity)))?;
                 ensure!(
-                    statement.flags & SK_USER_PRESENCE_REQUIRED != 0,
+                    statement.user_present(),
                     "the assertion lacks user presence"
                 );
                 ensure!(
-                    source.pin().is_none() || statement.flags & SK_USER_VERIFICATION_REQUIRED != 0,
+                    source.pin().is_none() || statement.user_verified(),
                     "the assertion lacks user verification"
                 );
                 let policy = self.policy_for(identity);

@@ -19,7 +19,12 @@ use crate::destination::{
     DestinationConstraint, RESTRICT_DESTINATION_CONSTRAINT, parse_destination_constraints,
 };
 use crate::display::{self, MAX_NAME_CHARS};
-use crate::signer::{SK_USER_PRESENCE_REQUIRED, SK_USER_VERIFICATION_REQUIRED};
+
+/// OpenSSH sk key flag: the key needs a touch for every signature.
+pub const SK_USER_PRESENCE_REQUIRED: u8 = 0x01;
+/// OpenSSH sk key flag: the key needs user verification (PIN) for every
+/// signature (`verify-required`).
+pub const SK_USER_VERIFICATION_REQUIRED: u8 = 0x04;
 
 /// Extension constraint `ssh-add` attaches to sk keys, naming the security
 /// key middleware that should drive the device.
@@ -217,6 +222,12 @@ impl SkIdentity {
         self.flags
     }
 
+    /// Whether signing needs the PIN (`verify-required`).
+    #[must_use]
+    pub fn requires_pin(&self) -> bool {
+        self.flags & SK_USER_VERIFICATION_REQUIRED != 0
+    }
+
     /// The key comment.
     #[must_use]
     pub fn comment(&self) -> &str {
@@ -331,7 +342,7 @@ impl IdentityStore {
             let Some(existing) = self.identities.iter().find(|existing| existing.public == identity.public) else {
                 return Ok(identity.clone());
             };
-            ensure!(existing.key_handle == identity.key_handle && existing.flags & SK_USER_VERIFICATION_REQUIRED == identity.flags & SK_USER_VERIFICATION_REQUIRED,
+            ensure!(existing.key_handle == identity.key_handle && existing.requires_pin() == identity.requires_pin(),
                 "resident key {} conflicts with a loaded identity; remove it explicitly before reloading", identity.fingerprint());
             Ok(existing.clone())
         }).collect()

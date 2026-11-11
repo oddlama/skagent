@@ -7,7 +7,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use skagent_fido::PIN_MAX_BYTES;
+pub use skagent_fido::{PIN_MAX_BYTES, PIN_MIN_BYTES};
 use skagent_secret::SecretBuffer;
 use tokio::io::AsyncReadExt as _;
 use tokio::process::Command;
@@ -153,9 +153,6 @@ impl PinPrompt {
         }
     }
 }
-
-/// Shortest valid FIDO PIN.
-pub const PIN_MIN_BYTES: usize = 4;
 
 /// Room for the longest PIN plus a `\r\n`.
 const ANSWER_CAPACITY: usize = PIN_MAX_BYTES + 2;

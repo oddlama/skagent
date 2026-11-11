@@ -39,6 +39,10 @@ const OPERATION_TIMEOUT_MS: i32 = 35_000;
 /// The FIDO PIN is 4 to 63 bytes of UTF-8 (CTAP 2.1, `authenticatorClientPIN`).
 pub const PIN_MAX_BYTES: usize = 63;
 
+/// Shortest FIDO PIN in bytes: 4 code points take at least 4 bytes. A
+/// device may require more (its `minPINLength`).
+pub const PIN_MIN_BYTES: usize = 4;
+
 /// Environment variable that turns on libfido2's debug output on stderr,
 /// whatever flags `fido_init` gets (see `fido_init(3)`).
 pub const DEBUG_VARIABLE: &str = "FIDO_DEBUG";
@@ -123,6 +127,25 @@ pub struct Statement {
     pub flags: u8,
     /// The credential's signature counter.
     pub counter: u32,
+}
+
+impl Statement {
+    /// Authenticator data flag UP: the user touched the authenticator.
+    pub const USER_PRESENT: u8 = 0x01;
+    /// Authenticator data flag UV: the user was verified (here: by PIN).
+    pub const USER_VERIFIED: u8 = 0x04;
+
+    /// Whether the authenticator saw a touch for this signature.
+    #[must_use]
+    pub fn user_present(&self) -> bool {
+        self.flags & Self::USER_PRESENT != 0
+    }
+
+    /// Whether the authenticator verified the user for this signature.
+    #[must_use]
+    pub fn user_verified(&self) -> bool {
+        self.flags & Self::USER_VERIFIED != 0
+    }
 }
 
 /// An open FIDO device.
@@ -401,8 +424,8 @@ impl TouchProbe {
 
 /// Copies `pin` with a trailing NUL into locked memory, for libfido2.
 fn nul_terminated_pin(pin: &SecretBuffer) -> Result<SecretBuffer> {
-    if pin.len() < 4 || pin.len() > PIN_MAX_BYTES {
-        bail!("a FIDO PIN has 4 to {PIN_MAX_BYTES} bytes");
+    if pin.len() < PIN_MIN_BYTES || pin.len() > PIN_MAX_BYTES {
+        bail!("a FIDO PIN has {PIN_MIN_BYTES} to {PIN_MAX_BYTES} bytes");
     }
     let capacity = pin
         .len()

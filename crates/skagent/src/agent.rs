@@ -342,7 +342,7 @@ impl AgentSession {
             "resident keys are only loaded on request from this machine, not through a forwarded agent"
         );
         let ticket = {
-            let state = self.shared.state.lock().await;
+            let (state, _now) = self.shared.state_now().await;
             ensure!(state.lock.is_none(), "the agent is locked");
             self.shared.signer.ticket()
         };
@@ -382,7 +382,7 @@ impl AgentSession {
         passphrase.zeroize();
         let stored = stored?;
 
-        let mut state = self.shared.state.lock().await;
+        let (mut state, _now) = self.shared.state_now().await;
         if state.lock.is_some() {
             bail!("the agent is already locked");
         }
@@ -398,7 +398,7 @@ impl AgentSession {
         let _attempt = self.shared.unlock_attempts.lock().await;
 
         let penalty = {
-            let mut state = self.shared.state.lock().await;
+            let (mut state, _now) = self.shared.state_now().await;
             let Some(stored) = &state.lock else {
                 passphrase.zeroize();
                 bail!("the agent is not locked");
@@ -478,7 +478,7 @@ impl Session for AgentSession {
     }
 
     async fn remove_all_identities(&mut self) -> Result<(), AgentError> {
-        let mut state = self.shared.state.lock().await;
+        let (mut state, _now) = self.shared.state_now().await;
         if state.lock.is_some() {
             return Err(refuse("removing all keys", &anyhow!("the agent is locked")));
         }
