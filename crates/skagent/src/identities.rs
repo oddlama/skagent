@@ -290,6 +290,21 @@ impl IdentityStore {
         }
     }
 
+    /// A loaded identity with another public key but `identity`'s credential
+    /// (application and key handle). PIN cache entries and device bindings
+    /// belong to the credential, so the two keys would share them: a key
+    /// added through a forwarded agent with a leaked key handle could sign
+    /// with the PIN cached for, and outside the destination constraints of,
+    /// the real key.
+    #[must_use]
+    pub fn sharing_credential(&self, identity: &SkIdentity) -> Option<&SkIdentity> {
+        self.identities.iter().find(|existing| {
+            existing.public != identity.public
+                && existing.application() == identity.application()
+                && existing.key_handle == identity.key_handle
+        })
+    }
+
     /// Plans a resident import without overwriting an existing identity's
     /// lifetime, comment or flags. Conflicting handles/policies are refused.
     ///
@@ -302,6 +317,13 @@ impl IdentityStore {
     ) -> Result<Vec<SkIdentity>> {
         self.expire(now);
         loaded.iter().map(|identity| {
+            if let Some(other) = self.sharing_credential(identity) {
+                bail!(
+                    "resident key {} uses the credential of the loaded key {}; remove that key before reloading",
+                    identity.fingerprint(),
+                    other.fingerprint()
+                );
+            }
             let Some(existing) = self.identities.iter().find(|existing| existing.public == identity.public) else {
                 return Ok(identity.clone());
             };

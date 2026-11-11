@@ -20,6 +20,7 @@ colored.workspace = true
 futures-util.workspace = true
 rustix.workspace = true
 sha2.workspace = true
+signature.workspace = true
 skagent-fds.workspace = true
 skagent-fido.workspace = true
 skagent-secret.workspace = true
@@ -32,7 +33,6 @@ zbus.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-signature.workspace = true
 # Paused time for the logind retry loop.
 tokio = { workspace = true, features = ["test-util"] }
 

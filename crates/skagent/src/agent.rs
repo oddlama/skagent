@@ -216,6 +216,12 @@ impl AgentSession {
         if let Some(existing) = state.identities.find(&identity.key_data(), now) {
             self.visible(existing)?;
         }
+        if let Some(other) = state.identities.sharing_credential(&identity) {
+            bail!(
+                "the key's credential (application and key handle) belongs to the loaded key {}",
+                other.fingerprint()
+            );
+        }
         let (fingerprint, comment) = (identity.fingerprint(), identity.comment().to_owned());
         let destination_constraints = identity.destinations().len();
         let unknown_host_keys: usize = identity

@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use sha2::{Digest as _, Sha256};
+use signature::Verifier as _;
 use skagent_fido::{AssertRequest, ErrorKind, Statement, error_kind};
 use skagent_secret::SecretBuffer;
 use ssh_agent_lib::ssh_key::{Algorithm, Signature};
@@ -526,7 +527,12 @@ impl Signer {
         ticket.check()?;
         match outcome {
             Ok((statement, retries_after)) => {
-                let signature = ssh_signature(&statement)?;
+                // Neither returned nor cached unless it is the identity's own
+                // signature: the device may hold another credential under that
+                // handle, or the identity's public key may not be the one the
+                // handle belongs to.
+                let signature = verified_signature(identity, data, &statement)
+                    .with_context(|| format!("signing with {}", describe(identity)))?;
                 ensure!(
                     statement.flags & SK_USER_PRESENCE_REQUIRED != 0,
                     "the assertion lacks user presence"
@@ -753,6 +759,31 @@ fn assert_on(
             Err(error)
         }
     }
+}
+
+/// [`ssh_signature`] of `statement`, checked like a server would check it:
+/// against `identity`'s public key and application, over `data`.
+///
+/// # Errors
+///
+/// Returns an error if the signature is malformed or doesn't verify.
+pub fn verified_signature(
+    identity: &SkIdentity,
+    data: &[u8],
+    statement: &Statement,
+) -> Result<Signature> {
+    let signature = ssh_signature(statement)?;
+    identity
+        .key_data()
+        .verify(data, &signature)
+        .map_err(|_invalid| {
+            anyhow!(
+                "the security key's signature doesn't verify with the public key of {}; \
+                 the key handle belongs to another key",
+                identity.fingerprint()
+            )
+        })?;
+    Ok(signature)
 }
 
 /// The `sk-ssh-ed25519@openssh.com` signature: Ed25519 signature, then the

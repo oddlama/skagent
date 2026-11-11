@@ -87,7 +87,16 @@ pub fn sk_key_data(seed: u8) -> KeyData {
 
 /// What `ssh-add` sends for an sk key: public key, flags, key handle, comment.
 pub fn sk_credential(seed: u8, comment: &str) -> Result<PrivateCredential> {
-    let keypair = SkEd25519Keypair::new(sk_public(seed), SK_FLAGS_UP_UV, vec![seed; 64])
+    sk_credential_with(sk_public(seed), seed, comment)
+}
+
+/// [`sk_credential`] with an explicit public key and key handle seed.
+pub fn sk_credential_with(
+    public: SkEd25519,
+    handle_seed: u8,
+    comment: &str,
+) -> Result<PrivateCredential> {
+    let keypair = SkEd25519Keypair::new(public, SK_FLAGS_UP_UV, vec![handle_seed; 64])
         .context("building fake sk keypair")?;
     Ok(PrivateCredential::Key {
         privkey: KeypairData::SkEd25519(keypair),
@@ -114,13 +123,23 @@ const RFC8032_PUBLIC: [u8; 32] = [
     0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25, 0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07, 0x51, 0x1a,
 ];
 
+/// The RFC 8032 test keypair, for signing like a security key would.
+pub fn rfc8032_keypair() -> Ed25519Keypair {
+    Ed25519Keypair {
+        public: Ed25519PublicKey(RFC8032_PUBLIC),
+        private: Ed25519PrivateKey::from_bytes(&RFC8032_SECRET),
+    }
+}
+
+/// The sk public key of [`rfc8032_keypair`] for `ssh:example`.
+pub fn rfc8032_sk_public() -> SkEd25519 {
+    SkEd25519::new(Ed25519PublicKey(RFC8032_PUBLIC), "ssh:example")
+}
+
 /// A plain ed25519 key, which skagent must refuse.
 pub fn ed25519_credential() -> PrivateCredential {
     PrivateCredential::Key {
-        privkey: KeypairData::Ed25519(Ed25519Keypair {
-            public: Ed25519PublicKey(RFC8032_PUBLIC),
-            private: Ed25519PrivateKey::from_bytes(&RFC8032_SECRET),
-        }),
+        privkey: KeypairData::Ed25519(rfc8032_keypair()),
         comment: "plain ed25519".to_owned(),
     }
 }

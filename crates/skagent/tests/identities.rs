@@ -12,7 +12,9 @@ use skagent::identities::{
     evaluate_constraints,
 };
 use ssh_agent_lib::proto::{Extension, KeyConstraint, Unparsed};
-use support::{SK_FLAGS_UP_UV, ed25519_credential, sk_credential, sk_key_data};
+use support::{
+    SK_FLAGS_UP_UV, ed25519_credential, sk_credential, sk_credential_with, sk_key_data, sk_public,
+};
 
 fn extension(name: &str, details: &[u8]) -> KeyConstraint {
     KeyConstraint::Extension(Extension {
@@ -219,6 +221,54 @@ fn take_expired_hands_out_exactly_the_ended_identities() -> Result<()> {
     ensure!(
         store.take_expired(later(start, 10)?).is_empty(),
         "taken twice"
+    );
+    Ok(())
+}
+
+/// Another public key for the credential (application and key handle) of
+/// `handle_seed`'s key, like a key added with a leaked key handle.
+fn impostor(public_seed: u8, handle_seed: u8) -> Result<SkIdentity> {
+    SkIdentity::from_credential(
+        sk_credential_with(sk_public(public_seed), handle_seed, "impostor")?,
+        None,
+    )
+}
+
+#[test]
+fn another_public_key_for_a_loaded_credential_is_detected() -> Result<()> {
+    let mut store = IdentityStore::default();
+    store.add(identity(1, "real", None)?);
+
+    let shared = store.sharing_credential(&impostor(2, 1)?);
+    ensure!(
+        shared.is_some_and(|existing| existing.comment() == "real"),
+        "a second public key for the same credential went unnoticed"
+    );
+    ensure!(
+        store
+            .sharing_credential(&identity(1, "replacement", None)?)
+            .is_none(),
+        "replacing a key with itself counts as sharing"
+    );
+    ensure!(
+        store
+            .sharing_credential(&identity(2, "other", None)?)
+            .is_none(),
+        "an unrelated key counts as sharing"
+    );
+    Ok(())
+}
+
+#[test]
+fn resident_imports_refuse_a_credential_loaded_under_another_key() -> Result<()> {
+    let mut store = IdentityStore::default();
+    store.add(impostor(2, 1)?);
+    let now = Instant::now();
+    ensure!(
+        store
+            .resident_imports(&[identity(1, "resident", None)?], now)
+            .is_err(),
+        "a resident key was imported next to another key using its credential"
     );
     Ok(())
 }

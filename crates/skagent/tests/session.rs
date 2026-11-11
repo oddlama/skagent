@@ -14,7 +14,9 @@ use ssh_agent_lib::client::Client;
 use ssh_agent_lib::proto::{
     AddIdentity, AddIdentityConstrained, Extension, KeyConstraint, RemoveIdentity, Unparsed,
 };
-use support::{RunningAgent, add_sk, ed25519_credential, sk_key_data};
+use support::{
+    RunningAgent, add_sk, ed25519_credential, sk_credential_with, sk_key_data, sk_public,
+};
 use tokio::net::UnixStream;
 
 async fn comments(client: &mut Client<UnixStream>) -> Result<Vec<String>> {
@@ -110,6 +112,28 @@ async fn non_sk_keys_and_unsupported_constraints_are_refused() -> Result<()> {
         comments(&mut client).await?.is_empty(),
         "a refused key was stored"
     );
+    agent.stop().await
+}
+
+#[tokio::test]
+async fn a_second_public_key_for_a_loaded_credential_is_refused() -> Result<()> {
+    let dir = tempfile::tempdir().context("creating temp dir")?;
+    let agent = RunningAgent::start(&dir.path().join("agent.sock")).await?;
+    let mut client = agent.client().await?;
+
+    client
+        .add_identity(add_sk(1, "real")?)
+        .await
+        .context("add")?;
+    let impostor = AddIdentity {
+        credential: sk_credential_with(sk_public(2), 1, "impostor")?,
+    };
+    ensure!(
+        client.add_identity(impostor).await.is_err(),
+        "a key sharing the loaded key's handle was accepted"
+    );
+    ensure!(comments(&mut client).await? == ["real"]);
+
     agent.stop().await
 }
 
