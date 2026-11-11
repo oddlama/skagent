@@ -178,6 +178,10 @@ pkgs.testers.runNixOSTest {
         assert prompts().count("Enter PIN") == asked, "a remote host made the client prompt for a PIN"
         assert "only loaded on request from this machine" in journal("skagent")
 
+    with subtest("a forwarded agent can't evict the PINs to time a prompt"):
+        alice_fails(ssh("jump", 'skagent forget --socket "$SSH_AUTH_SOCK"', "-A"))
+        assert "only on request from this machine, not through an SSH connection" in journal("skagent")
+
     with subtest("PINs never reach the journal"):
         assert "${pin}" not in journal("skagent")
   '';

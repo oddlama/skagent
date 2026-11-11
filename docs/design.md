@@ -19,7 +19,7 @@ Protected:
 - **Leaked key handle (stub file, agent memory dump):** useless without the PIN.
 - **Stolen laptop + key while no PIN remains in memory** (evicted, expired, rebooted): PIN needed. An assertion still waiting for a touch when the PINs are evicted is cancelled on the key, which ends its temporary PIN copy; see concurrency.
 - **Other local users:** socket is `0600` in `$XDG_RUNTIME_DIR`, and the peer uid is checked on accept (own uid or root, same as OpenSSH).
-- **Forwarded agent on a hostile remote host:** every signature still needs a touch on your machine, so no silent use. Keys added with `ssh-add -h` are additionally limited to the listed hops, verified through `session-bind@openssh.com` (see destinations). A key the remote host adds with a leaked key handle can't borrow a loaded key's cached PIN or binding: it's refused, and a signature that doesn't verify with the requesting identity's public key is never returned or cached. A forwarded agent can't make this machine load resident keys (no surprise PIN prompts).
+- **Forwarded agent on a hostile remote host:** every signature still needs a touch on your machine, so no silent use. Keys added with `ssh-add -h` are additionally limited to the listed hops, verified through `session-bind@openssh.com` (see destinations). A key the remote host adds with a leaked key handle can't borrow a loaded key's cached PIN or binding: it's refused, and a signature that doesn't verify with the requesting identity's public key is never returned or cached. A forwarded agent can't make this machine load resident keys or evict its cached PINs: a remote host can only cause a PIN prompt with a signature request while no PIN is cached, and that prompt names what is signed.
 - **Core dumps / ptrace by other processes of the same user:** `RLIMIT_CORE=0`, `PR_SET_DUMPABLE=0`. The PIN sits in a zeroizing, mlocked buffer.
 
 Not protected:
@@ -82,7 +82,7 @@ Secrets (cached PINs, the `LOCK` passphrase) live in `skagent-secret` buffers:
 | `ADD_IDENTITY(_CONSTRAINED)` | sk keys from `ssh-add -K` or `ssh-add <stub>`, any other key type is refused. Lifetime (`-t`) honored; an identity whose lifetime ended is removed like `ssh-add -d`, PIN and device binding included (on the next request or the 15s sweep). `sk-provider@openssh.com` is accepted for the built-in provider only. Destination constraints (`-h`) are honored (see destinations). Confirm (`-c`) and anything unknown **refuse the key**, fail closed. A key a connection can't see (constraints) can't be replaced through it. A key with another public key but the credential (application and key handle) of a loaded key is refused: PIN cache entries and bindings are per credential, so it would sign with the loaded key's cached PIN and outside its constraints |
 | `REMOVE_IDENTITY`, `REMOVE_ALL_IDENTITIES` | drop identities (only ones the connection may see). Remove-all also evicts the whole PIN cache |
 | `LOCK` / `UNLOCK` (`ssh-add -x/-X`) | lock evicts the PIN cache and refuses signing until unlock. Passphrase compared in constant time |
-| `EXTENSION forget-pins@skagent` | evict PINs, keep keys; used by `skagent forget` |
+| `EXTENSION forget-pins@skagent` | evict PINs, keep keys; used by `skagent forget`. Refused on connections ssh bound (or tried to bind) to a session: evicting first would let a remote host time a PIN prompt |
 | `EXTENSION load-resident-keys@skagent` | empty request; agent selects one device, prompts and loads its resident SSH keys; reply is a big-endian u32 count, never a PIN |
 | `EXTENSION session-bind@openssh.com` | verify the host key's signature over the session ID and record the hop for this connection; also while locked, like OpenSSH. Failures answer `EXTENSION_FAILURE` |
 | `EXTENSION query` | lists the supported extensions |
@@ -141,7 +141,7 @@ Following OpenSSH's ssh-agent (`destination.rs`, ported from `identity_permitted
 
 ## open questions
 
-- `skagent load` through a forwarded agent stays refused. An opt-in (e.g. `--allow-forwarded-load`, with prompt and notification naming the forwarded host by its verified host key) is postponed until a workflow needs it: without it, nothing on a remote host can make this machine prompt for a PIN at a moment of its choosing.
+- `skagent load` through a forwarded agent stays refused. An opt-in (e.g. `--allow-forwarded-load`, with prompt and notification naming the forwarded host by its verified host key) is postponed until a workflow needs it: without it, a remote host can only cause a PIN prompt through a signature request while no PIN is cached (it can't evict PINs either), and that prompt says what is signed.
 
 ## milestones
 

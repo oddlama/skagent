@@ -6,7 +6,7 @@ mod support;
 
 use anyhow::{Context as _, Result, ensure};
 use signature::Signer as _;
-use skagent::agent::LOAD_KEYS_EXTENSION;
+use skagent::agent::{FORGET_PINS_EXTENSION, LOAD_KEYS_EXTENSION};
 use skagent::destination::{RESTRICT_DESTINATION_CONSTRAINT, SESSION_BIND_EXTENSION};
 use ssh_agent_lib::agent::Session as _;
 use ssh_agent_lib::client::Client;
@@ -109,7 +109,7 @@ async fn bindings_are_verified_and_query_lists_the_extensions() -> Result<()> {
         "query",
         SESSION_BIND_EXTENSION,
         LOAD_KEYS_EXTENSION,
-        "forget-pins@skagent",
+        FORGET_PINS_EXTENSION,
     ] {
         ensure!(
             supported.iter().any(|extension| extension == name),
@@ -176,5 +176,49 @@ async fn constrained_keys_exist_only_where_their_destinations_allow() -> Result<
             credential: ssh_agent_lib::proto::PublicCredential::Key(sk_key_data(5)),
         })
         .await?;
+    agent.stop().await
+}
+
+/// `skagent forget` and `skagent load` act on this machine's agent only:
+/// through a forwarded agent, another machine could time PIN prompts.
+#[tokio::test]
+async fn forget_and_load_are_refused_through_ssh_connections() -> Result<()> {
+    let dir = tempfile::tempdir().context("creating temp dir")?;
+    let agent = RunningAgent::start(&dir.path().join("agent.sock")).await?;
+    let request = |name: &str| Extension {
+        name: name.to_owned(),
+        details: Unparsed::from(Vec::new()),
+    };
+
+    let mut forwarded = agent.client().await?;
+    forwarded
+        .extension(bind_request(1, b"session", true)?)
+        .await?;
+    for name in [FORGET_PINS_EXTENSION, LOAD_KEYS_EXTENSION] {
+        ensure!(
+            forwarded.extension(request(name)).await.is_err(),
+            "{name} was accepted through a forwarded agent"
+        );
+    }
+    // A failed bind counts as remote too.
+    let mut failed_bind = agent.client().await?;
+    let mut garbled = bind_request(1, b"session", true)?;
+    garbled.details = Unparsed::from(vec![0; 8]);
+    ensure!(failed_bind.extension(garbled).await.is_err());
+    ensure!(
+        failed_bind
+            .extension(request(FORGET_PINS_EXTENSION))
+            .await
+            .is_err()
+    );
+
+    // The local tool still works.
+    let mut local = agent.client().await?;
+    ensure!(
+        local
+            .extension(request(FORGET_PINS_EXTENSION))
+            .await?
+            .is_none()
+    );
     agent.stop().await
 }

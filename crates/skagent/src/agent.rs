@@ -524,6 +524,15 @@ impl Session for AgentSession {
             .map_err(|error| refuse("answering a query", &anyhow!("{error}")));
         }
         if extension.name == FORGET_PINS_EXTENSION {
+            // Through a forwarded agent, another machine could evict the
+            // PINs right before asking for a signature, and so make a PIN
+            // prompt appear here when it chooses.
+            if self.bindings.is_remote() {
+                return Err(refuse(
+                    "forgetting PINs",
+                    &anyhow!("only on request from this machine, not through an SSH connection"),
+                ));
+            }
             let forgotten = self.shared.signer.forget_all().await;
             tracing::info!(forgotten, reason = "forget request", "dropped cached PINs");
             return Ok(None);
