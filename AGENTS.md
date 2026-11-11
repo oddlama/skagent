@@ -10,10 +10,10 @@ skagent is an ssh-agent for FIDO2 `sk-ssh-ed25519@openssh.com` keys created with
 - `rust-toolchain.toml`: the toolchain nci builds with and the devshell provides (incl. rust-analyzer + rust-src from the same release). It's pinned through `flake.lock`.
 - `Cargo.toml`: workspace, shared dependency versions and shared lints.
 - `crates/skagent`: the agent (lib + `skagent` binary). `#![forbid(unsafe_code)]`. `routing.rs` holds device bindings, per-device/per-credential locks and exclusive touch selection.
-- `crates/skagent-secret`: `SecretBuffer`, locked/guarded/zeroizing memory for PINs and passphrases. Its `unsafe` is confined to `src/mapping.rs`.
+- `crates/skagent-secret`: `SecretBuffer`, locked/guarded/zeroizing memory for PINs and passphrases, optionally in `memfd_secret(2)` memory (one backend per process, fixed by the first buffer; choose it before any secret exists). Its `unsafe` is confined to `src/mapping.rs`.
 - `crates/skagent-fido`: safe wrapper over libfido2 (via `libfido2-sys`, bindgen against the system headers). Its `unsafe` is confined to `src/raw.rs`. Only `/dev/hidraw*` devices are used; libfido2 also lists YubiKeys over `pcsc://`.
 - `crates/skagent-testkey`: **test-only** virtual FIDO2 key on uhid (soft-fido2, AGPL-3.0). Used inside VM tests only. `checks.license-boundary` (`nix/license-boundary.nix`) fails if `skagent` or `skagent-secret` ever reach it or soft-fido2 through `Cargo.lock`; add new shipped crates to its `shippedCrates`.
-- `nix/tests/`: NixOS VM tests (end to end, real OpenSSH tools against the real binary). `common.nix` has the shared helpers (stub key writer, askpass that logs prompts, uhid/hidraw setup).
+- `nix/tests/`: NixOS VM tests (end to end, real OpenSSH tools against the real binary). `common.nix` has the shared helpers (stub key writer, askpass and pinentry that log prompts, uhid/hidraw setup, a private session bus with a fake notification service that records every call).
 - `clippy.toml`: proper names allowed without backticks in doc comments.
 - `docs/design.md`: architecture, PIN cache rules, threat model. `docs/research/`: findings with source references.
 
