@@ -4,6 +4,12 @@
   # Writes OpenSSH sk stub key files without a device.
   makeSkStub = pkgs.writers.writePython3Bin "make-sk-stub" { } (builtins.readFile ./make-sk-stub.py);
 
+  # Announces a 4 GiB agent message to the socket in $1 and prints whether
+  # the agent hung up ("closed") or waited for the rest ("open").
+  oversizedMessage = pkgs.writers.writePython3Bin "oversized-message" { } (
+    builtins.readFile ./oversized-message.py
+  );
+
   # Answers every askpass prompt (PIN, lock passphrase) with the content of
   # $SKAGENT_TEST_ANSWER_FILE, or else $SKAGENT_TEST_ANSWER, and records each
   # prompt in $SKAGENT_TEST_ASKPASS_LOG, if set, so tests can count how often

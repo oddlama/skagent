@@ -33,6 +33,7 @@ use zeroize::Zeroize as _;
 
 use crate::cancel::Hangup;
 use crate::destination::{self, Bound, SESSION_BIND_EXTENSION, SessionBindings};
+use crate::frames::BoundedStream;
 use crate::identities::{AcceptedConstraints, IdentityStore, SkIdentity, evaluate_constraints};
 use crate::signer::Signer;
 use crate::socket::PeerCheckedListener;
@@ -159,8 +160,8 @@ struct State {
 }
 
 impl Agent<PeerCheckedListener> for SkAgent {
-    fn new_session(&mut self, socket: &UnixStream) -> impl Session {
-        let hangup = Hangup::watch(socket)
+    fn new_session(&mut self, socket: &BoundedStream<UnixStream>) -> impl Session {
+        let hangup = Hangup::watch(socket.get_ref())
             .map_err(|error| {
                 tracing::warn!(
                     %error,

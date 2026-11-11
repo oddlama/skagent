@@ -64,6 +64,7 @@ nix build                # release binary
 - Unknown message types (e.g. the SSH1 `REMOVE_ALL_RSA_IDENTITIES` = 9 that `ssh-add -D` still sends) fail to decode, and the library drops the connection instead of answering `FAILURE`. `ssh-add` ignores this for the SSH1 message.
 - Every refused request (default `Session` methods) is logged at `ERROR` by the library. That's noisy but contains no secrets.
 - `listen()` ends on the first `accept` error. `PeerCheckedListener` retries transient errors so that can't happen for resource exhaustion.
+- The codec buffers whatever length a message announces (up to 4 GiB), and decoders aren't bounded by the frame (extension details are the rest of the read buffer). `PeerCheckedListener` hands out `frames::BoundedStream`s, which end a connection whose message announces more than OpenSSH's 256 KiB.
 
 ## destinations
 

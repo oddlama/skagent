@@ -19,6 +19,7 @@ pkgs.testers.runNixOSTest {
     environment.systemPackages = [
       package
       common.makeSkStub
+      common.oversizedMessage
       common.testAskpass
       pkgs.openssh
       pkgs.util-linux
@@ -175,6 +176,11 @@ pkgs.testers.runNixOSTest {
         assert "Request:" not in agent_log, agent_log
         assert "${lockPassphrase}" not in agent_log, "lock passphrase in the journal"
         assert "wrong-guess" not in agent_log, "unlock guess in the journal"
+
+    with subtest("an oversized message ends its connection, not the agent"):
+        assert alice_ok("oversized-message ${socket}").strip() == "closed"
+        wait_for_journal("skagent", "refused an agent message longer than allowed")
+        alice_ok("ssh-add -l || test $? -eq 1")
 
     with subtest("a second agent on the same socket is refused"):
         status, out = as_user("alice", "skagent serve --socket ${socket}")

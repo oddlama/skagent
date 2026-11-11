@@ -17,6 +17,8 @@ use rustix::process::geteuid;
 use ssh_agent_lib::agent::ListeningSocket;
 use tokio::net::{UnixListener, UnixStream};
 
+use crate::frames::BoundedStream;
+
 /// File name of the socket inside `$XDG_RUNTIME_DIR`.
 pub const DEFAULT_SOCKET_NAME: &str = "skagent.sock";
 
@@ -229,7 +231,8 @@ pub fn is_transient_accept_error(error: &io::Error) -> bool {
     })
 }
 
-/// Listener that only hands out connections whose peer passes [`peer_allowed`].
+/// Listener that only hands out connections whose peer passes [`peer_allowed`],
+/// limited to messages OpenSSH's ssh-agent would accept.
 ///
 /// Refused connections are closed and logged. The listener keeps accepting
 /// after transient errors, so it only stops on conditions that won't go away.
@@ -266,7 +269,8 @@ impl fmt::Debug for PeerCheckedListener {
 
 #[async_trait]
 impl ListeningSocket for PeerCheckedListener {
-    type Stream = UnixStream;
+    /// Messages above [`crate::frames::MAX_MESSAGE_LEN`] end the connection.
+    type Stream = BoundedStream<UnixStream>;
 
     async fn accept(&mut self) -> io::Result<Self::Stream> {
         loop {
@@ -281,7 +285,7 @@ impl ListeningSocket for PeerCheckedListener {
             };
             match stream.peer_cred() {
                 Ok(credentials) if peer_allowed(credentials.uid(), self.own_uid) => {
-                    return Ok(stream);
+                    return Ok(BoundedStream::new(stream));
                 }
                 Ok(credentials) => tracing::warn!(
                     peer_uid = credentials.uid(),
