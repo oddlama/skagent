@@ -108,6 +108,11 @@
                 package = config.packages.default;
                 testkey = config.packages.testkey;
               };
+              vm-destinations = import ./nix/tests/destinations.nix {
+                inherit pkgs;
+                package = config.packages.default;
+                testkey = config.packages.testkey;
+              };
               vm-loading = import ./nix/tests/loading.nix {
                 inherit pkgs;
                 package = config.packages.default;
