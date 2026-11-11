@@ -137,10 +137,16 @@ impl DeviceInterrupt {
                 std::thread::sleep(CANCEL_RETRY);
             }
         };
-        match tokio::runtime::Handle::try_current() {
-            Ok(runtime) => drop(runtime.spawn_blocking(resend)),
-            // Shutting down: one attempt, the process exits anyway.
-            Err(_no_runtime) => drop(self.canceller.cancel()),
+        // A thread of its own, not the runtime's blocking pool: requests are
+        // also dropped while the runtime shuts down (SIGTERM during a touch
+        // wait), and the pool runs nothing new then. The runtime waits for
+        // the worker it is cancelling, so the cancels must still go out.
+        let spawned = std::thread::Builder::new()
+            .name("skagent-cancel".to_owned())
+            .spawn(resend);
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "can't start resending the cancel, sending it once");
+            drop(self.canceller.cancel());
         }
     }
 }

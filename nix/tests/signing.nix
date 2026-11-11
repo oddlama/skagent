@@ -55,6 +55,7 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     import re
     import shlex
+    import time
 
     def alice(command: str) -> tuple[int, str]:
         return machine.execute(f"su - alice -c {shlex.quote(command)} 2>&1")
@@ -388,6 +389,19 @@ pkgs.testers.runNixOSTest {
         expect_prompt()
         expect_prompt()
         stop_agent("skagent-no-cache")
+
+    with subtest("SIGTERM during a touch wait cancels the assertion and exits promptly"):
+        start_agent("skagent-term", askpass_agent)
+        expect_prompt()
+        before_cancel = cancelled()
+        wait_for_touch_request("term-touch")
+        # Without a cancel the key would wait for its own 10 s touch timeout,
+        # and the agent's runtime for the assertion until then.
+        stopped = time.monotonic()
+        stop_agent("skagent-term")
+        assert time.monotonic() - stopped < 5, "the agent waited for the touch timeout"
+        retry(lambda _last_try: cancelled() == before_cancel + 1, timeout_seconds=3)
+        machine.wait_until_succeeds("test $(systemctl show term-touch -p ExecMainStatus --value) != 0")
 
     with subtest("a per-key policy changes the lifetime of matching keys only"):
         start_agent(
