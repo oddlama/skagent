@@ -140,7 +140,8 @@ Following OpenSSH's ssh-agent (`destination.rs`, ported from `identity_permitted
 
 ## open questions
 
-- systemd user unit with socket activation, plus a NixOS/home-manager module.
+- systemd user unit with socket activation, plus a NixOS/home-manager module. Option: run `skagent load` at login, so keys are loaded (one PIN prompt the user triggered) before working remotely.
+- `skagent load` through a forwarded agent stays refused. An opt-in (e.g. `--allow-forwarded-load`, with prompt and notification naming the forwarded host by its verified host key) is postponed until a workflow needs it: without it, nothing on a remote host can make this machine prompt for a PIN at a moment of its choosing.
 
 ## milestones
 
