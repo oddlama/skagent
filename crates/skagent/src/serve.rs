@@ -75,7 +75,10 @@ pub async fn run(args: ServeArgs) -> Result<()> {
         tracing::info!("PIN caching disabled, asking for every signature");
     }
     let socket_path = socket_path(args.socket)?;
-    let mut signer = Signer::new(Some(prompt), policy);
+    for rule in &args.pin_policies {
+        tracing::info!(?rule, "caching the PINs of matching keys differently");
+    }
+    let mut signer = Signer::new(Some(prompt), policy).with_pin_policies(args.pin_policies);
     if args.no_touch_notification {
         tracing::info!("not showing touch notifications");
     } else {

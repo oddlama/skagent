@@ -389,6 +389,21 @@ pkgs.testers.runNixOSTest {
         expect_prompt()
         stop_agent("skagent-no-cache")
 
+    with subtest("a per-key policy changes the lifetime of matching keys only"):
+        start_agent(
+            "skagent-policy",
+            askpass_agent,
+            "--pin-policy application=ssh:other,lifetime=1s",
+            "--pin-policy application=ssh:example,lifetime=5s",
+        )
+        expect_prompt()
+        machine.sleep(2)
+        # Past the 1 s rule for another application, within the 5 s rule.
+        expect_cached()
+        machine.sleep(4)
+        expect_prompt()
+        stop_agent("skagent-policy")
+
     with subtest("pinentry asks, shows errors, and its PIN is cached too"):
         start_agent("skagent-pinentry", "--pinentry /run/current-system/sw/bin/test-pinentry")
         expect_prompt()
@@ -425,7 +440,7 @@ pkgs.testers.runNixOSTest {
         assert prompts() == before + 1, "the cached PIN went to a replugged device"
 
     with subtest("PINs never reach the journal"):
-        for unit in ["skagent", "skagent-short", "skagent-idle", "skagent-no-cache", "skagent-pinentry"]:
+        for unit in ["skagent", "skagent-short", "skagent-idle", "skagent-no-cache", "skagent-policy", "skagent-pinentry"]:
             assert "${pin}" not in journal(unit), f"PIN in the journal of {unit}"
   '';
 }

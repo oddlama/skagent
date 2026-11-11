@@ -119,3 +119,47 @@ fn touch_notifications_are_on_unless_switched_off() -> Result<()> {
     ensure!(serve(&["--no-touch-notification"])?.no_touch_notification);
     Ok(())
 }
+
+#[test]
+fn pin_policies_need_one_selector_and_an_override() -> Result<()> {
+    use skagent::cli::parse_pin_policy;
+    use skagent::pin_cache::{KeyPinPolicy, KeySelector};
+
+    let rule = parse_pin_policy("application=ssh:personal,lifetime=1h,idle=15m")
+        .map_err(anyhow::Error::msg)?;
+    ensure!(
+        rule == KeyPinPolicy {
+            selector: KeySelector::Application("ssh:personal".to_owned()),
+            lifetime: Some(Duration::from_hours(1)),
+            idle: Some(Duration::from_mins(15)),
+        }
+    );
+    let rule =
+        parse_pin_policy("fingerprint=SHA256:abc+/def,lifetime=0").map_err(anyhow::Error::msg)?;
+    ensure!(rule.selector == KeySelector::Fingerprint("SHA256:abc+/def".to_owned()));
+    ensure!(rule.lifetime == Some(Duration::ZERO) && rule.idle.is_none());
+
+    for refused in [
+        "",
+        "lifetime=1h",
+        "application=ssh:a",
+        "application=ssh:a,fingerprint=SHA256:x,lifetime=1h",
+        "application=ssh:a,application=ssh:b,lifetime=1h",
+        "application=ssh:a,lifetime=1h,lifetime=2h",
+        "application=,lifetime=1h",
+        "application=ssh:a,lifetime=1d",
+        "application=ssh:a,ttl=1h",
+        "application=ssh:a,lifetime",
+    ] {
+        ensure!(parse_pin_policy(refused).is_err(), "accepted {refused:?}");
+    }
+
+    let args = serve(&[
+        "--pin-policy",
+        "application=ssh:a,lifetime=1h",
+        "--pin-policy",
+        "application=ssh:b,idle=0",
+    ])?;
+    ensure!(args.pin_policies.len() == 2);
+    Ok(())
+}

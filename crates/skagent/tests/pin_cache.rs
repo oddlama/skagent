@@ -42,7 +42,14 @@ fn policy(lifetime: u64, idle: Option<u64>) -> CachePolicy {
 
 fn cache_with_work_pin(policy: CachePolicy, start: Instant) -> Result<PinCache> {
     let mut cache = PinCache::new(policy);
-    cache.store(work(), SecretBuffer::from_slice(PIN)?, device(), 8, start);
+    cache.store(
+        work(),
+        SecretBuffer::from_slice(PIN)?,
+        device(),
+        8,
+        start,
+        cache.policy(),
+    );
     Ok(cache)
 }
 
@@ -153,6 +160,7 @@ fn entries_are_independent() -> Result<()> {
         replugged(),
         8,
         start,
+        cache.policy(),
     );
 
     ensure!(cache.evict(&personal()));
@@ -173,6 +181,7 @@ fn rejected_loading_pin_evicts_only_that_device() -> Result<()> {
         replugged(),
         8,
         start,
+        cache.policy(),
     );
     cache.evict_device(&replugged());
     expect_hit(cache.lookup(&work(), &device(), 8, start)?)?;
@@ -192,6 +201,7 @@ fn expire_drops_only_ended_entries() -> Result<()> {
         replugged(),
         8,
         at(start, 50)?,
+        cache.policy(),
     );
     ensure!(cache.expire(at(start, 99)?) == 0);
     ensure!(cache.expire(at(start, 100)?) == 1);
@@ -211,6 +221,7 @@ fn storing_again_restarts_the_lifetime() -> Result<()> {
         device(),
         8,
         at(start, 90)?,
+        cache.policy(),
     );
     expect_hit(cache.lookup(&work(), &device(), 8, at(start, 150)?)?)
 }
@@ -249,6 +260,7 @@ fn unplugged_devices_lose_their_pins_and_are_asked_once() -> Result<()> {
         replugged(),
         8,
         start,
+        cache.policy(),
     );
     cache.store(
         CredentialKey::new("ssh:other", &[3; 64]),
@@ -256,6 +268,7 @@ fn unplugged_devices_lose_their_pins_and_are_asked_once() -> Result<()> {
         replugged(),
         8,
         start,
+        cache.policy(),
     );
     let asked = std::cell::Cell::new(0_u32);
     let dropped = cache.evict_absent(|device| {
@@ -271,4 +284,75 @@ fn unplugged_devices_lose_their_pins_and_are_asked_once() -> Result<()> {
     expect_hit(cache.lookup(&work(), &device(), 8, start)?)?;
     ensure!(cache.len() == 1);
     Ok(())
+}
+
+#[test]
+fn the_first_matching_rule_overrides_the_default() {
+    use skagent::pin_cache::{KeyPinPolicy, KeySelector, policy_for};
+
+    let default = policy(3600, Some(600));
+    let rules = [
+        KeyPinPolicy {
+            selector: KeySelector::Fingerprint("SHA256:personal".to_owned()),
+            lifetime: Some(Duration::from_secs(60)),
+            idle: Some(Duration::ZERO),
+        },
+        KeyPinPolicy {
+            selector: KeySelector::Application("ssh:personal".to_owned()),
+            lifetime: None,
+            idle: Some(Duration::from_secs(30)),
+        },
+    ];
+    // Fingerprint rule first: lifetime replaced, idle switched off.
+    assert_eq!(
+        policy_for(default, &rules, "ssh:personal", "SHA256:personal"),
+        policy(60, None)
+    );
+    // Application rule: idle replaced, lifetime kept.
+    assert_eq!(
+        policy_for(default, &rules, "ssh:personal", "SHA256:other"),
+        policy(3600, Some(30))
+    );
+    // No rule: the default.
+    assert_eq!(
+        policy_for(default, &rules, "ssh:work", "SHA256:work"),
+        default
+    );
+}
+
+#[test]
+fn entries_expire_by_the_policy_they_were_stored_with() -> Result<()> {
+    let start = Instant::now();
+    let mut cache = PinCache::new(policy(3600, None));
+    cache.store(
+        work(),
+        SecretBuffer::from_slice(PIN)?,
+        device(),
+        8,
+        start,
+        cache.policy(),
+    );
+    cache.store(
+        personal(),
+        SecretBuffer::from_slice(PIN)?,
+        replugged(),
+        8,
+        start,
+        policy(60, None),
+    );
+    cache.store(
+        CredentialKey::new("ssh:never", &[3; 64]),
+        SecretBuffer::from_slice(PIN)?,
+        device(),
+        8,
+        start,
+        policy(0, None),
+    );
+    ensure!(cache.len() == 2, "a key with caching disabled was stored");
+    ensure!(cache.expire(at(start, 59)?) == 0);
+    ensure!(
+        cache.expire(at(start, 60)?) == 1,
+        "the short-lived PIN outlived its policy"
+    );
+    expect_hit(cache.lookup(&work(), &device(), 8, at(start, 61)?)?)
 }

@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 
+use crate::pin_cache::{KeyPinPolicy, KeySelector};
+
 /// ssh-agent for FIDO2 (sk) keys: caches the PIN, still requires a touch per signature.
 #[derive(Debug, Parser)]
 #[command(name = "skagent", version, about)]
@@ -68,10 +70,68 @@ pub struct ServeArgs {
     #[arg(long, value_parser = parse_duration)]
     pub pin_idle: Option<Duration>,
 
+    /// Cache the PINs of some keys differently, e.g.
+    /// `application=ssh:personal,lifetime=1h,idle=15m` or
+    /// `fingerprint=SHA256:...,lifetime=0`. One selector (`application` or
+    /// `fingerprint`, as `ssh-add -l` shows it) and `lifetime` and/or `idle`;
+    /// `0` means no caching or no idle timeout. Repeatable, the first rule
+    /// matching a key wins.
+    #[arg(long = "pin-policy", value_name = "RULE", value_parser = parse_pin_policy)]
+    pub pin_policies: Vec<KeyPinPolicy>,
+
     /// Don't show a desktop notification while a security key waits for a
     /// touch (`org.freedesktop.Notifications` on the session bus).
     #[arg(long)]
     pub no_touch_notification: bool,
+}
+
+/// Parses a `--pin-policy` rule: comma-separated `name=value` settings.
+///
+/// # Errors
+///
+/// Returns a message for clap if the rule has no or two selectors, no
+/// override, an unknown setting or a bad duration.
+pub fn parse_pin_policy(text: &str) -> Result<KeyPinPolicy, String> {
+    let mut selector = None;
+    let mut lifetime = None;
+    let mut idle = None;
+    for setting in text.split(',') {
+        let (name, value) = setting
+            .split_once('=')
+            .ok_or_else(|| format!("{setting:?} is not name=value"))?;
+        if value.is_empty() {
+            return Err(format!("{name}= needs a value"));
+        }
+        let duplicate = match name {
+            "application" => selector
+                .replace(KeySelector::Application(value.to_owned()))
+                .is_some(),
+            "fingerprint" => selector
+                .replace(KeySelector::Fingerprint(value.to_owned()))
+                .is_some(),
+            "lifetime" => lifetime.replace(parse_duration(value)?).is_some(),
+            "idle" => idle.replace(parse_duration(value)?).is_some(),
+            _ => {
+                return Err(format!(
+                    "unknown setting {name:?}, use application, fingerprint, lifetime or idle"
+                ));
+            }
+        };
+        if duplicate {
+            return Err(format!(
+                "{name}= is given twice, or both application= and fingerprint="
+            ));
+        }
+    }
+    let selector = selector.ok_or("the rule needs application= or fingerprint=")?;
+    if lifetime.is_none() && idle.is_none() {
+        return Err("the rule needs lifetime= and/or idle=".to_owned());
+    }
+    Ok(KeyPinPolicy {
+        selector,
+        lifetime,
+        idle,
+    })
 }
 
 /// Parses `0` or a whole number with a unit: `s`, `m` or `h`.

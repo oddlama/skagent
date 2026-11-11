@@ -19,7 +19,9 @@ use crate::device::DeviceIdentity;
 use crate::identities::SkIdentity;
 use crate::loading::PreparedLoad;
 use crate::notify::Notifier;
-use crate::pin_cache::{CachePolicy, CredentialKey, Lookup, Miss, PinCache};
+use crate::pin_cache::{
+    CachePolicy, CredentialKey, KeyPinPolicy, Lookup, Miss, PinCache, policy_for,
+};
 use crate::prompt::{PinPrompt, PinRequest};
 use crate::routing::{QUEUE_TIMEOUT, RoutedDevice, Router};
 
@@ -40,6 +42,10 @@ pub struct Signer {
     invalidation: watch::Sender<()>,
     /// Shows "touch your security key" while an assertion waits.
     notifier: Option<Arc<Notifier>>,
+    /// The cache policy of keys no rule in `pin_policies` matches.
+    default_policy: CachePolicy,
+    /// Per-key overrides (`--pin-policy`); the first match wins.
+    pin_policies: Vec<KeyPinPolicy>,
 }
 
 /// Captured while the agent authorizes a request, before it queues for the
@@ -138,7 +144,28 @@ impl Signer {
             router: Router::default(),
             invalidation: watch::channel(()).0,
             notifier: None,
+            default_policy: policy,
+            pin_policies: Vec::new(),
         }
+    }
+
+    /// The same signer, caching the PINs of some keys differently: the first
+    /// rule matching a key's application or fingerprint wins.
+    #[must_use]
+    pub fn with_pin_policies(mut self, rules: Vec<KeyPinPolicy>) -> Self {
+        self.pin_policies = rules;
+        self
+    }
+
+    /// How long the PIN of `identity` is cached.
+    #[must_use]
+    pub fn policy_for(&self, identity: &SkIdentity) -> CachePolicy {
+        policy_for(
+            self.default_policy,
+            &self.pin_policies,
+            identity.application(),
+            &identity.fingerprint(),
+        )
     }
 
     /// The same signer, showing desktop notifications while a key waits for
@@ -339,15 +366,20 @@ impl Signer {
         // Allocate every copy before modifying state. An mlock failure cannot
         // leave a partially primed cache or partially loaded identity list.
         let mut pins = Vec::new();
-        if state.caching_available && state.cache.policy().caches() {
+        if state.caching_available {
             for identity in identities
                 .iter()
                 .filter(|identity| identity.flags() & SK_USER_VERIFICATION_REQUIRED != 0)
             {
+                let policy = self.policy_for(identity);
+                if !policy.caches() {
+                    continue;
+                }
                 pins.push((
                     credential_key(identity),
                     SecretBuffer::from_slice(loaded.pin.expose())
                         .context("allocating a resident credential's cached PIN")?,
+                    policy,
                 ));
             }
         }
@@ -355,11 +387,16 @@ impl Signer {
             bindings.bind(credential_key(identity), device.clone());
         }
         loaded.pin.clear();
-        for (key, pin) in pins {
+        for (key, pin, policy) in pins {
             state.last_failure.remove(&key);
-            state
-                .cache
-                .store(key, pin, device.clone(), loaded.retries, loaded.accepted_at);
+            state.cache.store(
+                key,
+                pin,
+                device.clone(),
+                loaded.retries,
+                loaded.accepted_at,
+                policy,
+            );
         }
         Ok(())
     }
@@ -461,7 +498,8 @@ impl Signer {
                     source.pin().is_none() || statement.flags & SK_USER_VERIFICATION_REQUIRED != 0,
                     "the assertion lacks user verification"
                 );
-                self.remember(&key, source, &device, retries_after, &ticket)
+                let policy = self.policy_for(identity);
+                self.remember(&key, source, &device, retries_after, &ticket, policy)
                     .await?;
                 Ok(signature)
             }
@@ -531,6 +569,7 @@ impl Signer {
         device: &DeviceIdentity,
         retries_after: Option<u32>,
         ticket: &SigningTicket,
+        policy: CachePolicy,
     ) -> Result<()> {
         let mut state = self.state.lock().await;
         let mut bindings = self.router.bindings().await;
@@ -549,9 +588,14 @@ impl Signer {
             PinSource::Cache(_) if still_same_device => state.cache.mark_used(key, Instant::now()),
             PinSource::User(pin) if still_same_device => {
                 if let Some(retries) = retries_after {
-                    state
-                        .cache
-                        .store(key.clone(), pin, device.clone(), retries, Instant::now());
+                    state.cache.store(
+                        key.clone(),
+                        pin,
+                        device.clone(),
+                        retries,
+                        Instant::now(),
+                        policy,
+                    );
                 } else {
                     tracing::warn!(
                         "not caching the PIN: the retry counter couldn't be read after signing"

@@ -77,6 +77,65 @@ impl Default for CachePolicy {
     }
 }
 
+/// Which keys a [`KeyPinPolicy`] applies to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeySelector {
+    /// Keys of this FIDO application (relying party), e.g. `ssh:personal`.
+    Application(String),
+    /// The key with this fingerprint, e.g. `SHA256:…` as `ssh-add -l` shows.
+    Fingerprint(String),
+}
+
+/// Overrides of the default cache policy for some keys (`--pin-policy`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyPinPolicy {
+    /// Which keys.
+    pub selector: KeySelector,
+    /// Their lifetime; `None` keeps the default, zero disables caching.
+    pub lifetime: Option<Duration>,
+    /// Their idle timeout; `None` keeps the default, zero switches it off.
+    pub idle: Option<Duration>,
+}
+
+impl KeyPinPolicy {
+    /// Whether this rule covers the key with `application` and `fingerprint`.
+    #[must_use]
+    pub fn matches(&self, application: &str, fingerprint: &str) -> bool {
+        match &self.selector {
+            KeySelector::Application(wanted) => wanted == application,
+            KeySelector::Fingerprint(wanted) => wanted == fingerprint,
+        }
+    }
+
+    /// `default` with this rule's overrides.
+    #[must_use]
+    pub fn applied_to(&self, default: CachePolicy) -> CachePolicy {
+        CachePolicy {
+            lifetime: self.lifetime.unwrap_or(default.lifetime),
+            idle_timeout: match self.idle {
+                None => default.idle_timeout,
+                Some(idle) if idle.is_zero() => None,
+                Some(idle) => Some(idle),
+            },
+        }
+    }
+}
+
+/// The policy for the key with `application` and `fingerprint`: the first
+/// matching rule applied to `default`, or `default`.
+#[must_use]
+pub fn policy_for(
+    default: CachePolicy,
+    rules: &[KeyPinPolicy],
+    application: &str,
+    fingerprint: &str,
+) -> CachePolicy {
+    rules
+        .iter()
+        .find(|rule| rule.matches(application, fingerprint))
+        .map_or(default, |rule| rule.applied_to(default))
+}
+
 /// Why no cached PIN was handed out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Miss {
@@ -131,10 +190,13 @@ struct Entry {
     retries: u32,
     created_at: Instant,
     last_used: Instant,
+    /// The policy the PIN was stored under; keys can differ.
+    policy: CachePolicy,
 }
 
 impl Entry {
-    fn ended(&self, policy: CachePolicy, now: Instant) -> Option<Miss> {
+    fn ended(&self, now: Instant) -> Option<Miss> {
+        let policy = self.policy;
         let expired = self
             .created_at
             .checked_add(policy.lifetime)
@@ -159,7 +221,7 @@ pub struct PinCache {
 }
 
 impl PinCache {
-    /// An empty cache with `policy`.
+    /// An empty cache; `policy` is the default for keys without their own.
     #[must_use]
     pub fn new(policy: CachePolicy) -> Self {
         Self {
@@ -168,7 +230,7 @@ impl PinCache {
         }
     }
 
-    /// The policy in use.
+    /// The default policy.
     #[must_use]
     pub fn policy(&self) -> CachePolicy {
         self.policy
@@ -202,7 +264,7 @@ impl PinCache {
         let Some(entry) = self.entries.get(key) else {
             return Ok(Lookup::Miss(Miss::NotCached));
         };
-        let miss = entry.ended(self.policy, now).or_else(|| {
+        let miss = entry.ended(now).or_else(|| {
             if entry.device != *device {
                 Some(Miss::DeviceChanged)
             } else if entry.retries != retries {
@@ -224,7 +286,8 @@ impl PinCache {
 
     /// Stores `pin` for `key` after `device` accepted it at `now` and its
     /// retry counter read `retries` afterwards. Replaces an existing entry and
-    /// restarts its lifetime. Does nothing if caching is disabled.
+    /// restarts its lifetime, which with idle timeout comes from `policy`.
+    /// Does nothing if `policy` disables caching.
     pub fn store(
         &mut self,
         key: CredentialKey,
@@ -232,8 +295,9 @@ impl PinCache {
         device: DeviceIdentity,
         retries: u32,
         now: Instant,
+        policy: CachePolicy,
     ) {
-        if !self.policy.caches() {
+        if !policy.caches() {
             return;
         }
         self.entries.insert(
@@ -244,6 +308,7 @@ impl PinCache {
                 retries,
                 created_at: now,
                 last_used: now,
+                policy,
             },
         );
     }
@@ -289,9 +354,7 @@ impl PinCache {
     /// Drops the PINs whose lifetime or idle timeout ended at `now`. Returns how many.
     pub fn expire(&mut self, now: Instant) -> usize {
         let before = self.entries.len();
-        let policy = self.policy;
-        self.entries
-            .retain(|_, entry| entry.ended(policy, now).is_none());
+        self.entries.retain(|_, entry| entry.ended(now).is_none());
         before.saturating_sub(self.entries.len())
     }
 }
