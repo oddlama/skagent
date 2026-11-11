@@ -6,6 +6,26 @@ Why not just ssh-agent: OpenSSH has no PIN cache for sk keys. With `verify-requi
 
 Status: PIN caching, pinentry, multiple connected keys and resident loading work. Tested with a virtual authenticator in NixOS VMs, not yet on real hardware.
 
+## home-manager
+
+```nix
+# A home-manager module; `inputs.skagent` is this flake.
+{ inputs, pkgs, ... }:
+{
+  imports = [ inputs.skagent.homeModules.default ];
+  services.skagent = {
+    enable = true;
+    pinentry.package = pkgs.pinentry-gnome3;  # default: pinentry-qt
+    loadAtLogin = true;                       # skagent load when the graphical session starts
+    pinPolicies = [ { application = "ssh:personal"; lifetime = "1h"; } ];
+  };
+}
+```
+
+skagent then runs as a socket-activated user service: `$XDG_RUNTIME_DIR/skagent.sock` exists from login on, and the agent starts with the first client, so pinentry and notifications get the display and session bus the user manager has at that moment (your compositor or desktop has to import them, most do). It stops with `graphical-session.target`: logging out drops PINs and loaded keys. `SSH_AUTH_SOCK` is set in shells, systemd and D-Bus activation through home-manager's `sshAuthSock`, unless it comes from agent forwarding; `setSshAuthSock = false` leaves it alone, for `IdentityAgent` in `ssh_config`; setting it conflicts with other agent modules that do the same (`services.ssh-agent`, gpg-agent's SSH support). Needs a home-manager with `sshAuthSock` (26.11 / unstable).
+
+## by hand
+
 ```sh
 skagent serve                                       # pinentry must be on PATH
 # In another terminal:
@@ -28,6 +48,8 @@ Agent forwarding works like with ssh-agent, and so does `ssh-add -h` (destinatio
 While a key waits for a touch, a desktop notification says so, with the key and what is signed (`--no-touch-notification` to switch off). A request waiting for a busy key gives up after 2 minutes. `--secret-memory memfd-secret` keeps cached PINs in `memfd_secret(2)` memory, which is also removed from the kernel's direct map; the system can't hibernate while such memory exists, hence opt-in.
 
 A PIN prompt left open closes after 60s. Eviction cancels pending prompts, aborts an assertion that waits for a touch on the key itself (`CTAPHID_CANCEL`, the key stops blinking) and discards late signatures. A client that disconnects mid-request (Ctrl-C on `ssh`) cancels its request the same way, without dropping the PIN. An unplugged key loses its cached PIN within 15s. Cancellation is tested against the virtual key only so far.
+
+Under systemd, `skagent serve` takes the socket from socket activation (`ListenStream=`, one socket) and leaves it in place on exit. PIN prompts get stdio and the agent's environment, no other descriptor of the agent's (needs Linux 5.11).
 
 ## dev
 

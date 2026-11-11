@@ -43,6 +43,7 @@ Crates:
 - `skagent`: CLI, socket and process hardening, protocol handling via `ssh-agent-lib`, identity store, cache policy. `unsafe` is forbidden.
 - `skagent-fido`: safe wrapper over `libfido2-sys`, the same libfido2 OpenSSH uses. Enumerates devices, reads the PIN retry counter, selects devices by touch and asserts with up/uv/pin. Enumerates resident SSH credentials through PIN-authenticated credential management. Unsafe code is confined to `raw.rs`.
 - `skagent-secret`: guarded, locked, zeroizing memory. Unsafe code is confined to `mapping.rs`.
+- `skagent-fds`: descriptors crossing `exec`. Adopts the socket systemd passes (`LISTEN_PID` must name the agent, exactly one listening unix stream socket, made close-on-exec, taken before the runtime opens descriptors). Spawned prompts get stdio only: before exec the child marks everything above stderr close-on-exec (`close_range`, `CLOSE_RANGE_CLOEXEC`), because libfido2 opens hidraw without `O_CLOEXEC` and pinentry would otherwise inherit an open security key.
 
 Why libfido2 and not a pure Rust CTAP stack: OpenSSH signs with exactly the libfido2 assertion semantics (raw client data, `ssh:` rp ids, credProtect), and libfido2 handles hidraw, pcsc and all PIN protocol versions. Matching OpenSSH byte for byte is the point.
 
@@ -101,7 +102,7 @@ Loading stages the whole result before committing. Existing identities retain th
 6. **Lifetime:** hard max since creation (default 8h, configurable, also per key with `--pin-policy`), plus an optional idle timeout since last use. There's no "forever".
 7. **Evict everything on:** `ssh-add -D`, `ssh-add -x`, logind `Lock`, `LockedHint=true` and `PrepareForSleep(true)` over D-Bus, `skagent forget`, agent shutdown. `ssh-add -d` and the end of an `ssh-add -t` lifetime evict that credential's PIN and binding. Outstanding requests covered by the eviction are revoked too, so an old request cannot refill the cache: all of them for global evictions, only that credential's for a removal or expiry.
 8. **Scope:** one entry per credential (key handle), bound to the device identity it was verified on (see multiple keys). Never sent anywhere else. The same open device is kept from retry-counter read through prompt and assertion, with node identity checked again before sending the PIN.
-9. **Monitoring failure:** caching is disabled until logind subscriptions and a sleep delay inhibitor are established. Losing the bus or logind owner evicts PINs and disables caching until reconnection. Sleep preparation clears the cache before releasing the inhibitor; resuming reacquires it.
+9. **Monitoring failure:** caching is disabled until logind subscriptions and a sleep delay inhibitor are established. Requests arriving before the first attempt run uncached and aren't revoked when it succeeds or fails: they missed no event, and with socket activation the first request arrives with the agent's start. Every later transition revokes in-flight requests. Losing the bus or logind owner evicts PINs and disables caching until reconnection. Sleep preparation clears the cache before releasing the inhibitor; resuming reacquires it.
 
 Expiry is enforced on lookup; a 15s sweep also wipes unused expired entries from memory. Logind signals are matched to its unique bus owner. Session lock events are filtered by uid; unknown ownership conservatively evicts. The ownership lookup is the only method call inside the signal loop and is bounded to 1s (timeout counts as ours): zbus blocks its socket reader when any subscription queue is full, so an unbounded call there could deadlock the watcher and let lock and sleep go unnoticed. Proxies don't cache properties.
 
@@ -140,7 +141,6 @@ Following OpenSSH's ssh-agent (`destination.rs`, ported from `identity_permitted
 
 ## open questions
 
-- systemd user unit with socket activation, plus a NixOS/home-manager module. Option: run `skagent load` at login, so keys are loaded (one PIN prompt the user triggered) before working remotely.
 - `skagent load` through a forwarded agent stays refused. An opt-in (e.g. `--allow-forwarded-load`, with prompt and notification naming the forwarded host by its verified host key) is postponed until a workflow needs it: without it, nothing on a remote host can make this machine prompt for a PIN at a moment of its choosing.
 
 ## milestones
@@ -153,3 +153,4 @@ Following OpenSSH's ssh-agent (`destination.rs`, ported from `identity_permitted
 6. ~~Eviction triggers, `skagent forget`, `skagent load`.~~ Done, including authenticated enumeration, cache priming, preserved constraints and loading races in `checks.vm-loading`. Logind sleep tests mock the kernel suspend action.
 7. ~~Multiple devices: device binding, select by touch.~~ Done, with per-device locking and a two-key VM suite using distinct PINs.
 8. ~~Cancelling running operations.~~ Done: revocation, suspend and client hangups cancel assertions on the key and stop selections; unplugged keys lose their PINs within 15s. Real-key confirmation pending.
+9. ~~Running as a service.~~ Done: systemd socket activation and a home-manager module (socket-activated user service, part of the graphical session, optional load at login), tested in `checks.vm-home-manager`. A NixOS module is still open.
