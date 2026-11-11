@@ -89,14 +89,24 @@ pub(crate) fn list_devices(max: usize) -> Result<Vec<ListedDevice>, FidoError> {
                 if entry.is_null() {
                     return None;
                 }
-                // SAFETY: `entry` is a valid entry of `list`, which outlives
-                // these calls; the strings are copied before `list` is freed.
-                Some(unsafe {
-                    ListedDevice {
-                        path: owned_string(sys::fido_dev_info_path(entry)),
-                        manufacturer: owned_string(sys::fido_dev_info_manufacturer_string(entry)),
-                        product: owned_string(sys::fido_dev_info_product_string(entry)),
-                    }
+                // `entry` is a valid entry of `list`, which outlives these
+                // calls; each string is copied before `list` is freed.
+                // SAFETY: valid entry; returns a string owned by the entry.
+                let path = unsafe { sys::fido_dev_info_path(entry) };
+                // SAFETY: as above.
+                let manufacturer = unsafe { sys::fido_dev_info_manufacturer_string(entry) };
+                // SAFETY: as above.
+                let product = unsafe { sys::fido_dev_info_product_string(entry) };
+                // SAFETY: null or NUL-terminated strings of the live entry.
+                let path = unsafe { owned_string(path) };
+                // SAFETY: as above.
+                let manufacturer = unsafe { owned_string(manufacturer) };
+                // SAFETY: as above.
+                let product = unsafe { owned_string(product) };
+                Some(ListedDevice {
+                    path,
+                    manufacturer,
+                    product,
                 })
             })
             .collect()
@@ -219,8 +229,11 @@ impl Device {
         }
         (0..count)
             .map(|index| {
-                // SAFETY: index is in bounds and the string is copied before list drops.
-                let id = unsafe { owned_string(sys::fido_credman_rp_id(list.0.as_ptr(), index)) };
+                // SAFETY: populated list and an in-bounds index; returns a
+                // string owned by the list, or null.
+                let id = unsafe { sys::fido_credman_rp_id(list.0.as_ptr(), index) };
+                // SAFETY: null or NUL-terminated, copied before the list drops.
+                let id = unsafe { owned_string(id) };
                 if id.is_empty() {
                     return Err(FidoError::new(
                         "empty resident RP id",
@@ -269,25 +282,34 @@ impl Device {
                     sys::FIDO_ERR_INTERNAL,
                 ));
             }
-            // SAFETY: valid borrowed credential; all blobs/strings are copied
-            // before the parent list is freed. Only EdDSA keys are returned.
-            unsafe {
-                if sys::fido_cred_type(key) != sys::COSE_EDDSA {
-                    continue;
-                }
-                keys.push(ResidentKey {
-                    public_key: copy_credential_blob(
-                        sys::fido_cred_pubkey_ptr(key),
-                        sys::fido_cred_pubkey_len(key),
-                    )?,
-                    key_handle: copy_credential_blob(
-                        sys::fido_cred_id_ptr(key),
-                        sys::fido_cred_id_len(key),
-                    )?,
-                    protection: sys::fido_cred_prot(key),
-                    user_name: owned_string(sys::fido_cred_user_name(key)),
-                });
+            // `key` is a valid credential borrowed from `list`; every blob
+            // and string is copied before `list` is freed. Only EdDSA keys
+            // are returned.
+            // SAFETY: valid credential; only reads.
+            if unsafe { sys::fido_cred_type(key) } != sys::COSE_EDDSA {
+                continue;
             }
+            // SAFETY: valid credential; returns a pointer into it, or null.
+            let public_key = unsafe { sys::fido_cred_pubkey_ptr(key) };
+            // SAFETY: valid credential; only reads.
+            let public_key_len = unsafe { sys::fido_cred_pubkey_len(key) };
+            // SAFETY: valid credential; returns a pointer into it, or null.
+            let key_handle = unsafe { sys::fido_cred_id_ptr(key) };
+            // SAFETY: valid credential; only reads.
+            let key_handle_len = unsafe { sys::fido_cred_id_len(key) };
+            // SAFETY: valid credential; only reads.
+            let protection = unsafe { sys::fido_cred_prot(key) };
+            // SAFETY: valid credential; returns a string owned by it, or null.
+            let user_name = unsafe { sys::fido_cred_user_name(key) };
+            keys.push(ResidentKey {
+                // SAFETY: pointer and length libfido2 gave for the live credential.
+                public_key: unsafe { copy_credential_blob(public_key, public_key_len) }?,
+                // SAFETY: as above.
+                key_handle: unsafe { copy_credential_blob(key_handle, key_handle_len) }?,
+                protection,
+                // SAFETY: null or NUL-terminated string of the live credential.
+                user_name: unsafe { owned_string(user_name) },
+            });
         }
         Ok(keys)
     }
@@ -355,17 +377,17 @@ impl Drop for Device {
             .unwrap_or_else(PoisonError::into_inner)
             .take();
         let mut raw = self.raw.as_ptr();
-        // SAFETY: `raw` is owned by `self` and used for the last time. Closing
-        // an already closed device is harmless; free nulls our copy.
-        unsafe {
-            if self.touch_pending {
-                // Best effort: stop blinking on unselected devices. Only a
-                // transmit, with no concurrent use of this handle.
-                let _cancelled = sys::fido_dev_cancel(raw);
-            }
-            let _closed = sys::fido_dev_close(raw);
-            sys::fido_dev_free(&raw mut raw);
+        // `raw` is owned by `self` and used for the last time.
+        if self.touch_pending {
+            // Best effort: stop blinking on unselected devices.
+            // SAFETY: open device; only a transmit, and no other use of the
+            // handle remains (the cancel slot is empty).
+            let _cancelled = unsafe { sys::fido_dev_cancel(raw) };
         }
+        // SAFETY: our device; closing an already closed device is harmless.
+        let _closed = unsafe { sys::fido_dev_close(raw) };
+        // SAFETY: allocated by fido_dev_new and freed once; nulls our copy.
+        unsafe { sys::fido_dev_free(&raw mut raw) };
     }
 }
 
@@ -492,23 +514,21 @@ impl Assertion {
             return None;
         }
         let raw = self.raw.as_ptr();
-        // SAFETY: valid assertion and `index < count`; libfido2 returns a
-        // pointer into the assertion and its length, read before any change.
-        let signature = unsafe {
-            let pointer = sys::fido_assert_sig_ptr(raw, index);
-            let length = sys::fido_assert_sig_len(raw, index);
-            if pointer.is_null() || length == 0 {
-                return None;
-            }
-            std::slice::from_raw_parts(pointer, length).to_vec()
-        };
-        // SAFETY: valid assertion and index, see above.
-        let (flags, counter) = unsafe {
-            (
-                sys::fido_assert_flags(raw, index),
-                sys::fido_assert_sigcount(raw, index),
-            )
-        };
+        // SAFETY: valid assertion and `index < count`; returns a pointer
+        // into the assertion, or null.
+        let pointer = unsafe { sys::fido_assert_sig_ptr(raw, index) };
+        // SAFETY: as above; only reads.
+        let length = unsafe { sys::fido_assert_sig_len(raw, index) };
+        if pointer.is_null() || length == 0 {
+            return None;
+        }
+        // SAFETY: libfido2's pointer and length for this statement, valid
+        // while the assertion is (it isn't changed meanwhile); copied out.
+        let signature = unsafe { std::slice::from_raw_parts(pointer, length) }.to_vec();
+        // SAFETY: valid assertion and index; only reads.
+        let flags = unsafe { sys::fido_assert_flags(raw, index) };
+        // SAFETY: as above.
+        let counter = unsafe { sys::fido_assert_sigcount(raw, index) };
         Some((signature, flags, counter))
     }
 }

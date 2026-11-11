@@ -6,11 +6,12 @@
 //! Errors are `anyhow` errors with a [`FidoError`] inside; [`error_kind`]
 //! finds it, so callers can react to e.g. a wrong PIN.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-// libfido2 is a C library. The `unsafe` is confined to `raw.rs`, and every
-// block there carries a SAFETY comment.
-#![allow(unsafe_code)]
+// libfido2 is a C library. Only `raw.rs` may use `unsafe` (the workspace
+// denies it everywhere else), every block holds one operation and carries a
+// SAFETY comment (clippy enforces both).
 
 mod error;
+#[allow(unsafe_code)]
 mod raw;
 mod resident;
 pub use resident::ResidentCredential;

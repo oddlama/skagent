@@ -1,5 +1,6 @@
 //! The redaction rule for the protocol library's log output.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![forbid(unsafe_code)]
 
 use skagent::logging::is_redacted;
 use tracing::Level;

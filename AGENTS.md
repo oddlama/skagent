@@ -43,7 +43,7 @@ nix build                # release binary
 - Argument parsing: `clap` with derive.
 - Tests live in separate files (`crates/<crate>/tests/*.rs`), never in inline `#[cfg(test)]` modules. Logic that needs tests is exposed through the library crate.
 - End-to-end behavior is tested in NixOS VMs (`nix/tests/`) in addition to the Rust tests. Anything that touches sockets, permissions, process state or OpenSSH interop needs a VM test.
-- `unsafe` is denied workspace-wide (`deny`, so it can be lifted per crate). Only `skagent-secret` (raw mappings), `skagent-fido` (libfido2 FFI) and `skagent-fds` (adopting descriptors, a pre-exec hook) allow it, at their crate root, with every block small, documented (`// SAFETY:`) and behind a safe API. All other crate roots carry `#![forbid(unsafe_code)]`.
+- `unsafe` is denied workspace-wide (`deny`, so it can be lifted per module). Only `skagent-secret/src/mapping.rs` (raw mappings), `skagent-fido/src/raw.rs` (libfido2 FFI) and `skagent-fds/src/{activation,children}.rs` (adopting descriptors, a pre-exec hook) allow it, with `#[allow(unsafe_code)]` on their `mod` item, never at a crate root. Every block holds one unsafe operation with its own `// SAFETY:` comment (clippy's `multiple_unsafe_ops_per_block` and `undocumented_unsafe_blocks` deny the rest) and stays behind a safe API. All other crate roots carry `#![forbid(unsafe_code)]`.
 - Terminal output must respect the user's terminal colors: use the `colored` crate with the basic ANSI colors only (no truecolor/256-color, no backgrounds), honor `NO_COLOR`, and disable color when the stream isn't a terminal. Don't over-color. Use color to highlight what matters, consistently: red = error, yellow = warning, bold = the value the user has to act on.
 
 ## tests

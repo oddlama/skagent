@@ -28,10 +28,11 @@
 //! private memory). The catch: the kernel refuses to hibernate while any
 //! such memory exists, hence opt-in.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-// Raw memory mappings need `unsafe`. It is confined to `mapping.rs`, and
-// every block there carries a SAFETY comment.
-#![allow(unsafe_code)]
+// Raw memory mappings need `unsafe`. Only `mapping.rs` may use it (the
+// workspace denies it everywhere else), every block holds one operation and
+// carries a SAFETY comment (clippy enforces both).
 
+#[allow(unsafe_code)]
 mod mapping;
 
 use std::fmt;
