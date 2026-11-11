@@ -23,6 +23,8 @@ PINs expire after 8h by default. Use `--pin-lifetime 2h`, optionally `--pin-idle
 
 With several keys connected, the first signature asks you to touch the key holding that credential, then enter its PIN and touch again to sign. Successful signatures establish a device binding: later signatures use that device with one touch, and work/personal PIN caches stay separate. Bound devices can sign concurrently. A lost binding requires selection again—even if only one device remains. `skagent forget` keeps bindings; removing identities clears them.
 
+Agent forwarding works like with ssh-agent, and so does `ssh-add -h` (destination constraints): a key added with `ssh-add -h jump -h 'jump>target'` is usable for logging in to `jump`, and from `jump` to `target` through the forwarded agent, nowhere else; skagent checks every hop against the host key signatures ssh sends (`session-bind@openssh.com`). PIN prompts say what the signature is for, e.g. `log in as "git" to the host with key SHA256:…` or `sign "git" data`, and the agent logs it with every signature. Keys for a web origin (application not `ssh:…`) only sign SSH logins and SSHSIG data.
+
 A PIN prompt left open closes after 60s. Eviction cancels pending prompts, aborts an assertion that waits for a touch on the key itself (`CTAPHID_CANCEL`, the key stops blinking) and discards late signatures. A client that disconnects mid-request (Ctrl-C on `ssh`) cancels its request the same way, without dropping the PIN. An unplugged key loses its cached PIN within 15s. Cancellation is tested against the virtual key only so far.
 
 ## dev

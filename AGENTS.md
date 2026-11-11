@@ -49,6 +49,7 @@ nix build                # release binary
 - `crates/skagent/tests/*.rs`: Rust tests, which also run inside every nix package build (a failing test fails `nix build`).
 - `nix/tests/agent.nix` (`checks.vm-agent`): the release binary as a transient systemd unit in a NixOS VM, driven by stock `ssh-add`. Build one VM test alone with `nix build -L .#checks.x86_64-linux.vm-agent`.
 - `nix/tests/signing.nix` (`checks.vm-signing`): signing with the virtual key, sshd `verify-required`, touch/PIN counting, retry/device guards, expiry, pinentry, eviction during prompts/assertions, logind lock/sleep/outage handling, cancellation on forget and on client hangup, unplug eviction by the sweep. Suspend uses real logind but replaces systemd-suspend's kernel action with a short sleep.
+- `nix/tests/destinations.nix` (`checks.vm-destinations`): three VMs (client, jump, target). `ssh-add -K` into skagent, agent forwarding over two hops, prompts naming the verified host, `ssh-add -h` constraints (direct, forwarded, refused beyond the last allowed hop), no remote `skagent load`.
 - `nix/tests/loading.nix` (`checks.vm-loading`): resident enumeration and cache priming, no stubs, preserved lifetimes, wrong PIN, load/removal races, empty and multiple devices. The load extension carries no PIN.
 - `nix/tests/multiple-keys.nix` (`checks.vm-multiple-keys`): two keys with different PINs; selection before prompting, independent caches, parallel bound signing, removal, cancellation, replacement, a key that gives up waiting during selection, and a client hanging up during selection. Checks retry counters stay at 8.
 - `nix/tests/testkey.nix` (`checks.vm-testkey`): the virtual key against stock OpenSSH, no skagent. If this fails, no FIDO VM test means anything. Its quirks and workarounds: `docs/research/test-key.md`.
@@ -60,6 +61,12 @@ nix build                # release binary
 - Unknown message types (e.g. the SSH1 `REMOVE_ALL_RSA_IDENTITIES` = 9 that `ssh-add -D` still sends) fail to decode, and the library drops the connection instead of answering `FAILURE`. `ssh-add` ignores this for the SSH1 message.
 - Every refused request (default `Session` methods) is logged at `ERROR` by the library. That's noisy but contains no secrets.
 - `listen()` ends on the first `accept` error. `PeerCheckedListener` retries transient errors so that can't happen for resource exhaustion.
+
+## destinations
+
+- `destination.rs` follows OpenSSH's ssh-agent rules for `session-bind@openssh.com` and `restrict-destination-v00@openssh.com`; check changes against `ssh-agent.c` (`identity_permitted`, `process_ext_session_bind`, `process_sign_request2`). Decode those messages with the strict decoders there, not ssh-agent-lib's types: they drop reserved fields and don't check trailing data, which would accept constraints skagent doesn't understand.
+- Anything skagent can't decode must only ever narrow where a key may be used: a failed bind hides constrained keys, unknown host key types and CA entries never match.
+- Text from signed data (users, namespaces) is shown to the user; pass it through the sanitizer (`Purpose`), it can come from another machine.
 
 ## secrets
 

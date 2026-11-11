@@ -19,7 +19,7 @@ Protected:
 - **Leaked key handle (stub file, agent memory dump):** useless without the PIN.
 - **Stolen laptop + key while no PIN remains in memory** (evicted, expired, rebooted): PIN needed. An assertion still waiting for a touch when the PINs are evicted is cancelled on the key, which ends its temporary PIN copy; see concurrency.
 - **Other local users:** socket is `0600` in `$XDG_RUNTIME_DIR`, and the peer uid is checked on accept (own uid or root, same as OpenSSH).
-- **Forwarded agent on a hostile remote host:** every signature still needs a touch on your machine, so no silent use.
+- **Forwarded agent on a hostile remote host:** every signature still needs a touch on your machine, so no silent use. Keys added with `ssh-add -h` are additionally limited to the listed hops, verified through `session-bind@openssh.com` (see destinations). A forwarded agent can't make this machine load resident keys (no surprise PIN prompts).
 - **Core dumps / ptrace by other processes of the same user:** `RLIMIT_CORE=0`, `PR_SET_DUMPABLE=0`. The PIN sits in a zeroizing, mlocked buffer.
 
 Not protected:
@@ -76,14 +76,15 @@ Secrets (cached PINs, the `LOCK` passphrase) live in `skagent-secret` buffers:
 
 | message | behavior |
 |---|---|
-| `REQUEST_IDENTITIES` | loaded sk keys |
+| `REQUEST_IDENTITIES` | loaded sk keys the connection may see (destination constraints) |
 | `SIGN_REQUEST` | `sk-ssh-ed25519@openssh.com` only: find the device that holds the key handle, get the PIN (cache or prompt), assert with `up=true uv=true`, return `sig ‖ flags ‖ counter` |
-| `ADD_IDENTITY(_CONSTRAINED)` | sk keys from `ssh-add -K` or `ssh-add <stub>`, any other key type is refused. Lifetime (`-t`) honored; an identity whose lifetime ended is removed like `ssh-add -d`, PIN and device binding included (on the next request or the 15s sweep). `sk-provider@openssh.com` is accepted for the built-in provider only. Confirm (`-c`), destination constraints (`-h`) and anything unknown **refuse the key**, fail closed |
-| `REMOVE_IDENTITY`, `REMOVE_ALL_IDENTITIES` | drop identities. Remove-all also evicts the whole PIN cache |
+| `ADD_IDENTITY(_CONSTRAINED)` | sk keys from `ssh-add -K` or `ssh-add <stub>`, any other key type is refused. Lifetime (`-t`) honored; an identity whose lifetime ended is removed like `ssh-add -d`, PIN and device binding included (on the next request or the 15s sweep). `sk-provider@openssh.com` is accepted for the built-in provider only. Destination constraints (`-h`) are honored (see destinations). Confirm (`-c`) and anything unknown **refuse the key**, fail closed. A key a connection can't see (constraints) can't be replaced through it |
+| `REMOVE_IDENTITY`, `REMOVE_ALL_IDENTITIES` | drop identities (only ones the connection may see). Remove-all also evicts the whole PIN cache |
 | `LOCK` / `UNLOCK` (`ssh-add -x/-X`) | lock evicts the PIN cache and refuses signing until unlock. Passphrase compared in constant time |
 | `EXTENSION forget-pins@skagent` | evict PINs, keep keys; used by `skagent forget` |
 | `EXTENSION load-resident-keys@skagent` | empty request; agent selects one device, prompts and loads its resident SSH keys; reply is a big-endian u32 count, never a PIN |
-| `EXTENSION session-bind@openssh.com` | currently refused; recording it for destination constraints and prompts is pending |
+| `EXTENSION session-bind@openssh.com` | verify the host key's signature over the session ID and record the hop for this connection; also while locked, like OpenSSH. Failures answer `EXTENSION_FAILURE` |
+| `EXTENSION query` | lists the supported extensions |
 | anything else | `FAILURE` |
 
 Key loading: `ssh-add -K` with stock tooling asks for the PIN itself, so the user types it again when signing. `skagent load` instead asks inside the running agent, enumerates one selected device's resident credentials and primes their PIN caches and bindings. It skips non-SSH RPs and non-Ed25519 algorithms. credProtect 3 maps to `verify-required`; other policies retain OpenSSH's presence-only behavior. No stub files are written.
@@ -106,7 +107,7 @@ Expiry is enforced on lookup; a 15s sweep also wipes unused expired entries from
 
 ## prompting
 
-- **PIN:** pinentry over Assuan, so it uses whatever the user already has (gnome3/qt/curses/tty). The description names the key (comment, e.g. `alice@example.com yubikey:12345678`) and, once session-bind is handled, the destination host. A small Assuan client reads replies into locked memory and never includes protocol payloads in errors. `--askpass` is an explicit alternative. Every prompt is closed (its program killed) after 60s: the request holds its device and shared access to all devices meanwhile, and the lock prefers writers, so an abandoned dialog would otherwise stall selection and through it every other signature. Loading prompts don't mention a touch; credential management needs none.
+- **PIN:** pinentry over Assuan, so it uses whatever the user already has (gnome3/qt/curses/tty). The description names the key (comment, e.g. `alice@example.com yubikey:12345678`) and what the signature is for: an SSH login (user, and the host as named by the key's destination constraint or by the fingerprint of the host key the session is bound to), SSHSIG data (its namespace, e.g. `git`), or data of an unknown kind. The same text is logged with every signature. Names come from the signed data, i.e. from another machine on a forwarded agent: control characters are replaced and length is capped. A small Assuan client reads replies into locked memory and never includes protocol payloads in errors. `--askpass` is an explicit alternative. Every prompt is closed (its program killed) after 60s: the request holds its device and shared access to all devices meanwhile, and the lock prefers writers, so an abandoned dialog would otherwise stall selection and through it every other signature. Loading prompts don't mention a touch; credential management needs none.
 - **Touch:** libfido2 blocks until touched. Optionally show a desktop notification (`org.freedesktop.Notifications`) while waiting.
 
 ## concurrency
@@ -125,6 +126,17 @@ Expiry is enforced on lookup; a 15s sweep also wipes unused expired entries from
   - `soft-fido2` (pure Rust CTAP 2.1 with a uhid transport, EdDSA, credProtect, PIN, forcePINChange). Decided: used, but only in a separate test-only crate whose binary runs inside the VM. It's **AGPL-3.0**, so it is never a dependency of the agent crates.
   - QEMU USB passthrough of a real key stays an option for manual hardware runs.
 - Real-hardware runs stay manual with a documented checklist.
+
+## destinations
+
+Following OpenSSH's ssh-agent (`destination.rs`, ported from `identity_permitted` and friends in `ssh-agent.c`):
+
+- ssh sends `session-bind@openssh.com` on every agent connection: host key, session ID, the host's signature over it, and whether the connection authenticates or forwards. skagent verifies the signature and records up to 16 hops per connection. Nothing may follow a hop bound for authentication; a session ID can't change its host key. Any attempt marks the connection as remote, also a failed one.
+- `ssh-add -h` constraints (`restrict-destination-v00@openssh.com`) list hops `from > to`, `to` optionally with a user pattern. A constrained key is visible, replaceable and removable on a connection only if every bound hop is allowed by a constraint from the previous hop's host key (the first from this machine); on a connection forwarded to a host, only if a constraint allows it beyond that host. Local, unbound connections see every key.
+- A constrained key only signs on a bound connection, and only an SSH user authentication request for the most recently bound session (same session ID; for forwarded connections the request must name the bound host key), as a user the last constraint's pattern allows.
+- Websafe: a key whose application isn't `ssh:…` only signs SSH user authentication and SSHSIG data, never data a website could accept as a WebAuthn login.
+- Decoding is strict: reserved fields must be empty (ssh-agent-lib's own types silently drop them, so skagent decodes these messages itself), names contain no NUL, nothing may trail.
+- Limits: host certificates and host key types newer than the `ssh-key` crate (e.g. OpenSSH 10's `ssh-mldsa44-ed25519`) can't be decoded. Binding a session to such a key fails, which keeps constrained keys off that connection. In constraints, keys of unknown types are skipped (`ssh-add -h` sends every key `known_hosts` has, including ones `UpdateHostKeys` learned), CA entries never match: both only narrow. ssh prefers Ed25519, ECDSA and RSA host keys over `ssh-mldsa44-ed25519`, so normal hosts bind fine.
 
 ## open questions
 
