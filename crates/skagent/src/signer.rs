@@ -19,7 +19,7 @@ use crate::identities::SkIdentity;
 use crate::loading::PreparedLoad;
 use crate::pin_cache::{CachePolicy, CredentialKey, Lookup, Miss, PinCache};
 use crate::prompt::{PinPrompt, PinRequest};
-use crate::routing::{RoutedDevice, Router};
+use crate::routing::{QUEUE_TIMEOUT, RoutedDevice, Router};
 
 /// OpenSSH sk flag: the key needs a touch for every signature.
 pub const SK_USER_PRESENCE_REQUIRED: u8 = 0x01;
@@ -370,7 +370,7 @@ impl Signer {
         let _credential = tokio::select! {
             biased;
             () = ticket.revoked() => bail!("queued signature cancelled by PIN eviction or key removal"),
-            guard = self.router.credentials.lock(key.clone()) => guard,
+            guard = self.router.credentials.lock_within(key.clone(), QUEUE_TIMEOUT) => guard?,
         };
         ticket.check()?;
         tracing::info!(key = %describe(identity), "resolving the signing device");

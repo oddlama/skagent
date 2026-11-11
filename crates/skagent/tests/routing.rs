@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context as _, Result, ensure};
 use skagent::device::DeviceIdentity;
 use skagent::pin_cache::CredentialKey;
 use skagent::routing::{Bindings, KeyedLocks, Resolution};
@@ -106,5 +106,30 @@ async fn a_cancelled_waiter_does_not_bypass_a_live_device_lock() -> Result<()> {
     }
     drop(owner);
     drop(tokio::time::timeout(Duration::from_secs(1), locks.lock(work())).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn waiting_for_a_busy_key_gives_up() -> Result<()> {
+    let locks = KeyedLocks::default();
+    let holder = locks.lock(device(1)).await;
+    // The outer timeout only keeps a broken implementation from hanging the test.
+    let waited = tokio::time::timeout(
+        Duration::from_secs(1),
+        locks.lock_within(device(1), Duration::from_millis(50)),
+    )
+    .await
+    .context("lock_within ignored its timeout")?;
+    let error = match waited {
+        Ok(_) => anyhow::bail!("got a lock that is held"),
+        Err(error) => error.to_string(),
+    };
+    ensure!(error.contains("busy"), "{error}");
+    drop(holder);
+    drop(
+        locks
+            .lock_within(device(1), Duration::from_millis(50))
+            .await?,
+    );
     Ok(())
 }

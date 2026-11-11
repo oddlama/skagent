@@ -19,6 +19,12 @@ use crate::pin_cache::CredentialKey;
 use crate::signer::SigningTicket;
 
 const SELECTION_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Longest wait for a busy security key or credential. A request ahead can
+/// hold a key for a PIN prompt (60 s) plus a touch (35 s); this lets one such
+/// request finish, but stops requests from piling up behind an unresponsive
+/// key forever.
+pub const QUEUE_TIMEOUT: Duration = Duration::from_secs(120);
 const TOUCH_POLL: Duration = Duration::from_millis(50);
 
 /// A routing decision made without touching a device or reading a PIN.
@@ -82,6 +88,17 @@ impl<K> Default for KeyedLocks<K> {
 }
 
 impl<K: Eq + Hash> KeyedLocks<K> {
+    /// [`KeyedLocks::lock`], giving up after `timeout`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the lock wasn't free within `timeout`.
+    pub async fn lock_within(&self, key: K, timeout: Duration) -> Result<OwnedMutexGuard<()>> {
+        tokio::time::timeout(timeout, self.lock(key))
+            .await
+            .map_err(|_elapsed| busy(timeout))
+    }
+
     /// Waits for this key only; other keys can proceed independently.
     pub async fn lock(&self, key: K) -> OwnedMutexGuard<()> {
         let lock = {
@@ -154,7 +171,7 @@ impl Router {
         key: Option<&CredentialKey>,
         ticket: SigningTicket,
     ) -> Result<RoutedDevice> {
-        let read = Arc::clone(&self.access).read_owned().await;
+        let read = within_queue_timeout(Arc::clone(&self.access).read_owned()).await?;
         ticket.check()?;
         let candidates = connected().await?;
         let decision = self.resolve(key, &candidates).await?;
@@ -165,7 +182,7 @@ impl Router {
 
         // Re-enumerate after obtaining exclusive access: another request may
         // have waited for a touch or changed a binding in the meantime.
-        let exclusive = Arc::clone(&self.access).write_owned().await;
+        let exclusive = within_queue_timeout(Arc::clone(&self.access).write_owned()).await?;
         ticket.check()?;
         let candidates = connected().await?;
         let decision = self.resolve(key, &candidates).await?;
@@ -193,7 +210,10 @@ impl Router {
         })
         .await
         .context("the device selection thread failed")??;
-        let operation = self.devices.lock(identity.clone()).await;
+        let operation = self
+            .devices
+            .lock_within(identity.clone(), QUEUE_TIMEOUT)
+            .await?;
         Ok(RoutedDevice {
             identity,
             device,
@@ -207,7 +227,10 @@ impl Router {
         identity: DeviceIdentity,
         access: OwnedRwLockReadGuard<()>,
     ) -> Result<RoutedDevice> {
-        let operation = self.devices.lock(identity.clone()).await;
+        let operation = self
+            .devices
+            .lock_within(identity.clone(), QUEUE_TIMEOUT)
+            .await?;
         tokio::task::spawn_blocking(move || {
             let device = open_checked(&identity)?;
             Ok(RoutedDevice {
@@ -220,6 +243,19 @@ impl Router {
         .await
         .context("opening the routed security key in the device thread")?
     }
+}
+
+fn busy(waited: Duration) -> anyhow::Error {
+    anyhow::anyhow!(
+        "the security key is busy with other requests; gave up waiting after {} s",
+        waited.as_secs()
+    )
+}
+
+async fn within_queue_timeout<T>(wait: impl std::future::Future<Output = T>) -> Result<T> {
+    tokio::time::timeout(QUEUE_TIMEOUT, wait)
+        .await
+        .map_err(|_elapsed| busy(QUEUE_TIMEOUT))
 }
 
 async fn connected() -> Result<Vec<DeviceIdentity>> {
