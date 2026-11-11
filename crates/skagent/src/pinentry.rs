@@ -12,8 +12,10 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow, bail};
 use skagent_secret::SecretBuffer;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::process::{ChildStdin, ChildStdout, Command};
+use tokio::process::{ChildStdin, ChildStdout};
 use zeroize::Zeroizing;
+
+use crate::prompt::prompt_command;
 
 /// Longest Assuan line, without the newline (Assuan spec).
 const MAX_LINE: usize = 1000;
@@ -61,16 +63,10 @@ impl Pinentry {
     /// Returns an error if pinentry can't be started, the user cancels, or
     /// pinentry doesn't speak the protocol.
     pub async fn get_pin(&self, dialog: &Dialog<'_>) -> Result<SecretBuffer> {
-        let mut child = Command::new(&self.program)
+        let mut child = prompt_command(&self.program)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            // systemd's socket activation variables are the agent's.
-            .env_remove("LISTEN_PID")
-            .env_remove("LISTEN_FDS")
-            .env_remove("LISTEN_FDNAMES")
-            // A client that disconnects drops the request, and with it the dialog.
-            .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("starting pinentry program {}", self.program.display()))?;
         let mut session = Session {

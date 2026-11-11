@@ -186,17 +186,11 @@ impl Askpass {
     /// Returns an error if the program can't run, is cancelled (non-zero
     /// exit) or answers with something that isn't a valid PIN.
     pub async fn ask_pin(&self, prompt: &str) -> Result<SecretBuffer> {
-        let mut child = Command::new(&self.program)
+        let mut child = prompt_command(&self.program)
             .arg(prompt)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
-            // systemd's socket activation variables are the agent's.
-            .env_remove("LISTEN_PID")
-            .env_remove("LISTEN_FDS")
-            .env_remove("LISTEN_FDNAMES")
-            // A client that disconnects drops the request, and with it the prompt.
-            .kill_on_drop(true)
             .spawn()
             .with_context(|| format!("starting askpass program {}", self.program.display()))?;
         let mut stdout = child.stdout.take().with_context(|| {
@@ -278,4 +272,20 @@ pub fn checked_pin(bytes: &[u8]) -> Result<SecretBuffer> {
         );
     }
     SecretBuffer::from_slice(bytes).context("storing the PIN in locked memory")
+}
+
+/// A command for a prompt program (pinentry, askpass): it gets stdio and the
+/// agent's environment, nothing else of the agent's, and is killed when the
+/// request is dropped (a client that disconnects takes its prompt along).
+pub(crate) fn prompt_command(program: &Path) -> Command {
+    let mut command = Command::new(program);
+    command
+        // systemd's socket activation variables are the agent's.
+        .env_remove("LISTEN_PID")
+        .env_remove("LISTEN_FDS")
+        .env_remove("LISTEN_FDNAMES")
+        .kill_on_drop(true);
+    // Neither the agent socket nor an open security key.
+    skagent_fds::inherit_stdio_only(command.as_std_mut());
+    command
 }
