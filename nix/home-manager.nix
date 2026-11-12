@@ -264,6 +264,17 @@ in
       Service = {
         Type = "simple";
         ExecStart = "${exe} ${execArgs serveArgs}";
+        # Seccomp-based restrictions that work in a user manager and that the
+        # prompts it spawns (graphical pinentries, askpass) don't need either:
+        # no privilege gain through setuid binaries, no setuid/setgid files,
+        # no realtime scheduling, no personality changes, native syscalls
+        # only. The agent itself also disables core dumps and ptrace.
+        NoNewPrivileges = true;
+        RestrictSUIDSGID = true;
+        RestrictRealtime = true;
+        LockPersonality = true;
+        SystemCallArchitectures = "native";
+        UMask = "0077";
       };
     };
 

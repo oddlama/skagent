@@ -192,6 +192,9 @@ pkgs.testers.runNixOSTest {
         pid = user_ok("systemctl --user show skagent -p MainPID --value").strip()
         maps = machine.succeed(f"cat /proc/{pid}/maps")
         assert "secretmem" in maps, (pid, maps)
+        status = machine.succeed(f"cat /proc/{pid}/status")
+        assert "\nNoNewPrivs:\t1\n" in status, status
+        assert "\nSeccomp:\t2\n" in status, "no seccomp filter: " + status
 
     with subtest("signing needs a touch, notified, and uses the PIN cached by loading"):
         touch()
