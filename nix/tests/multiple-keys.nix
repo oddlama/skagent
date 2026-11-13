@@ -1,5 +1,6 @@
-# Two distinct authenticators and PINs. A wrong-device cached PIN would cost
-# a retry, which this test checks in addition to prompt/touch counts.
+# Two distinct authenticators and PINs, and two keys on one of them. A
+# wrong-device cached PIN would cost a retry, which this test checks in
+# addition to prompt/touch counts.
 {
   pkgs,
   package,
@@ -99,31 +100,35 @@ pkgs.testers.runNixOSTest {
     def gave_up(key: str) -> int:
         return journal(f"key-{key}").count("outcome=TimedOut")
 
-    def select_and_sign(key: str, unit: str) -> None:
+    # `key` is the virtual security key, `stub` the SSH key on it (by default
+    # the one named after the security key).
+    def select_and_sign(key: str, unit: str, stub: str = "") -> None:
+        stub = stub or key
         selections = count(key, "select")
         assertions = count(key, "getAssertion")
         asked = prompts()
-        start_sign(key, unit)
+        start_sign(stub, unit)
         retry(lambda _last_try: count(key, "select") == selections + 1, timeout_seconds=10)
         assert prompts() == asked, "asked before the user chose a device"
         touch(key)
         retry(lambda _last_try: count(key, "getAssertion") == assertions + 1, timeout_seconds=10)
         touch(key)
         finished(unit)
-        verify(key, unit)
+        verify(stub, unit)
         assert prompts() == asked + 1, "first use must ask for this device's PIN"
         wait_selections_idle()
         retries("work")
         retries("personal")
 
-    def bound_sign(key: str, unit: str, prompt: bool = False) -> None:
+    def bound_sign(key: str, unit: str, prompt: bool = False, stub: str = "") -> None:
+        stub = stub or key
         selected = count(key, "select")
         asserted = count(key, "getAssertion")
         asked = prompts()
         touch(key)
-        start_sign(key, unit)
+        start_sign(stub, unit)
         finished(unit)
-        verify(key, unit)
+        verify(stub, unit)
         assert count(key, "select") == selected, "lost a live binding"
         assert count(key, "getAssertion") == asserted + 1, "signature didn't need exactly one touch"
         assert prompts() == asked + int(prompt), (key, asked, prompts())
@@ -194,6 +199,64 @@ pkgs.testers.runNixOSTest {
         finished("parallel-work")
         verify("work", "parallel-work")
         assert prompts() == asked
+
+    with subtest("a second key on the same security key has its own binding and PIN cache"):
+        # Another application: a second resident key with the same application
+        # and user would replace the first one on the device.
+        touch("work")
+        alice(
+            "SSH_ASKPASS=test-askpass SSH_ASKPASS_REQUIRE=force SKAGENT_TEST_ANSWER=246810"
+            f" ssh-keygen -q -t ed25519-sk -O resident -O verify-required -O device={device('work')}"
+            " -O application=ssh:deploy -N ''' -C work-deploy -f ~/work-deploy"
+        )
+        alice("echo \"alice $(cat ~/work-deploy.pub)\" > ~/work-deploy.allowed")
+        alice("SSH_AUTH_SOCK=${socket} ssh-add ~/work-deploy")
+        # Work's binding and cached PIN don't carry over: with two devices
+        # connected, the new key is selected by touch and asks for the (same)
+        # PIN once more. A PIN cached for one key never signs with another.
+        select_and_sign("work", "deploy-first", stub="work-deploy")
+        bound_sign("work", "deploy-cached", stub="work-deploy")
+        bound_sign("work", "work-still-cached")
+        retries("work")
+
+    with subtest("a wrong PIN for one key on a security key makes the other key ask again"):
+        alice("SSH_AUTH_SOCK=${socket} ssh-add -d ~/work-deploy && SSH_AUTH_SOCK=${socket} ssh-add ~/work-deploy")
+        alice("echo 000000 > ${dir}/work-pin")
+        selections = count("work", "select")
+        asked = prompts()
+        start_sign("work-deploy", "deploy-wrong-pin")
+        retry(lambda _last_try: count("work", "select") == selections + 1, timeout_seconds=10)
+        touch("work")
+        finished("deploy-wrong-pin", success=False)
+        wait_selections_idle()
+        assert prompts() == asked + 1
+        assert "pin retries: 7" in machine.succeed(f"fido2-token -I {device('work')}")
+        alice("echo 246810 > ${dir}/work-pin")
+        # Work's PIN is still cached, but the shared retry counter changed
+        # since it was stored, so it isn't used until the user enters it again.
+        bound_sign("work", "work-after-wrong-pin", prompt=True)
+        assert "the PIN retry counter changed from 8 to 7" in journal("skagent")
+        retries("work")
+
+    with subtest("two keys on one security key sign one after the other"):
+        select_and_sign("work", "deploy-again", stub="work-deploy")
+        selections = count("work", "select")
+        asserted = count("work", "getAssertion")
+        asked = prompts()
+        start_sign("work", "same-device-work")
+        start_sign("work-deploy", "same-device-deploy")
+        retry(lambda _last_try: count("work", "getAssertion") == asserted + 1, timeout_seconds=10)
+        touch("work")
+        retry(lambda _last_try: count("work", "getAssertion") == asserted + 2, timeout_seconds=10)
+        touch("work")
+        finished("same-device-work")
+        finished("same-device-deploy")
+        verify("work", "same-device-work")
+        verify("work-deploy", "same-device-deploy")
+        assert prompts() == asked, "a cached PIN was asked for again"
+        assert count("work", "select") == selections, "a bound key needed selection"
+        retries("work")
+        alice("SSH_AUTH_SOCK=${socket} ssh-add -d ~/work-deploy")
 
     with subtest("forget evicts PINs but preserves both device bindings"):
         alice("skagent forget --socket ${socket}")
