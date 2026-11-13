@@ -60,3 +60,7 @@ nix flake check -L     # format, tests, clippy, VM tests
 ```
 
 Rules for changes are in `AGENTS.md`.
+
+## license
+
+MIT, see `LICENSE`. The test-only virtual security key (`crates/skagent-testkey`) links soft-fido2, which is AGPL-3.0, so builds of that crate fall under the AGPL; no shipped crate depends on it (`checks.license-boundary`).

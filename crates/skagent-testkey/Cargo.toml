@@ -2,6 +2,7 @@
 name = "skagent-testkey"
 description = "Virtual FIDO2 security key on uhid for skagent's VM tests. Links soft-fido2 (AGPL-3.0): test-only, never a dependency of skagent itself."
 edition.workspace = true
+license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 version.workspace = true
