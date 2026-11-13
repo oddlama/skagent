@@ -50,7 +50,11 @@ fn run(cli: Cli, color: bool) -> Result<()> {
         Command::Serve(args) => runtime.block_on(serve::run(args, activated)),
         Command::Forget(args) => runtime.block_on(client::forget_pins(&serve::socket_path(args)?)),
         Command::Load(args) => {
-            let count = runtime.block_on(client::load_keys(&serve::socket_path(args)?))?;
+            if args.if_connected && !client::security_key_connected()? {
+                return writeln!(io::stdout(), "No security key connected, nothing to load.")
+                    .context("writing the resident-loading result");
+            }
+            let count = runtime.block_on(client::load_keys(&serve::socket_path(args.socket)?))?;
             writeln!(io::stdout(), "Loaded {count} resident SSH key(s).")
                 .context("writing the resident-loading result")
         }

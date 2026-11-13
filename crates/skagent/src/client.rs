@@ -10,6 +10,19 @@ use tokio::net::UnixStream;
 
 use crate::agent::{FORGET_PINS_EXTENSION, LOAD_KEYS_EXTENSION};
 
+/// Whether a FIDO security key is connected, for `skagent load
+/// --if-connected`. Checked by the client: the agent's refusal reaches it
+/// without a reason.
+///
+/// # Errors
+///
+/// Returns an error if the devices can't be listed.
+pub fn security_key_connected() -> Result<bool> {
+    Ok(!skagent_fido::hid_devices()
+        .context("listing connected security keys")?
+        .is_empty())
+}
+
 /// Asks the agent to select a device, prompt and load its resident SSH keys.
 /// No PIN or credential handle is carried by this request/reply.
 ///

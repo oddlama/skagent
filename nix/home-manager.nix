@@ -290,7 +290,8 @@ in
       };
       Service = {
         Type = "oneshot";
-        ExecStart = "${exe} load";
+        # Logging in without a security key plugged in is no failure.
+        ExecStart = "${exe} load --if-connected";
         # Touch selection (several keys), the PIN prompt and waiting for a
         # busy agent each have their own, shorter limits.
         TimeoutStartSec = "5min";

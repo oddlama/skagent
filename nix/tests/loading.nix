@@ -129,6 +129,10 @@ pkgs.testers.runNixOSTest {
     with subtest("no device fails without a PIN prompt"):
         alice_fail("skagent load --socket ${socket}")
         assert prompts() == 0
+        # Loading at login (--if-connected): a missing key is no failure.
+        out = alice("skagent load --if-connected --socket ${socket}")
+        assert "No security key connected, nothing to load." in out, out
+        assert prompts() == 0
 
     with subtest("load enumerates multiple credentials and relying parties, skipping ECDSA"):
         start_key("one", "${pin}")

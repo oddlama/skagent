@@ -85,10 +85,12 @@ fn reply_count_is_strictly_validated() -> Result<()> {
 }
 
 #[test]
-fn load_accepts_a_socket_but_never_a_pin_argument() -> Result<()> {
+fn load_takes_a_socket_and_if_connected_but_never_a_pin() -> Result<()> {
     let cli = Cli::try_parse_from(["skagent", "load", "--socket", "/run/example.sock"])?;
-    ensure!(matches!(cli.command, Command::Load(_)));
+    ensure!(matches!(cli.command, Command::Load(ref args) if !args.if_connected));
     ensure!(Cli::try_parse_from(["skagent", "load", "--pin", "246810"]).is_err());
+    let cli = Cli::try_parse_from(["skagent", "load", "--if-connected"])?;
+    ensure!(matches!(cli.command, Command::Load(ref args) if args.if_connected));
     Ok(())
 }
 

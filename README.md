@@ -102,6 +102,10 @@ The original SSH comment isn't stored on the security key, so loaded keys are
 named after their application and user name. Loading again keeps the lifetime
 and comment of keys that are already in the agent.
 
+With `--if-connected`, `skagent load` does nothing if no security key is
+plugged in. That's what `loadAtLogin` uses, so logging in without your key is
+fine.
+
 `ssh-add -K` and `ssh-add <stub>` work too. skagent only accepts `ed25519-sk`
 keys and refuses everything else. That includes `ssh-add -c`, since the touch
 already confirms every signature.

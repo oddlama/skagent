@@ -33,7 +33,20 @@ pub enum Command {
     Forget(SocketArgs),
     /// Load resident Ed25519 SSH keys from one security key. With multiple
     /// devices, touch the one to load. The running agent asks for its PIN.
-    Load(SocketArgs),
+    Load(LoadArgs),
+}
+
+/// Arguments of `skagent load`.
+#[derive(Debug, Args)]
+pub struct LoadArgs {
+    /// Where the agent is.
+    #[command(flatten)]
+    pub socket: SocketArgs,
+
+    /// Succeed without loading anything if no security key is connected,
+    /// e.g. when loading at login.
+    #[arg(long)]
+    pub if_connected: bool,
 }
 
 /// Where the agent socket is.

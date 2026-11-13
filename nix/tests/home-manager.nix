@@ -232,5 +232,16 @@ pkgs.testers.runNixOSTest {
         touch()
         user_ok("rm -f ${testDir}/msg.sig && ssh-keygen -Y sign -f ~/id_sk.pub -n test ${testDir}/msg")
         assert prompts() == 3, "forgetting didn't drop the cached PIN"
+
+    with subtest("logging in without a security key loads nothing and fails nothing"):
+        logout()
+        retry(lambda _last_try: state("skagent") == "inactive", timeout_seconds=15)
+        machine.succeed("systemctl stop testkey")
+        machine.wait_until_fails("fido2-token -L | grep -F 'test key' >/dev/null")
+        asked = prompts()
+        login("wayland-third")
+        retry(lambda _last_try: "No security key connected, nothing to load." in journal("skagent-load"), timeout_seconds=30)
+        loaded()
+        assert prompts() == asked, "asked for a PIN without a security key"
   '';
 }
