@@ -1,0 +1,40 @@
+# nix flake check on pull requests: formatting, every crate's tests and
+# clippy, the license boundary and the NixOS VM tests. GitHub's Linux runners
+# have KVM, so the VMs run hardware-accelerated.
+name: check
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+# A new push to a pull request cancels its run in progress.
+concurrency:
+  group: check-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  flake-check:
+    runs-on: ubuntu-latest
+    # A run without cached builds compiles every crate's dependencies twice
+    # and boots all VM tests on two vCPUs.
+    timeout-minutes: 150
+    steps:
+      # The runner guarantees 14 GB of disk, which the Rust builds and VM
+      # closures can exceed. Drop preinstalled toolchains nothing here uses.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+        with:
+          # KVM is enabled by default; the VM tests need these features too.
+          extra_nix_config: |
+            system-features = nixos-test benchmark big-parallel kvm
+      - name: nix flake check
+        run: nix flake check -L
