@@ -164,14 +164,16 @@ on the Mac.
 
 ## decisions
 
+Agreed before the port started.
+
 - **Socket path.** launchd needs an absolute path in the plist, without
   variables, and the CLI needs a default. `/tmp` (like `yubikey-agent`) is
-  shared by all users, so someone else can create the path first. My proposal
-  is `~/.ssh/skagent.sock`: per user, `0700` by convention, short (sockets are
+  shared by all users, so someone else can create the path first. So it's
+  `~/.ssh/skagent.sock`: per user, `0700` by convention, short (sockets are
   limited to 104 bytes on macOS) and known when home-manager builds the plist.
 - **Notifications.** None in the first version. Native notifications need an
   app bundle, and `osascript` would be a hack.
 - **Apple's OpenSSH.** Supported if question 4 says it works. Otherwise
   nixpkgs' OpenSSH is a requirement.
-- **x86_64-darwin.** Probably works, but goes untested. I'd leave it out of the
+- **x86_64-darwin.** Probably works, but goes untested, so it stays out of the
   flake's systems.
