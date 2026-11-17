@@ -6,6 +6,7 @@
 //! device number, same inode, same change time" means "still the same
 //! plug-in of the same device".
 
+use std::fmt;
 use std::fs;
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
 
@@ -56,4 +57,53 @@ impl DeviceIdentity {
     pub fn path(&self) -> &str {
         &self.path
     }
+
+    /// Checks that this plug-in is still there: the node at its path exists
+    /// and is still the same device.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DeviceGone`] if the security key was unplugged, or something
+    /// else took its path.
+    pub fn ensure_present(&self) -> Result<()> {
+        match Self::of(&self.path) {
+            Ok(now) if now == *self => Ok(()),
+            Ok(_) => Err(DeviceGone::new(&self.path, None).into()),
+            Err(error) => Err(DeviceGone::new(&self.path, Some(&error)).into()),
+        }
+    }
 }
+
+/// A security key that was unplugged, or replaced by another device at its
+/// path, while a request used it.
+#[derive(Debug)]
+pub struct DeviceGone {
+    path: String,
+    /// Why the node couldn't be inspected, if that's how it showed.
+    detail: Option<String>,
+}
+
+impl DeviceGone {
+    fn new(path: &str, detail: Option<&anyhow::Error>) -> Self {
+        Self {
+            path: path.to_owned(),
+            detail: detail.map(|error| format!("{error:#}")),
+        }
+    }
+}
+
+impl fmt::Display for DeviceGone {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "the security key at {} was unplugged or replaced",
+            self.path
+        )?;
+        match &self.detail {
+            Some(detail) => write!(formatter, " ({detail})"),
+            None => Ok(()),
+        }
+    }
+}
+
+impl std::error::Error for DeviceGone {}

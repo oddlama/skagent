@@ -4,6 +4,7 @@ like a user would, as the files in $SKAGENT_TEST_POPUP_DIR say:
 - log: every line received, plus "start" and "exit"
 - answers: PINs to enter, one line each, used up in order; then pin
 - cancel-pin: cancel PIN prompts
+- hold-pin: wait with the answer to a PIN prompt while this exists
 - cancel-touch: cancel while the key waits for a touch
 - retry: try again after a touch timeout, else cancel
 """
@@ -11,6 +12,7 @@ like a user would, as the files in $SKAGENT_TEST_POPUP_DIR say:
 import json
 import os
 import sys
+import time
 
 directory = os.environ["SKAGENT_TEST_POPUP_DIR"]
 
@@ -58,6 +60,8 @@ for line in sys.stdin:
     seq = message["seq"]
     name = message["state"]["name"]
     if name in ("pin", "load-pin"):
+        while os.path.exists(path("hold-pin")):
+            time.sleep(0.1)
         if os.path.exists(path("cancel-pin")):
             say(f"CANCEL {seq}")
         else:

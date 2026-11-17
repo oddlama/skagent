@@ -357,18 +357,10 @@ async fn connected() -> Result<Vec<DeviceIdentity>> {
 /// Opens the plug-in `identity`, with its YubiKey serial (read first, while
 /// libfido2 doesn't have the device open yet).
 fn open_checked(identity: &DeviceIdentity, serials: &Serials) -> Result<(Device, Option<u32>)> {
-    ensure!(
-        DeviceIdentity::of(identity.path())? == *identity,
-        "security key changed before opening {}",
-        identity.path()
-    );
+    identity.ensure_present().context("before opening it")?;
     let serial = serials.of(identity);
     let device = Device::open(identity.path())?;
-    ensure!(
-        DeviceIdentity::of(identity.path())? == *identity,
-        "security key changed while opening {}",
-        identity.path()
-    );
+    identity.ensure_present().context("while opening it")?;
     Ok((device, serial))
 }
 
@@ -440,10 +432,7 @@ fn select_by_touch(
                     .into_iter()
                     .find(|(identity, _, _)| identity == selected)
                     .context("the touched security key disappeared from the candidates")?;
-                ensure!(
-                    DeviceIdentity::of(identity.path())? == identity,
-                    "selected security key changed"
-                );
+                identity.ensure_present().context("after it was selected")?;
                 return Ok(Selected {
                     identity,
                     serial,

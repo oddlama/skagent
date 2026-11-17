@@ -20,7 +20,7 @@ use tokio::sync::{Mutex, watch};
 use crate::cancel::{DeviceInterrupt, Ended};
 use crate::config::Config;
 use crate::destination::{Destination, Purpose};
-use crate::device::DeviceIdentity;
+use crate::device::{DeviceGone, DeviceIdentity};
 use crate::display::{self, MAX_COMMENT_CHARS};
 use crate::identities::SkIdentity;
 use crate::loading::PreparedLoad;
@@ -471,10 +471,10 @@ impl Signer {
                 }
             };
             ticket.check()?;
-            ensure!(
-                DeviceIdentity::of(routed.identity.path())? == routed.identity,
-                "security key changed during resident loading"
-            );
+            routed
+                .identity
+                .ensure_present()
+                .context("during resident loading")?;
             return Ok(PreparedLoad {
                 identities: credentials.iter().map(SkIdentity::from_resident).collect(),
                 pin,
@@ -541,10 +541,9 @@ impl Signer {
         // No awaits from here on: a cancelled caller can't stop halfway.
         loaded.ticket.check()?;
         let device = &loaded.routed.identity;
-        ensure!(
-            DeviceIdentity::of(device.path())? == *device,
-            "security key changed before committing resident credentials"
-        );
+        device
+            .ensure_present()
+            .context("before committing resident credentials")?;
         // Allocate every copy before modifying state. An mlock failure cannot
         // leave a partially primed cache or partially loaded identity list.
         let mut pins = Vec::new();
@@ -1153,10 +1152,10 @@ async fn check_typed_pin(
 
 fn check_pin_on(routed: &mut RoutedDevice, pin: &SecretBuffer) -> Result<()> {
     let path = routed.identity.path();
-    ensure!(
-        DeviceIdentity::of(path)? == routed.identity,
-        "security key changed before checking the PIN at {path}"
-    );
+    routed
+        .identity
+        .ensure_present()
+        .context("before checking the PIN")?;
     match with_tries_left(&mut routed.device, |device| device.check_pin(pin)) {
         Ok(_) => Ok(()),
         Err(error) if error_kind(&error).is_some_and(ErrorKind::invalidates_pin) => {
@@ -1190,10 +1189,10 @@ async fn list_resident(
     tokio::task::spawn_blocking(move || {
         let outcome = (|| {
             ticket.check()?;
-            ensure!(
-                DeviceIdentity::of(routed.identity.path())? == routed.identity,
-                "security key changed during the loading prompt"
-            );
+            routed
+                .identity
+                .ensure_present()
+                .context("during the loading prompt")?;
             let credentials =
                 with_tries_left(&mut routed.device, |device| device.resident_ssh_keys(&pin))?;
             let retries = routed.device.pin_retries()?;
@@ -1266,22 +1265,29 @@ fn final_state(
         },
         (Some(ErrorKind::PinPolicyViolation), _) => Shown::NewPin { key, security_key },
         (Some(ErrorKind::TouchTimeout), _) => Shown::Timeout { key, security_key },
-        (Some(ErrorKind::Transport), _) => Shown::Failed {
+        (kind, _) => Shown::Failed {
             key,
             security_key,
-            reason: Failure::Unplugged,
-        },
-        (Some(ErrorKind::OperationDenied), _) => Shown::Failed {
-            key,
-            security_key,
-            reason: Failure::Refused,
-        },
-        _ => Shown::Failed {
-            key,
-            security_key,
-            reason: Failure::Other,
+            reason: failure(error, kind),
         },
     })
+}
+
+/// Why a request failed, as far as the popup can tell the user.
+fn failure(error: &anyhow::Error, kind: Option<ErrorKind>) -> Failure {
+    let gone = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<DeviceGone>());
+    if gone.is_some() {
+        return Failure::Unplugged;
+    }
+    match kind {
+        Some(ErrorKind::Transport) => Failure::Unplugged,
+        Some(ErrorKind::OperationDenied) => Failure::Refused,
+        Some(ErrorKind::NoCredentials) => Failure::NotOnKey,
+        Some(ErrorKind::PinNotSet) => Failure::NoPin,
+        _ => Failure::Other,
+    }
 }
 
 /// What a signature is for, as the popup shows it.
@@ -1366,10 +1372,7 @@ fn assert_on(
 ) -> Result<(Statement, Option<u32>)> {
     let path = expected.path();
     let device = &mut routed.device;
-    ensure!(
-        DeviceIdentity::of(path)? == *expected,
-        "security key changed before signing at {path}"
-    );
+    expected.ensure_present().context("before signing")?;
     if let Some(expected_retries) = retry_guard {
         ensure!(
             device.pin_retries()? == expected_retries,

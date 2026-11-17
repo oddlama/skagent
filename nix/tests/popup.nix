@@ -254,6 +254,46 @@ pkgs.testers.runNixOSTest {
         assert select["key"]["label"] == "github-work", select
         assert touch_state["again"] is True, touch_state
 
+    with subtest("a key the only security key doesn't hold fails, saying so"):
+        # A key of the other security key's own; then only the popup key stays.
+        machine.succeed("touch ${otherTouchFile}")
+        other_device = machine.succeed("fido2-token -L | grep -F 'other key' | cut -d: -f1").strip()
+        alice_ok(
+            "SSH_ASKPASS=test-askpass SSH_ASKPASS_REQUIRE=force SKAGENT_TEST_ANSWER=135790"
+            f" ssh-keygen -t ed25519-sk -O resident -O verify-required -O device={other_device}"
+            " -O application=ssh:other -N ''' -C other -f ~/id_other"
+        )
+        machine.succeed("systemctl stop other-key")
+        machine.wait_until_fails("fido2-token -L | grep -F 'other key'")
+        alice_ok("SSH_AUTH_SOCK=${socket} ssh-add ~/id_other && echo other > ~/other")
+        # Unbound, with one security key plugged in: that one is asked, with
+        # its own PIN (the popup's answer), and doesn't hold the key.
+        mark = len(popup_log())
+        touch()
+        status, out = alice("SSH_AUTH_SOCK=${socket} ssh-keygen -Y sign -f ~/id_other.pub -n test ~/other")
+        assert status != 0, out
+        closed()
+        assert names(mark)[0] == "pin" and names(mark)[-1] == "failed", names(mark)
+        failed = shown(mark)[-1]
+        assert failed["reason"] == "not-on-key", failed
+        assert failed["security_key"] == {"name": "Desk 5C NFC"}, failed
+        assert "pin retries: 8" in tries()
+        machine.succeed("rm -f ${touchFile}")
+
+    with subtest("a security key unplugged while its PIN is asked for fails as unplugged"):
+        alice_ok("skagent forget --socket ${socket}")
+        alice_ok("touch ${dir}/hold-pin")
+        mark = len(popup_log())
+        start_sign("unplugged")
+        retry(lambda _last_try: "pin" in names(mark), timeout_seconds=10)
+        machine.succeed("systemctl stop testkey")
+        machine.wait_until_fails("fido2-token -L | grep -F 'popup key'")
+        alice_ok("rm ${dir}/hold-pin")
+        finished("unplugged", success=False)
+        closed()
+        assert names(mark) == ["pin", "failed"], names(mark)
+        assert shown(mark)[-1]["reason"] == "unplugged", shown(mark)
+
     with subtest("a popup that fails to start fails the request, not the agent"):
         machine.succeed("systemctl stop skagent")
         machine.wait_until_fails("test -e ${socket}")
