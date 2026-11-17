@@ -19,10 +19,21 @@ pub const MAX_COMMENT_CHARS: usize = 128;
 /// characters of `text` are kept, then `…` marks the cut.
 #[must_use]
 pub fn shown(text: &str, max_chars: usize) -> String {
+    sanitized(text, max_chars, true)
+}
+
+/// [`shown`] without escaping quotes, for text shown on its own rather
+/// than quoted in a sentence (the popup's fields).
+#[must_use]
+pub fn plain(text: &str, max_chars: usize) -> String {
+    sanitized(text, max_chars, false)
+}
+
+fn sanitized(text: &str, max_chars: usize, escape_quotes: bool) -> String {
     let mut shown = String::with_capacity(text.len().min(max_chars.saturating_mul(4)));
     for character in text.chars().take(max_chars) {
         match character {
-            '"' | '\\' => {
+            '"' | '\\' if escape_quotes => {
                 shown.push('\\');
                 shown.push(character);
             }

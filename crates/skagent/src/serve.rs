@@ -15,6 +15,7 @@ use crate::logind;
 use crate::notify::Notifier;
 use crate::pin_cache::CachePolicy;
 use crate::pinentry::Pinentry;
+use crate::popup::Popup;
 use crate::prompt::{Askpass, PinPrompt};
 use crate::signer::Signer;
 use crate::socket::{self, PeerCheckedListener};
@@ -120,11 +121,18 @@ pub async fn run(
         lifetime: args.pin_lifetime,
         idle_timeout: args.pin_idle,
     };
-    match &prompt {
-        PinPrompt::Pinentry(pinentry) => {
+    let popup = args
+        .popup
+        .as_ref()
+        .map(|program| Arc::new(Popup::new(program.clone())));
+    match (&popup, &prompt) {
+        (Some(popup), _) => {
+            tracing::info!(popup = %popup.program().display(), "showing prompts in the popup");
+        }
+        (None, PinPrompt::Pinentry(pinentry)) => {
             tracing::info!(pinentry = %pinentry.program().display(), "asking for PINs with pinentry");
         }
-        PinPrompt::Askpass(askpass) => {
+        (None, PinPrompt::Askpass(askpass)) => {
             tracing::info!(askpass = %askpass.program().display(), "asking for PINs with askpass");
         }
     }
@@ -155,10 +163,13 @@ pub async fn run(
     for rule in &args.pin_policies {
         tracing::info!(?rule, "caching the PINs of matching keys differently");
     }
-    let mut signer = Signer::new(Some(prompt), policy)
+    let mut signer = Signer::new(popup.is_none().then_some(prompt), policy)
         .with_pin_policies(args.pin_policies)
         .with_config(Arc::new(config));
-    if args.no_touch_notification {
+    if let Some(popup) = popup {
+        // The popup shows the touch itself.
+        signer = signer.with_popup(popup);
+    } else if args.no_touch_notification {
         tracing::info!("not showing touch notifications");
     } else {
         signer = signer.with_notifier(Arc::new(Notifier::default()));

@@ -119,6 +119,11 @@
                 inherit pkgs;
                 package = config.packages.default;
               };
+              vm-popup = import ./nix/tests/popup.nix {
+                inherit pkgs;
+                package = config.packages.default;
+                testkey = config.packages.testkey;
+              };
               vm-signing = import ./nix/tests/signing.nix {
                 inherit pkgs;
                 package = config.packages.default;
@@ -155,6 +160,7 @@
                   "skagent"
                   "skagent-fido"
                   "skagent-fds"
+                  "skagent-popup"
                   "skagent-secret"
                 ];
                 forbiddenPrefixes = [

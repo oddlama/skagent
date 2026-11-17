@@ -80,6 +80,12 @@ pub struct ServeArgs {
     #[arg(long)]
     pub askpass: Option<PathBuf>,
 
+    /// Show prompts in skagent's own popup program (e.g. `skagent-pinentry`)
+    /// instead: device selection, PIN, touch and the result in one window,
+    /// one request at a time. Replaces the touch notifications.
+    #[arg(long, conflicts_with_all = ["askpass", "pinentry"])]
+    pub popup: Option<PathBuf>,
+
     /// How long a PIN stays cached after it was entered, e.g. `8h`, `30m`,
     /// `90s`. Using the PIN doesn't extend it. `0` disables caching.
     #[arg(long, value_parser = parse_duration, default_value = "8h")]

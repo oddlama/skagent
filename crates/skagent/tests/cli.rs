@@ -175,3 +175,13 @@ fn secret_memory_is_locked_unless_memfd_secret_is_asked_for() -> Result<()> {
     ensure!(serve(&["--secret-memory", "swap"]).is_err());
     Ok(())
 }
+
+#[test]
+fn the_popup_replaces_pinentry_and_askpass() -> Result<()> {
+    ensure!(serve(&[])?.popup.is_none());
+    let args = serve(&["--popup", "/run/skagent-pinentry"])?;
+    ensure!(args.popup.as_deref() == Some(Path::new("/run/skagent-pinentry")));
+    ensure!(serve(&["--popup", "/x", "--pinentry", "/y"]).is_err());
+    ensure!(serve(&["--popup", "/x", "--askpass", "/y"]).is_err());
+    Ok(())
+}

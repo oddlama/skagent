@@ -21,6 +21,9 @@ use crate::signer::SigningTicket;
 
 const SELECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Called with the number of candidates when a touch selection starts.
+pub(crate) type OnSelect = Box<dyn FnOnce(usize) + Send>;
+
 /// Longest wait for a busy security key or credential. A request ahead can
 /// hold a key for a PIN prompt (60 s) plus a touch (35 s); this lets one such
 /// request finish, but stops requests from piling up behind an unresponsive
@@ -176,6 +179,8 @@ pub(crate) struct RoutedDevice {
     pub identity: DeviceIdentity,
     /// The YubiKey's serial, if it reports one.
     pub serial: Option<u32>,
+    /// The user picked the device by touch for this request.
+    pub selected_by_touch: bool,
     pub device: Device,
     _operation: OwnedMutexGuard<()>,
     _access: OwnedRwLockReadGuard<()>,
@@ -190,18 +195,25 @@ impl Router {
     }
 
     /// The device for `key`, described as `label` should the user have to
-    /// select it by touch.
+    /// select it by touch. `on_select` is called with the number of
+    /// candidates right before a selection starts.
     pub async fn route(
         &self,
         key: &CredentialKey,
         ticket: SigningTicket,
         label: &str,
+        on_select: Option<OnSelect>,
     ) -> Result<RoutedDevice> {
-        self.route_key(Some(key), ticket, label).await
+        self.route_key(Some(key), ticket, label, on_select).await
     }
 
-    pub async fn for_load(&self, ticket: SigningTicket) -> Result<RoutedDevice> {
-        self.route_key(None, ticket, "").await
+    /// The device to load resident keys from, see [`Router::route`].
+    pub async fn for_load(
+        &self,
+        ticket: SigningTicket,
+        on_select: Option<OnSelect>,
+    ) -> Result<RoutedDevice> {
+        self.route_key(None, ticket, "", on_select).await
     }
 
     async fn resolve(
@@ -225,6 +237,7 @@ impl Router {
         key: Option<&CredentialKey>,
         ticket: SigningTicket,
         label: &str,
+        on_select: Option<OnSelect>,
     ) -> Result<RoutedDevice> {
         let read = within_queue_timeout(Arc::clone(&self.access).read_owned()).await?;
         ticket.check()?;
@@ -260,6 +273,9 @@ impl Router {
             .notifier
             .as_ref()
             .map(|notifier| notifier.show("Touch the security key to use", &body));
+        if let Some(on_select) = on_select {
+            on_select(candidates.len());
+        }
         // Set when this request is dropped (client gone): the selection then
         // stops at its next round instead of blocking everyone for 30 s.
         let abandoned = Abandoned::default();
@@ -280,6 +296,7 @@ impl Router {
         Ok(RoutedDevice {
             identity: selected.identity,
             serial: selected.serial,
+            selected_by_touch: true,
             device: selected.device,
             _operation: operation,
             _access: exclusive.downgrade(),
@@ -301,6 +318,7 @@ impl Router {
             Ok(RoutedDevice {
                 identity,
                 serial,
+                selected_by_touch: false,
                 device,
                 _operation: operation,
                 _access: access,

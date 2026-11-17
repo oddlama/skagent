@@ -75,6 +75,17 @@ pub struct DeviceInterrupt {
     finished: Arc<AtomicBool>,
 }
 
+/// What ended [`DeviceInterrupt::run`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    /// The worker finished on its own.
+    Finished,
+    /// The request's ticket was revoked.
+    Revoked,
+    /// The `stop` future completed, e.g. the user cancelled in the popup.
+    Stopped,
+}
+
 /// Given to the worker; marks the operation as ended when dropped, which
 /// also covers a worker that returns early or panics.
 #[derive(Debug)]
@@ -101,25 +112,37 @@ impl DeviceInterrupt {
         )
     }
 
-    /// Waits for `worker`. If `ticket` is revoked first, the operation is
-    /// cancelled and the worker still awaited, so the device and the PIN
-    /// copy are released before this returns.
+    /// Waits for `worker`. If `ticket` is revoked or `stop` completes first,
+    /// the operation is cancelled and the worker still awaited, so the device
+    /// and the PIN copy are released before this returns. Says which of the
+    /// three ended the wait.
     ///
     /// # Errors
     ///
     /// Returns an error if the worker panicked.
-    pub async fn run<T>(self, worker: JoinHandle<T>, ticket: &SigningTicket) -> Result<T> {
+    pub async fn run<T>(
+        self,
+        worker: JoinHandle<T>,
+        ticket: &SigningTicket,
+        stop: impl Future<Output = ()>,
+    ) -> Result<(T, Ended)> {
         tokio::pin!(worker);
-        let joined = tokio::select! {
+        let (joined, ended) = tokio::select! {
             biased;
-            joined = &mut worker => joined,
+            joined = &mut worker => (joined, Ended::Finished),
             () = ticket.revoked() => {
                 tracing::info!("cancelling the security key operation of a revoked request");
                 self.cancel_until_finished();
-                worker.await
+                (worker.await, Ended::Revoked)
+            }
+            () = stop => {
+                tracing::info!("cancelling the security key operation of a stopped request");
+                self.cancel_until_finished();
+                (worker.await, Ended::Stopped)
             }
         };
-        joined.context("the security key thread panicked or was cancelled")
+        let output = joined.context("the security key thread panicked or was cancelled")?;
+        Ok((output, ended))
     }
 
     fn cancel_until_finished(&self) {

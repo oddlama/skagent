@@ -29,23 +29,47 @@ yet unless a section says so.
 ## architecture
 
 ```
-skagent serve ── stdin: states (JSON lines) ──> skagent-pinentry (GPUI)
-              <─ stdout: intents ──────────────
+skagent serve ── stdin: messages (JSON lines) ──> popup (skagent-pinentry)
+              <─ stdout: intents (text lines) ──
 ```
 
-- **Agent = controller, popup = view.** The agent owns the state machine,
-  because it sees the devices, the PIN retries and the requests. It sends the
-  complete state to show; the popup sends back only `pin`, `cancel` and
-  `retry`. The PIN line is read into locked memory like pinentry's `D` line.
-  State messages never contain secrets.
-- **Session.** The agent starts the popup for the first request that needs it,
-  sends every state of that request, and moves straight on to the next queued
-  request when one is done. It closes the popup (EOF on stdin) when the queue
-  is empty. A popup that exits or answers garbage cancels the request.
-- **Every signature goes through the popup** while it's configured: its touch
-  and done states replace the desktop notification. Requests run one after the
-  other; signing on two keys at once becomes sequential.
-- **The popup** has a `--preview <state> --theme light|dark` mode that renders
+Implemented in the agent (`--popup PATH`, `crates/skagent/src/popup.rs`); the
+protocol is the `skagent-popup` crate, shared with the popup.
+
+- **Agent = controller, popup = view.** The agent owns the flow, because it
+  sees the devices, the PIN retries and the requests. It sends the complete
+  state to show; the popup only reports what the user did.
+- **Handshake.** The popup's first line is `READY 1` (protocol version), within
+  10 s of starting. Until the first state arrives it shows nothing.
+- **Agent → popup:** `{"type":"show","seq":N,"waiting":W,"state":{"name":…}}`
+  replaces what is shown; `{"type":"queue","waiting":W}` says how many other
+  requests wait. States: `select`, `pin`, `load-pin`, `touch`, `signed`,
+  `loaded`, `replug`, `locked`, `new-pin`, `timeout`, `failed`, with the key
+  (emoji, label, fingerprint), the request (login with host and `via`, SSHSIG
+  namespace, unknown), the YubiKey's name and, after a wrong PIN, the tries
+  left. Text is sanitized by the agent. Never a secret.
+- **Popup → agent:** `PIN <seq> <data>` (percent-escaped like Assuan data),
+  `CANCEL <seq>`, `RETRY <seq>`. `seq` names the state acted on; answers to
+  replaced states are ignored. Lines are read one byte at a time into locked
+  memory.
+- **Session.** A request takes the popup before any device lock and keeps it
+  to the end; others wait (up to 2 minutes) and see the count. The first
+  request starts the popup; when one ends while others wait, the popup stays
+  for the next one, otherwise the agent closes its stdin and the popup exits
+  after showing the final state for a moment. A popup that doesn't start,
+  exits or sends garbage cancels the request it serves.
+- **Every request goes through the popup** while it's configured: its touch
+  and result states replace the desktop notification. Requests run one after
+  the other; signing on two keys at once becomes sequential.
+- **Wrong PINs** are asked for again in the same popup (`pin` with `mistake`),
+  each attempt typed by the user. A typed PIN is checked without a touch
+  first (credential management metadata, where the key supports it), so the
+  popup never shows the touch step for a wrong PIN. `PIN_AUTH_BLOCKED` ends in
+  `replug`, no tries left in `locked`, `forcePINChange` in `new-pin`.
+- **Cancel** (✕, Esc) during the PIN sends no PIN; during the touch it cancels
+  the assertion on the key, like a client hangup: the cached PIN stays. A
+  revoked request (lock, `skagent forget`, hangup) shows no final state.
+- **The popup** gets a `--preview <state> --theme light|dark` mode that renders
   fixtures, for comparing against the design and for screenshot tests.
 
 ## what the agent has to learn
@@ -61,9 +85,8 @@ skagent serve ── stdin: states (JSON lines) ──> skagent-pinentry (GPUI)
   A connected device reporting the bound serial is that YubiKey. If it isn't
   plugged in, the request waits for it (`wrong-key`, `no-key`) instead of
   falling back to selection. The PIN is never sent to another YubiKey.
-- **PIN retries within a request.** A wrong PIN keeps the popup open and asks
-  again, each attempt typed by the user. `PIN_AUTH_BLOCKED` waits for a
-  re-plug of the same serial; `PIN_BLOCKED` ends the request.
+- **Waiting for a re-plug.** `PIN_AUTH_BLOCKED` ends the request today; with
+  serials it can wait for the same YubiKey to come back and ask again.
 - **Host names.** From the key's destination constraint, else by looking up
   the verified host key in `~/.ssh/known_hosts` (`HashKnownHosts` entries
   can't be reversed), else a short fingerprint (`host SHA256:+DiY3…`).
@@ -133,9 +156,10 @@ forget`, the client hung up), the popup closes, or moves to the next request.
 2. ~~**YubiKey serials**~~ Done: `skagent_fido::yubikey_serial`, read once
    per plug-in before libfido2 opens it; the test key answers `READ_CONFIG`
    with `--serial`. Logs name the YubiKey. Still to confirm on a real YubiKey.
-3. **Popup protocol and session** in the agent, with a scripted fake popup for
-   the VM tests.
+3. ~~**Popup protocol and session**~~ Done: the `skagent-popup` crate,
+   `--popup`, queued sessions, PIN retries within a request (moved here from
+   step 5), tested with a fake popup in `checks.vm-popup`.
 4. **`skagent-pinentry`** with the designed states and the preview mode.
-5. **Bindings by serial,** persistence, the waiting states, PIN retries within a
-   request.
+5. **Bindings by serial,** persistence, the waiting states (`wrong-key`,
+   `no-key`, waiting for the re-plug in `replug`).
 6. **Host names,** request kinds, the remaining states, touch timeout.

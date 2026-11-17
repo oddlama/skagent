@@ -4,6 +4,9 @@
   # Writes OpenSSH sk stub key files without a device.
   makeSkStub = pkgs.writers.writePython3Bin "make-sk-stub" { } (builtins.readFile ./make-sk-stub.py);
 
+  # skagent's popup protocol, answered like a user would; see the script.
+  fakePopup = pkgs.writers.writePython3Bin "fake-popup" { } (builtins.readFile ./fake-popup.py);
+
   # Announces a 4 GiB agent message to the socket in $1 and prints whether
   # the agent hung up ("closed") or waited for the rest ("open").
   oversizedMessage = pkgs.writers.writePython3Bin "oversized-message" { } (

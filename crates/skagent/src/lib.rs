@@ -24,6 +24,7 @@ pub mod notify;
 pub mod output;
 pub mod pin_cache;
 pub mod pinentry;
+pub mod popup;
 pub mod prompt;
 pub mod routing;
 pub mod serve;

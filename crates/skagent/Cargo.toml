@@ -26,6 +26,7 @@ sha2.workspace = true
 signature.workspace = true
 skagent-fds.workspace = true
 skagent-fido.workspace = true
+skagent-popup.workspace = true
 skagent-secret.workspace = true
 ssh-agent-lib.workspace = true
 tempfile.workspace = true

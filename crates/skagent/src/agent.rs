@@ -318,7 +318,7 @@ impl AgentSession {
             self.hangup.as_ref(),
             self.shared
                 .signer
-                .sign(&identity, &request.data, ticket, &purpose.to_string()),
+                .sign(&identity, &request.data, ticket, &purpose),
         )
         .await?;
         tracing::info!(
@@ -371,6 +371,7 @@ impl AgentSession {
             tracing::info!(fingerprint = %identity.fingerprint(), comment = %identity.comment(), "loaded resident SSH key");
             state.identities.add(identity);
         }
+        loaded.show_loaded(count);
         Ok(Extension {
             name: LOAD_KEYS_EXTENSION.to_owned(),
             details: Unparsed::from(count.to_be_bytes().to_vec()),

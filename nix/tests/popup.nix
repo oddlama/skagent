@@ -1,0 +1,227 @@
+# skagent's own popup (--popup), end to end with a fake popup that records
+# every state it is shown and answers like a user (fake-popup.py): one popup
+# per request, PIN retries in place, cancelling, queued requests.
+{
+  pkgs,
+  package,
+  testkey,
+}:
+let
+  common = import ./common.nix { inherit pkgs; };
+  pin = "246810";
+  dir = "/run/skagent-alice";
+  socket = "${dir}/agent.sock";
+  touchFile = "/run/testkey-touch";
+  popupLog = "${dir}/log";
+  agent =
+    unit: popup:
+    "systemd-run --unit ${unit} --uid alice --setenv SKAGENT_TEST_POPUP_DIR=${dir}"
+    + " ${package}/bin/skagent serve --log skagent=debug --socket ${socket}"
+    + " --config ${dir}/config.toml --popup ${popup}";
+in
+pkgs.testers.runNixOSTest {
+  name = "skagent-popup";
+
+  nodes.machine = {
+    imports = [ common.virtualKeyMachine ];
+    environment.systemPackages = [
+      package
+      testkey
+      common.fakePopup
+      common.testAskpass
+      pkgs.libfido2
+      pkgs.openssh
+    ];
+    security.polkit.enable = true;
+    users.users.alice.isNormalUser = true;
+  };
+
+  testScript = ''
+    import json
+    import shlex
+
+    def alice(command: str) -> tuple[int, str]:
+        return machine.execute(f"su - alice -c {shlex.quote(command)} 2>&1")
+
+    def alice_ok(command: str) -> str:
+        status, out = alice(command)
+        assert status == 0, f"{command!r} exited {status}: {out}"
+        return out
+
+    def journal(unit: str) -> str:
+        return machine.succeed(f"journalctl -u {unit} --no-pager -o cat")
+
+    def touches() -> int:
+        return journal("testkey").count("touch requested")
+
+    def touch() -> None:
+        machine.succeed("touch ${touchFile}")
+
+    def tries() -> str:
+        device = machine.succeed("fido2-token -L | grep -F 'popup key' | cut -d: -f1").strip()
+        return machine.succeed(f"fido2-token -I {device}")
+
+    def popup_log() -> list[str]:
+        return machine.succeed("cat ${popupLog} 2>/dev/null || true").splitlines()
+
+    def shown(since: int) -> list[dict]:
+        """The states shown since the log had `since` lines."""
+        lines = popup_log()[since:]
+        messages = [json.loads(line) for line in lines if line.startswith("{")]
+        return [message["state"] for message in messages if message["type"] == "show"]
+
+    def names(since: int) -> list[str]:
+        return [state["name"] for state in shown(since)]
+
+    def closed() -> None:
+        """Waits until the popup exited after its last request."""
+        retry(lambda _last_try: popup_log()[-1:] == ["exit"], timeout_seconds=10)
+
+    def sign(message: str = "msg") -> tuple[int, str]:
+        return alice(f"rm -f ~/{message}.sig && SSH_AUTH_SOCK=${socket} ssh-keygen -Y sign -f ~/id_sk.pub -n test ~/{message}")
+
+    def sign_ok() -> None:
+        status, out = sign()
+        assert status == 0, f"signing failed: {out}"
+        out = alice_ok("ssh-keygen -Y verify -f ~/allowed -I alice -n test -s ~/msg.sig < ~/msg")
+        assert "Good" in out, out
+
+    def start_sign(unit: str) -> None:
+        alice_ok(f"echo {unit} > ~/{unit}")
+        machine.succeed(
+            f"systemd-run --unit {unit} --uid alice --setenv SSH_AUTH_SOCK=${socket}"
+            f" ${pkgs.openssh}/bin/ssh-keygen -Y sign -f /home/alice/id_sk.pub -n test /home/alice/{unit}"
+        )
+
+    def finished(unit: str, success: bool = True) -> None:
+        machine.wait_until_succeeds(f"systemctl show {unit} -p ActiveState --value | grep -E '^(inactive|failed)$' >/dev/null")
+        status = machine.succeed(f"systemctl show {unit} -p ExecMainStatus --value").strip()
+        assert (status == "0") == success, (unit, status, journal("skagent"))
+
+    machine.wait_for_unit("multi-user.target")
+    machine.succeed(
+        "systemd-run --unit testkey --setenv SKAGENT_TESTKEY_PIN=${pin}"
+        " ${testkey}/bin/skagent-testkey --touch file --touch-file ${touchFile}"
+        " --name 'popup key' --serial 12345678"
+    )
+    machine.wait_until_succeeds("fido2-token -L | grep -F 'popup key' >/dev/null")
+
+    with subtest("set up a key, its names and the agent with a popup"):
+        touch()
+        alice_ok(
+            "SSH_ASKPASS=test-askpass SSH_ASKPASS_REQUIRE=force SKAGENT_TEST_ANSWER=${pin}"
+            " ssh-keygen -q -t ed25519-sk -O resident -O verify-required -O application=ssh:example"
+            " -N ''' -C alice@virtual -f ~/id_sk"
+        )
+        alice_ok("echo \"alice $(cat ~/id_sk.pub)\" > ~/allowed && echo hello > ~/msg")
+        machine.succeed("install -d -m 0700 -o alice -g users ${dir}")
+        alice_ok("umask 077 && echo ${pin} > ${dir}/pin")
+        fingerprint = alice_ok("ssh-keygen -lf ~/id_sk.pub").split()[1]
+        alice_ok(
+            f"printf '[keys.\"%s\"]\\nemoji = \"🦊\"\\nlabel = \"github-work\"\\n"
+            f"[security-keys.12345678]\\nname = \"Desk 5C NFC\"\\n' '{fingerprint}' > ${dir}/config.toml"
+        )
+        machine.succeed("${agent "skagent" "/run/current-system/sw/bin/fake-popup"}")
+        machine.wait_for_file("${socket}")
+        retry(lambda _last_try: "machine sleeps (logind)" in journal("skagent"), timeout_seconds=10)
+        alice_ok("SSH_AUTH_SOCK=${socket} ssh-add ~/id_sk")
+
+    with subtest("a first signature shows PIN, touch and the result in one popup"):
+        mark = len(popup_log())
+        touch()
+        sign_ok()
+        closed()
+        assert names(mark) == ["pin", "touch", "signed"], names(mark)
+        pin_state, touch_state, _ = shown(mark)
+        assert pin_state["key"] == {"emoji": "🦊", "label": "github-work", "fingerprint": fingerprint}, pin_state
+        assert pin_state["request"] == {"kind": "sign", "namespace": "test"}, pin_state
+        assert pin_state["security_key"] == {"name": "Desk 5C NFC"}, pin_state
+        assert pin_state["mistake"] is None, pin_state
+        assert touch_state["again"] is False and touch_state["timeout_ms"] > 0, touch_state
+        assert popup_log()[mark:].count("start") == 1
+
+    with subtest("a cached PIN goes straight to the touch"):
+        mark = len(popup_log())
+        touch()
+        sign_ok()
+        closed()
+        assert names(mark) == ["touch", "signed"], names(mark)
+
+    with subtest("a wrong PIN is asked for again in the same popup"):
+        alice_ok("skagent forget --socket ${socket}")
+        alice_ok("echo 000000 > ${dir}/answers")
+        mark = len(popup_log())
+        touch()
+        sign_ok()
+        closed()
+        assert names(mark) == ["pin", "pin", "touch", "signed"], names(mark)
+        first, again = shown(mark)[:2]
+        assert first["mistake"] is None and again["mistake"] == {"tries_left": 7}, (first, again)
+        assert popup_log()[mark:].count("start") == 1
+        assert "pin retries: 8" in tries(), "the right PIN didn't reset the counter"
+
+    with subtest("cancelling the PIN prompt sends no PIN and shows no result"):
+        alice_ok("skagent forget --socket ${socket}")
+        alice_ok("touch ${dir}/cancel-pin")
+        mark = len(popup_log())
+        status, out = sign()
+        assert status != 0, out
+        closed()
+        assert names(mark) == ["pin"], names(mark)
+        assert "cancelled in the popup" in journal("skagent")
+        assert "pin retries: 8" in tries()
+        alice_ok("rm ${dir}/cancel-pin")
+
+    with subtest("cancelling during the touch stops the key and keeps the PIN"):
+        touch()
+        sign_ok()
+        closed()
+        alice_ok("touch ${dir}/cancel-touch")
+        cancelled = journal("testkey").count("outcome=Cancelled")
+        mark = len(popup_log())
+        status, out = sign()
+        assert status != 0, out
+        closed()
+        assert names(mark) == ["touch"], names(mark)
+        retry(lambda _last_try: journal("testkey").count("outcome=Cancelled") == cancelled + 1, timeout_seconds=5)
+        alice_ok("rm ${dir}/cancel-touch")
+        mark = len(popup_log())
+        touch()
+        sign_ok()
+        closed()
+        assert names(mark) == ["touch", "signed"], "the PIN was dropped"
+
+    with subtest("requests wait for the popup and reuse it"):
+        mark = len(popup_log())
+        requested = touches()
+        start_sign("queued-one")
+        retry(lambda _last_try: touches() == requested + 1, timeout_seconds=10)
+        start_sign("queued-two")
+        retry(lambda _last_try: '{"type":"queue","waiting":1}' in popup_log()[mark:], timeout_seconds=10)
+        touch()
+        retry(lambda _last_try: touches() == requested + 2, timeout_seconds=10)
+        touch()
+        finished("queued-one")
+        finished("queued-two")
+        closed()
+        assert names(mark) == ["touch", "signed", "touch", "signed"], names(mark)
+        assert popup_log()[mark:].count("start") == 1, "the popup was started again"
+        assert popup_log()[mark:].count("exit") == 1, "the popup closed in between"
+
+    with subtest("a popup that fails to start fails the request, not the agent"):
+        machine.succeed("systemctl stop skagent")
+        machine.wait_until_fails("test -e ${socket}")
+        machine.succeed("${agent "skagent-broken" "/run/current-system/sw/bin/false"}")
+        machine.wait_for_file("${socket}")
+        alice_ok("SSH_AUTH_SOCK=${socket} ssh-add ~/id_sk")
+        status, out = sign()
+        assert status != 0, out
+        assert "starting the popup" in journal("skagent-broken")
+        assert "ED25519-SK" in alice_ok("SSH_AUTH_SOCK=${socket} ssh-add -l")
+
+    with subtest("PINs reach neither the journal nor the popup log"):
+        for unit in ["skagent", "skagent-broken"]:
+            assert "${pin}" not in journal(unit), f"PIN in the {unit} journal"
+        assert "${pin}" not in "\n".join(popup_log()), "PIN in a message to the popup"
+  '';
+}
