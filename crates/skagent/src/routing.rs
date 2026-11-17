@@ -19,7 +19,8 @@ use crate::notify::Notifier;
 use crate::pin_cache::CredentialKey;
 use crate::signer::SigningTicket;
 
-const SELECTION_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a touch selection waits.
+pub(crate) const SELECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Called with the number of candidates when a touch selection starts.
 pub(crate) type OnSelect = Box<dyn FnOnce(usize) + Send>;

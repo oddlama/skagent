@@ -3,8 +3,8 @@
 //! the protocol in `skagent-popup`.
 //!
 //! - **One request at a time.** A request takes a [`PopupSession`] first and
-//!   holds it to the end. Others wait for it, and the popup shows how many
-//!   do (`queue` messages).
+//!   holds it to the end. Others wait for it, and the popup shows which
+//!   (`queue` messages).
 //! - **Started on demand, reused.** The first session starts the popup. A
 //!   session that ends while others wait leaves it running for the next
 //!   request; the last one closes its stdin, and the popup exits.
@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use skagent_popup::{
-    Intent, MAX_INTENT_LINE, Message, State, VERSION, encode_message, parse_intent,
+    Intent, MAX_INTENT_LINE, Message, Queued, State, VERSION, encode_message, parse_intent,
 };
 use skagent_secret::SecretBuffer;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -71,10 +71,12 @@ pub struct Popup {
     program: PathBuf,
     /// The running popup, owned by the current session.
     current: Arc<tokio::sync::Mutex<Option<Running>>>,
-    /// Requests waiting for a session.
-    waiting: watch::Sender<usize>,
+    /// Requests waiting for a session, oldest first, with their numbers.
+    waiting: watch::Sender<Vec<(u64, Queued)>>,
     /// The next state's sequence number.
     seq: AtomicU64,
+    /// The next waiting request's number.
+    arrivals: AtomicU64,
 }
 
 impl Popup {
@@ -84,8 +86,9 @@ impl Popup {
         Self {
             program,
             current: Arc::default(),
-            waiting: watch::channel(0).0,
+            waiting: watch::channel(Vec::new()).0,
             seq: AtomicU64::new(1),
+            arrivals: AtomicU64::new(0),
         }
     }
 
@@ -96,14 +99,20 @@ impl Popup {
     }
 
     /// Waits until the popup is free for a new request, for at most
-    /// `timeout`.
+    /// `timeout`. Meanwhile the popup shows `queued` among the waiting
+    /// requests.
     ///
     /// # Errors
     ///
     /// Returns an error if other requests keep it busy for longer.
-    pub async fn session(self: &Arc<Self>, timeout: Duration) -> Result<PopupSession> {
+    pub async fn session(
+        self: &Arc<Self>,
+        timeout: Duration,
+        queued: Queued,
+    ) -> Result<PopupSession> {
         let guard = {
-            let _waiting = Waiting::start(&self.waiting);
+            let number = self.arrivals.fetch_add(1, Ordering::SeqCst);
+            let _waiting = Waiting::start(&self.waiting, number, queued);
             tokio::time::timeout(timeout, Arc::clone(&self.current).lock_owned())
                 .await
                 .map_err(|_elapsed| {
@@ -123,21 +132,35 @@ impl Popup {
     fn next_seq(&self) -> u64 {
         self.seq.fetch_add(1, Ordering::SeqCst)
     }
+
+    /// The requests waiting right now, oldest first.
+    fn waiting(&self) -> Vec<Queued> {
+        queued(&self.waiting.borrow())
+    }
 }
 
-/// Counts a request as waiting until dropped.
-struct Waiting<'a>(&'a watch::Sender<usize>);
+fn queued(waiting: &[(u64, Queued)]) -> Vec<Queued> {
+    waiting.iter().map(|(_, queued)| queued.clone()).collect()
+}
+
+/// Lists a request as waiting until dropped.
+struct Waiting<'a> {
+    waiting: &'a watch::Sender<Vec<(u64, Queued)>>,
+    number: u64,
+}
 
 impl<'a> Waiting<'a> {
-    fn start(waiting: &'a watch::Sender<usize>) -> Self {
-        waiting.send_modify(|count| *count = count.saturating_add(1));
-        Self(waiting)
+    fn start(waiting: &'a watch::Sender<Vec<(u64, Queued)>>, number: u64, queued: Queued) -> Self {
+        waiting.send_modify(|list| list.push((number, queued)));
+        Self { waiting, number }
     }
 }
 
 impl Drop for Waiting<'_> {
     fn drop(&mut self) {
-        self.0.send_modify(|count| *count = count.saturating_sub(1));
+        let number = self.number;
+        self.waiting
+            .send_modify(|list| list.retain(|(waiting, _)| *waiting != number));
     }
 }
 
@@ -230,6 +253,43 @@ impl PopupSession {
             })?
     }
 
+    /// Shows `state`, which offers to try again, and waits for the answer,
+    /// for at most [`PROMPT_TIMEOUT`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CancelledInPopup`] if the user cancelled, or an error if the
+    /// popup exited or nobody answered.
+    pub async fn ask_retry(&mut self, state: State) -> Result<()> {
+        let seq = self.show(state)?;
+        let first_seq = self.first_seq;
+        let intents = &mut self
+            .guard
+            .as_mut()
+            .context("the popup isn't running")?
+            .intents;
+        let answer = async {
+            loop {
+                match intents.recv().await {
+                    Some(Intent::Retry { seq: retried }) if retried == seq => return Ok(()),
+                    Some(Intent::Cancel { seq: cancelled }) if cancelled >= first_seq => {
+                        return Err(anyhow::Error::new(CancelledInPopup));
+                    }
+                    Some(_) => {}
+                    None => bail!("the popup exited"),
+                }
+            }
+        };
+        tokio::time::timeout(PROMPT_TIMEOUT, answer)
+            .await
+            .map_err(|_elapsed| {
+                anyhow!(
+                    "nobody chose to try again within {} s",
+                    PROMPT_TIMEOUT.as_secs()
+                )
+            })?
+    }
+
     /// Completes when the user cancels this request in the popup, or the
     /// popup exits. Cancel-safe.
     pub async fn cancelled(&mut self) {
@@ -250,7 +310,7 @@ impl PopupSession {
 impl Drop for PopupSession {
     fn drop(&mut self) {
         // A request that starts waiting after this check starts a new popup.
-        if *self.popup.waiting.borrow() == 0
+        if self.popup.waiting.borrow().is_empty()
             && let Some(running) = self.guard.take()
         {
             running.close();
@@ -275,7 +335,7 @@ impl Shower {
         let seq = self.popup.next_seq();
         let line = encode_message(&Message::Show {
             seq,
-            waiting: *self.popup.waiting.borrow(),
+            waiting: self.popup.waiting(),
             state: Box::new(state),
         })?;
         self.lines
@@ -435,14 +495,14 @@ async fn read_line(stdout: &mut ChildStdout, line: &mut SecretBuffer) -> Result<
     }
 }
 
-/// Tells the popup whenever the number of waiting requests changes.
+/// Tells the popup whenever the waiting requests change.
 async fn forward_queue(
-    mut waiting: watch::Receiver<usize>,
+    mut waiting: watch::Receiver<Vec<(u64, Queued)>>,
     lines: mpsc::WeakUnboundedSender<Vec<u8>>,
 ) {
     while waiting.changed().await.is_ok() {
-        let count = *waiting.borrow_and_update();
-        let Ok(line) = encode_message(&Message::Queue { waiting: count }) else {
+        let list = queued(&waiting.borrow_and_update());
+        let Ok(line) = encode_message(&Message::Queue { waiting: list }) else {
             return;
         };
         let Some(lines) = lines.upgrade() else {

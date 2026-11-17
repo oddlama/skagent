@@ -12,6 +12,7 @@ let
   dir = "/run/skagent-alice";
   socket = "${dir}/agent.sock";
   touchFile = "/run/testkey-touch";
+  otherTouchFile = "/run/testkey-other-touch";
   popupLog = "${dir}/log";
   agent =
     unit: popup:
@@ -51,8 +52,8 @@ pkgs.testers.runNixOSTest {
     def journal(unit: str) -> str:
         return machine.succeed(f"journalctl -u {unit} --no-pager -o cat")
 
-    def touches() -> int:
-        return journal("testkey").count("touch requested")
+    def touches(operation: str = "") -> int:
+        return journal("testkey").count(f'touch requested operation="{operation}' if operation else "touch requested")
 
     def touch() -> None:
         machine.succeed("touch ${touchFile}")
@@ -72,6 +73,12 @@ pkgs.testers.runNixOSTest {
 
     def names(since: int) -> list[str]:
         return [state["name"] for state in shown(since)]
+
+    def queued(since: int) -> list[list[dict]]:
+        """The waiting requests in every queue message since `since`."""
+        lines = popup_log()[since:]
+        messages = [json.loads(line) for line in lines if line.startswith("{")]
+        return [message["waiting"] for message in messages if message["type"] == "queue"]
 
     def closed() -> None:
         """Waits until the popup exited after its last request."""
@@ -197,7 +204,8 @@ pkgs.testers.runNixOSTest {
         start_sign("queued-one")
         retry(lambda _last_try: touches() == requested + 1, timeout_seconds=10)
         start_sign("queued-two")
-        retry(lambda _last_try: '{"type":"queue","waiting":1}' in popup_log()[mark:], timeout_seconds=10)
+        retry(lambda _last_try: [1] == [len(waiting) for waiting in queued(mark)][:1], timeout_seconds=10)
+        assert queued(mark)[0][0]["key"]["label"] == "github-work", queued(mark)
         touch()
         retry(lambda _last_try: touches() == requested + 2, timeout_seconds=10)
         touch()
@@ -207,6 +215,44 @@ pkgs.testers.runNixOSTest {
         assert names(mark) == ["touch", "signed", "touch", "signed"], names(mark)
         assert popup_log()[mark:].count("start") == 1, "the popup was started again"
         assert popup_log()[mark:].count("exit") == 1, "the popup closed in between"
+
+    with subtest("a touch timeout offers to try again with the PIN kept"):
+        alice_ok("touch ${dir}/retry")
+        mark = len(popup_log())
+        requested = touches()
+        start_sign("timed-out")
+        # The test key gives up after 10 s without a touch.
+        retry(lambda _last_try: "timeout" in names(mark), timeout_seconds=30)
+        retry(lambda _last_try: touches() == requested + 2, timeout_seconds=10)
+        touch()
+        finished("timed-out")
+        closed()
+        assert names(mark) == ["touch", "timeout", "touch", "signed"], names(mark)
+        assert shown(mark)[1]["security_key"] == {"name": "Desk 5C NFC"}, shown(mark)
+        alice_ok("rm ${dir}/retry")
+
+    with subtest("with two keys plugged in, the popup shows the selection, then a second touch"):
+        machine.succeed(
+            "systemd-run --unit other-key --setenv SKAGENT_TESTKEY_PIN=135790"
+            " ${testkey}/bin/skagent-testkey --touch file --touch-file ${otherTouchFile} --name 'other key'"
+        )
+        machine.wait_until_succeeds("fido2-token -L | grep -F 'other key' >/dev/null")
+        # Removing the key drops its binding (and PIN): it must be selected.
+        alice_ok("SSH_AUTH_SOCK=${socket} ssh-add -d ~/id_sk && SSH_AUTH_SOCK=${socket} ssh-add ~/id_sk")
+        mark = len(popup_log())
+        selections, assertions = touches("select"), touches("getAssertion")
+        start_sign("selected")
+        retry(lambda _last_try: touches("select") == selections + 1, timeout_seconds=10)
+        touch()
+        retry(lambda _last_try: touches("getAssertion") == assertions + 1, timeout_seconds=10)
+        touch()
+        finished("selected")
+        closed()
+        assert names(mark) == ["select", "pin", "touch", "signed"], names(mark)
+        select, _, touch_state, _ = shown(mark)
+        assert select["devices"] == 2 and select["timeout_ms"] == 30000, select
+        assert select["key"]["label"] == "github-work", select
+        assert touch_state["again"] is True, touch_state
 
     with subtest("a popup that fails to start fails the request, not the agent"):
         machine.succeed("systemctl stop skagent")

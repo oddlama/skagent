@@ -97,56 +97,43 @@ protocol is the `skagent-popup` crate, shared with the popup.
 
 ## states
 
-The design covers `pin`, `wrong-pin`, `touch`, `wrong-key`, `replug` and
-`done`. These still need a design; each entry says when it appears, what it
-has to show and where it leads.
+The design ("B+", maintained outside this repository) has these screens. Each
+one maps to a protocol state; the popup derives the copy from the data.
 
-1. **`select`: pick the YubiKey by touch.** When a key has never been used (no
-   YubiKey is known for it) and several security keys are plugged in.
-   `verify-required` keys can't be found without the PIN, so the user has to
-   choose; every plugged-in key blinks. Shows the SSH key (emoji, label), that
-   the user should touch the YubiKey holding it, and how many keys are plugged
-   in. A 30 s countdown. ✕ cancels. Leads to `pin` (or `touch`). Because
-   signing then needs a *second* touch, the following `touch` state should make
-   that clear ("once more"). The same state is used by `skagent load` ("touch
-   the YubiKey to load from"), without an SSH key.
-2. **`no-key`: nothing plugged in.** Two variants: the YubiKey is known ("Plug in
-   Desk 5C NFC", like `wrong-key` without a wrong key) or not ("Plug in the
-   YubiKey with github-work"). Waits; ✕ cancels. Leads on automatically when a
-   key appears.
-3. **`locked`: PIN blocked** (no tries left). Shows the YubiKey's name and that
-   only a reset helps (it wipes the key). Only ✕.
-4. **`timeout`: no touch in time.** Shows the YubiKey, "Timed out", and one
-   action, try again (Enter). The accepted PIN is kept for the retry, so it
-   isn't asked again.
-5. **`new-pin`: the key wants a new PIN first** (`forcePINChange`, for example
-   right after provisioning with a temporary PIN). Shows the YubiKey's name and
-   that the PIN has to be changed (`ykman fido access change-pin`). Only ✕.
-   Changing the PIN inside the popup could come later.
-6. **`load`: enter the PIN to load resident keys** (`skagent load`). There's no
-   SSH key yet, so no emoji or label: the anchor is the YubiKey. PIN field,
-   then no touch (credential management needs none), then a `done` variant
-   saying how many keys were loaded. `wrong-pin`, `replug`, `locked` and
-   `new-pin` apply as well.
-7. **Queue indicator.** While other requests wait, the popup shows how many
-   (and possibly their keys' emoji). When the current request is done, the
-   popup crossfades to the next one instead of closing.
-8. **`failed`: anything else.** The key was unplugged mid-signature, a transport
-   error, the signature didn't verify. A short reason; ✕ or auto-close.
+| Screen | Protocol state | Data | Notes |
+| --- | --- | --- | --- |
+| `pin`, `wrong-pin` | `pin` | key, request, YubiKey, `mistake.tries_left` | wrong-pin when `mistake` is set |
+| `touch`, `touch-again` | `touch` | key, request, YubiKey, `timeout_ms`, `again` | touch-again right after `select` |
+| `done` | `signed` | key, request | final |
+| `select` | `select` | key, `devices`, `timeout_ms` | every plugged-in key blinks |
+| `select-load` | `select` without key | `devices`, `timeout_ms` | |
+| `load-pin` | `load-pin` | YubiKey, `mistake` | YubiKey glyph as the anchor, no touch |
+| `load-done` | `loaded` | YubiKey, the loaded keys | final |
+| `wrong-key` | `wrong-key` | key, YubiKey, the other YubiKey | step 5 |
+| `nokey-known`, `nokey-unknown` | `no-key` | key, YubiKey if known | step 5 |
+| `replug` | `replug` | key or none, YubiKey, `tries_left` | final until step 5 waits for the re-plug |
+| `locked` | `locked` | key or none, YubiKey | final |
+| `new-pin` | `new-pin` | key or none, YubiKey | final |
+| `timeout` | `timeout` | key, YubiKey | answered with `RETRY` (touch again, PIN kept) or `CANCEL` |
+| `failed` | `failed` | key or none, YubiKey, `reason` | final; "Couldn't load keys" without a key |
+| queue pill | every message's `waiting` | the waiting requests' keys | `queue` messages update it |
 
-No design needed: when the agent revokes a request (screen lock, `skagent
-forget`, the client hung up), the popup closes, or moves to the next request.
+Keys without a serial (not YubiKeys) come without a YubiKey name; the popup
+falls back to generic copy. A final state stays for its moment (900 ms for
+`signed` and `loaded`, 5 s for `failed`) before the next request's state or
+the end of input replaces it.
 
-### subtitle copy per request kind
+### subtitle per request kind
 
 | Request | Subtitle |
 | --- | --- |
 | SSH login, host known | `github.com` |
-| SSH login through a forwarded agent | `github.com via jump` |
-| SSH login, host not resolvable | `host SHA256:+DiY3…` |
-| SSHSIG, namespace `git` (commits, tags) | to be decided, e.g. `Git signature` |
-| SSHSIG, other namespace | e.g. `Signature for "file"` |
-| anything else | e.g. `Unknown request` |
+| SSH login through a forwarded agent | `github.com · via jump` |
+| SSH login, host not resolvable | `Unknown host · SHA256:+DiY3…` |
+| SSH login, session not bound to a host key | `Unknown host` |
+| SSHSIG, namespace `git` | `Git signature` |
+| SSHSIG, other namespace | `Signature for "file"` |
+| anything else | `Unknown request`, in the warning colour |
 
 ## steps
 
@@ -157,9 +144,11 @@ forget`, the client hung up), the popup closes, or moves to the next request.
    per plug-in before libfido2 opens it; the test key answers `READ_CONFIG`
    with `--serial`. Logs name the YubiKey. Still to confirm on a real YubiKey.
 3. ~~**Popup protocol and session**~~ Done: the `skagent-popup` crate,
-   `--popup`, queued sessions, PIN retries within a request (moved here from
-   step 5), tested with a fake popup in `checks.vm-popup`.
+   `--popup`, queued sessions with the waiting keys, PIN retries within a
+   request and retrying a timed-out touch (both moved here from later steps),
+   tested with a fake popup in `checks.vm-popup`.
 4. **`skagent-pinentry`** with the designed states and the preview mode.
 5. **Bindings by serial,** persistence, the waiting states (`wrong-key`,
    `no-key`, waiting for the re-plug in `replug`).
-6. **Host names,** request kinds, the remaining states, touch timeout.
+6. **Host names** from `known_hosts`, the touch timeout measured on a
+   YubiKey.

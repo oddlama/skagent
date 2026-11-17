@@ -366,12 +366,16 @@ impl AgentSession {
             .signer
             .prime_loaded(&mut loaded, &imports)
             .await?;
+        let shown = imports
+            .iter()
+            .map(|identity| self.shared.signer.popup_key(identity))
+            .collect();
         // No awaits from cache commit through identity insertion.
         for identity in imports {
             tracing::info!(fingerprint = %identity.fingerprint(), comment = %identity.comment(), "loaded resident SSH key");
             state.identities.add(identity);
         }
-        loaded.show_loaded(count);
+        loaded.show_loaded(shown);
         Ok(Extension {
             name: LOAD_KEYS_EXTENSION.to_owned(),
             details: Unparsed::from(count.to_be_bytes().to_vec()),

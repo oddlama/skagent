@@ -12,7 +12,7 @@ use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use sha2::{Digest as _, Sha256};
 use signature::Verifier as _;
 use skagent_fido::{AssertRequest, ErrorKind, ResidentCredential, Statement, error_kind};
-use skagent_popup::{Failure, Host, Key, Mistake, Request, SecurityKey, State as Shown};
+use skagent_popup::{Failure, Host, Key, Mistake, Queued, Request, SecurityKey, State as Shown};
 use skagent_secret::SecretBuffer;
 use ssh_agent_lib::ssh_key::{Algorithm, Signature};
 use tokio::sync::{Mutex, watch};
@@ -30,7 +30,7 @@ use crate::pin_cache::{
 };
 use crate::popup::{CancelledInPopup, Popup, PopupSession, cancelled_in_popup};
 use crate::prompt::{PinPrompt, PinRequest};
-use crate::routing::{OnSelect, QUEUE_TIMEOUT, RoutedDevice, Router};
+use crate::routing::{OnSelect, QUEUE_TIMEOUT, RoutedDevice, Router, SELECTION_TIMEOUT};
 
 /// Length of an Ed25519 signature.
 const ED25519_SIGNATURE_BYTES: usize = 64;
@@ -186,7 +186,7 @@ impl Signer {
     }
 
     /// `identity` as the popup shows it.
-    fn popup_key(&self, identity: &SkIdentity) -> Key {
+    pub(crate) fn popup_key(&self, identity: &SkIdentity) -> Key {
         let fingerprint = identity.fingerprint();
         let configured = self.config.key(&fingerprint);
         Key {
@@ -383,7 +383,7 @@ impl Signer {
     /// identities. With a popup, the prepared load keeps its session, to
     /// show the result once the agent committed it.
     pub(crate) async fn prepare_load(&self, ticket: SigningTicket) -> Result<PreparedLoad> {
-        let mut session = self.popup_session(&ticket).await?;
+        let mut session = self.popup_session(&ticket, Queued { key: None }).await?;
         let mut security_key = None;
         let prepared = self
             .prepare_load_on_device(&ticket, session.as_mut(), &mut security_key)
@@ -598,7 +598,10 @@ impl Signer {
         ticket: SigningTicket,
         purpose: &Purpose,
     ) -> Result<Signature> {
-        let mut session = self.popup_session(&ticket).await?;
+        let queued = Queued {
+            key: Some(self.popup_key(identity)),
+        };
+        let mut session = self.popup_session(&ticket, queued).await?;
         let mut security_key = None;
         let signed = self
             .sign_on_device(
@@ -627,14 +630,18 @@ impl Signer {
     }
 
     /// Waits for the popup, if there is one, and starts it.
-    async fn popup_session(&self, ticket: &SigningTicket) -> Result<Option<PopupSession>> {
+    async fn popup_session(
+        &self,
+        ticket: &SigningTicket,
+        queued: Queued,
+    ) -> Result<Option<PopupSession>> {
         let Some(popup) = &self.popup else {
             return Ok(None);
         };
         let mut session = tokio::select! {
             biased;
             () = ticket.revoked() => bail!("request cancelled by PIN eviction or key removal while waiting for the popup"),
-            session = popup.session(QUEUE_TIMEOUT) => session?,
+            session = popup.session(QUEUE_TIMEOUT, queued) => session?,
         };
         tokio::select! {
             biased;
@@ -688,37 +695,69 @@ impl Signer {
             key,
             security_key: security_key.clone(),
         };
-        let mut again = routed.selected_by_touch;
-        let mut wrong_pin = false;
+        let mut round = Round {
+            again: routed.selected_by_touch,
+            wrong_pin: false,
+            kept: None,
+        };
         loop {
-            match self
-                .sign_attempt(&signing, session.as_deref_mut(), routed, again, wrong_pin)
+            round = match self
+                .sign_attempt(&signing, session.as_deref_mut(), routed, round)
                 .await?
             {
                 Attempt::Signed(signature) => return Ok(signature),
                 Attempt::WrongPin(back) => {
                     routed = back;
-                    again = false;
-                    wrong_pin = true;
+                    Round {
+                        again: false,
+                        wrong_pin: true,
+                        kept: None,
+                    }
                 }
-            }
+                Attempt::TimedOut(back, source) => {
+                    routed = back;
+                    let session = session
+                        .as_deref_mut()
+                        .context("a touch timed out without a popup")?;
+                    let state = Shown::Timeout {
+                        key: Some(self.popup_key(identity)),
+                        security_key: signing.security_key.clone(),
+                    };
+                    tokio::select! {
+                        biased;
+                        () = ticket.revoked() => bail!("request cancelled by PIN eviction or key removal after a touch timeout"),
+                        retried = session.ask_retry(state) => retried?,
+                    }
+                    // The PIN was accepted: it isn't asked for again.
+                    Round {
+                        again: false,
+                        wrong_pin: false,
+                        kept: Some(source),
+                    }
+                }
+            };
         }
     }
 
-    /// One try at signing on the routed device: PIN (unless cached), touch,
-    /// result. `wrong_pin`: the previous try's PIN was wrong.
+    /// One try at signing on the routed device: PIN (unless cached or kept
+    /// from the previous round), touch, result.
     async fn sign_attempt(
         &self,
         signing: &Signing<'_>,
         mut session: Option<&mut PopupSession>,
         routed: RoutedDevice,
-        again: bool,
-        wrong_pin: bool,
+        round: Round,
     ) -> Result<Attempt> {
         let (identity, ticket) = (signing.identity, signing.ticket);
+        let Round {
+            again,
+            wrong_pin,
+            kept,
+        } = round;
         let (mut routed, retries) = read_retries(routed, identity.requires_pin()).await?;
-        let source = match retries {
-            Some(retries) => {
+        let source = match (kept, retries) {
+            (Some(kept), _) => kept,
+            (None, Some(retries)) => {
                 let popup = session.as_deref_mut().map(|session| PopupPin {
                     session,
                     security_key: signing.security_key.clone(),
@@ -732,7 +771,7 @@ impl Signer {
                     source = self.pin_for(identity, &signing.key, &signing.device, retries, signing.purpose, popup) => source?,
                 }
             }
-            None => PinSource::None,
+            (None, None) => PinSource::None,
         };
 
         // A typed PIN is checked before the touch is asked for, so a wrong
@@ -742,7 +781,7 @@ impl Signer {
         ticket.check()?;
         if let Err(error) = checked {
             return self
-                .attempt_failed(signing, session.is_some(), routed, &source, error)
+                .attempt_failed(signing, session.is_some(), routed, source, error)
                 .await;
         }
 
@@ -808,31 +847,38 @@ impl Signer {
                 Ok(Attempt::Signed(signature))
             }
             Err(error) => {
-                self.attempt_failed(signing, session.is_some(), routed, &source, error)
+                self.attempt_failed(signing, session.is_some(), routed, source, error)
                     .await
             }
         }
     }
 
     /// After an attempt failed with `error`: notes it, and in the popup
-    /// (`in_popup`) asks again after a wrong typed PIN.
+    /// (`in_popup`) asks again after a wrong typed PIN, or offers to try
+    /// again after a touch timeout.
     async fn attempt_failed(
         &self,
         signing: &Signing<'_>,
         in_popup: bool,
         routed: RoutedDevice,
-        source: &PinSource,
+        source: PinSource,
         error: anyhow::Error,
     ) -> Result<Attempt> {
         let identity = signing.identity;
-        self.record_failure(identity, &signing.key, source, &error)
+        self.record_failure(identity, &signing.key, &source, &error)
             .await;
-        // In the popup the user just types it again.
-        if in_popup
-            && matches!(source, PinSource::User(_))
-            && error_kind(&error) == Some(ErrorKind::PinInvalid)
-        {
-            return Ok(Attempt::WrongPin(routed));
+        if in_popup {
+            match error_kind(&error) {
+                // The user just types it again.
+                Some(ErrorKind::PinInvalid) if matches!(source, PinSource::User(_)) => {
+                    return Ok(Attempt::WrongPin(routed));
+                }
+                Some(ErrorKind::TouchTimeout) => {
+                    tracing::info!(key = %self.describe(identity), "nobody touched the security key in time");
+                    return Ok(Attempt::TimedOut(routed, source));
+                }
+                _ => {}
+            }
         }
         Err(error.context(format!("signing with {}", self.describe(identity))))
     }
@@ -1054,6 +1100,19 @@ enum Attempt {
     Signed(Signature),
     /// The user typed a wrong PIN in the popup: ask again on this device.
     WrongPin(RoutedDevice),
+    /// Nobody touched the key in time: the popup offers to try again with
+    /// the same PIN.
+    TimedOut(RoutedDevice, PinSource),
+}
+
+/// What an attempt starts with.
+struct Round {
+    /// The device was just selected by touch: this is the second touch.
+    again: bool,
+    /// The previous attempt's PIN was wrong.
+    wrong_pin: bool,
+    /// The PIN from the previous attempt, which timed out after accepting it.
+    kept: Option<PinSource>,
 }
 
 /// Reads the routed device's PIN retry counter if `needs_pin`, in the
@@ -1164,8 +1223,13 @@ async fn popup_cancelled(session: Option<&mut PopupSession>) {
 /// Shows the selection in the popup once the router starts one.
 fn select_in_popup(session: &PopupSession, key: Option<Key>) -> Result<OnSelect> {
     let shower = session.shower()?;
+    let timeout_ms = u64::try_from(SELECTION_TIMEOUT.as_millis()).unwrap_or(u64::MAX);
     Ok(Box::new(move |devices| {
-        if let Err(error) = shower.show(Shown::Select { key, devices }) {
+        if let Err(error) = shower.show(Shown::Select {
+            key,
+            devices,
+            timeout_ms,
+        }) {
             tracing::debug!(error = %format!("{error:#}"), "showing the selection in the popup failed");
         }
     }))
@@ -1204,14 +1268,17 @@ fn final_state(
         (Some(ErrorKind::TouchTimeout), _) => Shown::Timeout { key, security_key },
         (Some(ErrorKind::Transport), _) => Shown::Failed {
             key,
+            security_key,
             reason: Failure::Unplugged,
         },
         (Some(ErrorKind::OperationDenied), _) => Shown::Failed {
             key,
+            security_key,
             reason: Failure::Refused,
         },
         _ => Shown::Failed {
             key,
+            security_key,
             reason: Failure::Other,
         },
     })

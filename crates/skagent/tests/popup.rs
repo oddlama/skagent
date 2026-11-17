@@ -10,14 +10,14 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, ensure};
 use skagent::popup::{Popup, cancelled_in_popup};
-use skagent_popup::{Key, Request, State};
+use skagent_popup::{Key, Queued, Request, State};
 
 const SOON: Duration = Duration::from_secs(5);
 
 /// A fake popup in `dir` that logs every line it gets to `dir/log`. It says
 /// READY unless `dir/exit` exists (then it exits right away), answers PIN
-/// states with `1234%` (sent escaped) or, if `dir/cancel` exists, cancels
-/// them and touch states.
+/// states with `1234%` (sent escaped) and timeouts with RETRY or, if
+/// `dir/cancel` exists, cancels them and touch states.
 fn fake_popup(dir: &Path) -> Result<PathBuf> {
     let dir = dir.display();
     support::executable_script(
@@ -37,6 +37,8 @@ while IFS= read -r line; do
       else echo "PIN $seq 1234%25"; fi ;;
     *'"name":"touch"'*)
       if [ -e {dir}/cancel ]; then echo "CANCEL $seq"; fi ;;
+    *'"name":"timeout"'*)
+      if [ -e {dir}/cancel ]; then echo "CANCEL $seq"; else echo "RETRY $seq"; fi ;;
   esac
 done
 echo exit >> {dir}/log"#
@@ -63,6 +65,10 @@ fn touch_state() -> State {
         timeout_ms: 15_000,
         again: false,
     }
+}
+
+fn queued() -> Queued {
+    Queued { key: Some(key()) }
 }
 
 fn key() -> Key {
@@ -100,7 +106,7 @@ fn popup(dir: &Path) -> Result<Arc<Popup>> {
 async fn the_pin_comes_back_from_the_popup() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let popup = popup(dir.path())?;
-    let mut session = popup.session(SOON).await?;
+    let mut session = popup.session(SOON, queued()).await?;
     session.start().await?;
     let pin = session.ask_pin(pin_state()).await?;
     ensure!(
@@ -121,7 +127,7 @@ async fn cancelling_in_the_popup_cancels_the_request() -> Result<()> {
     let dir = tempfile::tempdir()?;
     std::fs::write(dir.path().join("cancel"), "")?;
     let popup = popup(dir.path())?;
-    let mut session = popup.session(SOON).await?;
+    let mut session = popup.session(SOON, queued()).await?;
     session.start().await?;
     let error = session
         .ask_pin(pin_state())
@@ -139,12 +145,34 @@ async fn cancelling_in_the_popup_cancels_the_request() -> Result<()> {
 }
 
 #[tokio::test]
+async fn a_timeout_is_retried_or_cancelled_in_the_popup() -> Result<()> {
+    let timeout = || State::Timeout {
+        key: Some(key()),
+        security_key: None,
+    };
+    let dir = tempfile::tempdir()?;
+    let popup = popup(dir.path())?;
+    let mut session = popup.session(SOON, queued()).await?;
+    session.start().await?;
+    session.ask_retry(timeout()).await?;
+
+    std::fs::write(dir.path().join("cancel"), "")?;
+    let error = session
+        .ask_retry(timeout())
+        .await
+        .err()
+        .context("a cancel was taken for a retry")?;
+    ensure!(cancelled_in_popup(&error), "{error:#}");
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_popup_that_fails_to_start_fails_the_request() -> Result<()> {
     for flag in ["exit", "version-two"] {
         let dir = tempfile::tempdir()?;
         std::fs::write(dir.path().join(flag), "")?;
         let popup = popup(dir.path())?;
-        let mut session = popup.session(SOON).await?;
+        let mut session = popup.session(SOON, queued()).await?;
         ensure!(session.start().await.is_err(), "started despite {flag}");
         ensure!(session.show(pin_state()).is_err(), "showed despite {flag}");
     }
@@ -158,7 +186,7 @@ async fn garbage_from_the_popup_ends_the_request() -> Result<()> {
     let dir = tempfile::tempdir()?;
     std::fs::write(dir.path().join("garbage"), "")?;
     let popup = popup(dir.path())?;
-    let mut session = popup.session(SOON).await?;
+    let mut session = popup.session(SOON, queued()).await?;
     session.start().await?;
     let error = session
         .ask_pin(pin_state())
@@ -174,22 +202,25 @@ async fn garbage_from_the_popup_ends_the_request() -> Result<()> {
 async fn waiting_requests_reuse_the_popup_and_the_last_one_closes_it() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let popup = popup(dir.path())?;
-    let mut first = popup.session(SOON).await?;
+    let mut first = popup.session(SOON, queued()).await?;
     first.start().await?;
     first.show(touch_state())?;
 
     let waiting = {
         let popup = Arc::clone(&popup);
         tokio::spawn(async move {
-            let mut second = popup.session(SOON).await?;
+            let mut second = popup.session(SOON, queued()).await?;
             second.start().await?;
             second.show(touch_state())?;
             Ok::<_, anyhow::Error>(second)
         })
     };
-    // The popup learns that a request waits.
+    // The popup learns that a request waits, and with which key.
     log_until(dir.path(), |text| {
-        text.contains(r#"{"type":"queue","waiting":1}"#)
+        text.lines().any(|line| {
+            line.starts_with(r#"{"type":"queue","waiting":[{"key":{"#)
+                && line.contains("github-work")
+        })
     })
     .await?;
     drop(first);
@@ -216,9 +247,12 @@ async fn waiting_requests_reuse_the_popup_and_the_last_one_closes_it() -> Result
 async fn a_busy_popup_makes_others_give_up_in_time() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let popup = popup(dir.path())?;
-    let _first = popup.session(SOON).await?;
+    let _first = popup.session(SOON, queued()).await?;
     ensure!(
-        popup.session(Duration::from_millis(100)).await.is_err(),
+        popup
+            .session(Duration::from_millis(100), queued())
+            .await
+            .is_err(),
         "waited past the timeout"
     );
     Ok(())

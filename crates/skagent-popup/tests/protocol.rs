@@ -4,7 +4,7 @@
 
 use anyhow::{Result, bail, ensure};
 use skagent_popup::{
-    Host, Intent, Key, Message, Mistake, Request, SecurityKey, State, VERSION, cancel_line,
+    Host, Intent, Key, Message, Mistake, Queued, Request, SecurityKey, State, VERSION, cancel_line,
     decode_message, encode_message, parse_intent, pin_line, ready_line, retry_line,
 };
 
@@ -25,7 +25,7 @@ fn without_newline(line: &[u8]) -> &[u8] {
 fn messages_are_single_json_lines_and_round_trip() -> Result<()> {
     let message = Message::Show {
         seq: 3,
-        waiting: 1,
+        waiting: vec![Queued { key: Some(key()) }, Queued { key: None }],
         state: Box::new(State::Pin {
             key: key(),
             request: Request::Login {
@@ -63,7 +63,7 @@ fn a_label_with_a_newline_stays_on_one_line() -> Result<()> {
     key.label = "a\nb".to_owned();
     let line = encode_message(&Message::Show {
         seq: 1,
-        waiting: 0,
+        waiting: Vec::new(),
         state: Box::new(State::Signed {
             key,
             request: Request::Unknown,

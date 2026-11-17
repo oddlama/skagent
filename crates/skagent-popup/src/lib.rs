@@ -6,7 +6,7 @@
 //!
 //! - **Popup → agent, first:** `READY <version>` once it can show states.
 //! - **Agent → popup:** one JSON object per line, a [`Message`]: the state to
-//!   show, or how many other requests wait for the popup. Never a secret.
+//!   show, or which other requests wait for the popup. Never a secret.
 //! - **Popup → agent:** text lines, each an [`Intent`]: `PIN <seq> <data>`,
 //!   `CANCEL <seq>` or `RETRY <seq>`. `seq` names the state the user acted on,
 //!   so the agent can ignore answers to states it already replaced. The PIN
@@ -45,16 +45,23 @@ pub enum Message {
     Show {
         /// Names this state in the popup's answers.
         seq: u64,
-        /// How many other requests wait for the popup.
-        waiting: usize,
+        /// The other requests waiting for the popup, oldest first.
+        waiting: Vec<Queued>,
         /// What to show.
         state: Box<State>,
     },
-    /// The number of other requests waiting for the popup changed.
+    /// The requests waiting for the popup changed.
     Queue {
-        /// How many other requests wait for the popup.
-        waiting: usize,
+        /// The other requests waiting for the popup, oldest first.
+        waiting: Vec<Queued>,
     },
+}
+
+/// A request waiting for the popup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Queued {
+    /// The SSH key it signs with; none for loading resident keys.
+    pub key: Option<Key>,
 }
 
 /// What the popup shows.
@@ -69,6 +76,8 @@ pub enum State {
         key: Option<Key>,
         /// How many security keys blink.
         devices: usize,
+        /// How long the selection waits for a touch.
+        timeout_ms: u64,
     },
     /// Enter the PIN for a signature. Answered with `PIN` or `CANCEL`.
     Pin {
@@ -113,8 +122,25 @@ pub enum State {
     Loaded {
         /// The YubiKey, if it reports a serial.
         security_key: Option<SecurityKey>,
-        /// How many keys.
-        count: u32,
+        /// The keys loaded, already loaded ones included.
+        keys: Vec<Key>,
+    },
+    /// The YubiKey known to hold the key isn't plugged in, another one is.
+    /// Moves on by itself once the right one appears.
+    WrongKey {
+        /// The SSH key.
+        key: Key,
+        /// The YubiKey that holds it.
+        security_key: Option<SecurityKey>,
+        /// The YubiKey that is plugged in instead.
+        other: Option<SecurityKey>,
+    },
+    /// No security key is plugged in. Moves on by itself once one appears.
+    NoKey {
+        /// The SSH key, unless loading.
+        key: Option<Key>,
+        /// The YubiKey known to hold the key, if any.
+        security_key: Option<SecurityKey>,
     },
     /// Too many wrong PINs in a row: the key accepts no PIN until it was
     /// unplugged and plugged back in. Final.
@@ -140,7 +166,8 @@ pub enum State {
         /// The YubiKey, if it reports a serial.
         security_key: Option<SecurityKey>,
     },
-    /// Nobody touched the key in time. Final.
+    /// Nobody touched the key in time. Answered with `RETRY` (touch again,
+    /// the PIN was kept) or `CANCEL`.
     Timeout {
         /// The SSH key.
         key: Option<Key>,
@@ -151,6 +178,8 @@ pub enum State {
     Failed {
         /// The SSH key, unless loading.
         key: Option<Key>,
+        /// The YubiKey, if it reports a serial.
+        security_key: Option<SecurityKey>,
         /// What went wrong.
         reason: Failure,
     },

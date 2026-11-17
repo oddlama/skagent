@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use skagent_popup::{SecurityKey, State};
+use skagent_popup::{Key, SecurityKey, State};
 use skagent_secret::SecretBuffer;
 
 use crate::identities::SkIdentity;
@@ -27,12 +27,12 @@ pub(crate) struct PreparedLoad {
 }
 
 impl PreparedLoad {
-    /// Shows in the popup that `count` keys were loaded.
-    pub fn show_loaded(&mut self, count: u32) {
+    /// Shows in the popup that `keys` were loaded.
+    pub fn show_loaded(&mut self, keys: Vec<Key>) {
         if let Some(session) = self.popup.as_mut() {
             let state = State::Loaded {
                 security_key: self.security_key.clone(),
-                count,
+                keys,
             };
             if let Err(error) = session.show(state) {
                 tracing::debug!(error = %format!("{error:#}"), "showing the result in the popup failed");
