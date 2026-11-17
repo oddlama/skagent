@@ -237,3 +237,56 @@ fn state_names_are_the_ones_on_the_wire() -> Result<()> {
     }
     Ok(())
 }
+
+/// A `failed` state with `reason`, as the agent would send it.
+fn failed_line(reason: &str) -> String {
+    format!(
+        r#"{{"type":"show","seq":2,"waiting":[],"state":{{"name":"failed","key":null,"security_key":null,"reason":"{reason}"}}}}"#
+    )
+}
+
+#[test]
+fn failure_reasons_have_their_names_on_the_wire() -> Result<()> {
+    for (reason, name) in [
+        (Failure::Unplugged, "unplugged"),
+        (Failure::Refused, "refused"),
+        (Failure::NotOnKey, "not-on-key"),
+        (Failure::NoPin, "no-pin"),
+        (Failure::Other, "other"),
+    ] {
+        let state = State::Failed {
+            key: None,
+            security_key: None,
+            reason,
+        };
+        let message = Message::Show {
+            seq: 2,
+            waiting: Vec::new(),
+            state: Box::new(state),
+        };
+        ensure!(
+            String::from_utf8(encode_message(&message)?)?.trim_end() == failed_line(name),
+            "{name}"
+        );
+        ensure!(decode_message(&failed_line(name))? == message, "{name}");
+    }
+    Ok(())
+}
+
+#[test]
+fn an_unknown_failure_reason_is_shown_as_other() -> Result<()> {
+    let Message::Show { state, .. } = decode_message(&failed_line("from-a-newer-agent"))? else {
+        bail!("not a show message");
+    };
+    ensure!(
+        matches!(
+            *state,
+            State::Failed {
+                reason: Failure::Other,
+                ..
+            }
+        ),
+        "{state:?}"
+    );
+    Ok(())
+}

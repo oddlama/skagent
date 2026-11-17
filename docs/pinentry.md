@@ -119,9 +119,22 @@ one maps to a protocol state; the popup derives the copy from the data.
 | queue pill | every message's `waiting` | the waiting requests' keys | `queue` messages update it |
 
 Keys without a serial (not YubiKeys) come without a YubiKey name; the popup
-falls back to generic copy. A final state stays for its moment (900 ms for
+says "your security key" instead. A final state stays for its moment (900 ms for
 `signed` and `loaded`, 5 s for `failed`) before the next request's state or
 the end of input replaces it.
+
+### why a request failed
+
+`failed` names the reason where the agent knows it, short; anything else
+points to the log. Signing and loading differ only in the verb.
+
+| `reason` | From | Subtitle (signing) |
+| --- | --- | --- |
+| `unplugged` | libfido2 transport errors, or the key gone or replaced at a step | `Desk 5C NFC was unplugged mid-signature` |
+| `refused` | `FIDO_ERR_OPERATION_DENIED` | `Desk 5C NFC refused to sign` |
+| `not-on-key` | `FIDO_ERR_NO_CREDENTIALS`: another key was touched, or it was reset | `Desk 5C NFC doesn't hold github-work` |
+| `no-pin` | `FIDO_ERR_PIN_NOT_SET` | `Desk 5C NFC has no PIN set` |
+| `other` | anything else, and reasons the popup doesn't know yet | `Something went wrong · see skagent's log` |
 
 ### subtitle per request kind
 

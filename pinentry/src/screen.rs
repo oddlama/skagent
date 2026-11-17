@@ -284,10 +284,13 @@ impl Screen {
             } => waiting(
                 Anchor::missing(key),
                 Badge::Swap,
-                format!("Plug in {}", name_or(security_key.as_ref(), "your YubiKey")),
+                format!(
+                    "Plug in {}",
+                    name_or(security_key.as_ref(), "your security key")
+                ),
                 Subtitle::muted(format!(
                     "{} doesn't hold {}",
-                    name_or(other.as_ref(), "This YubiKey"),
+                    name_or(other.as_ref(), "This security key"),
                     key.label
                 )),
             ),
@@ -676,12 +679,17 @@ fn replug(key: Option<&Key>, security_key: Option<&SecurityKey>, tries: Option<u
 }
 
 fn failed(key: Option<&Key>, security_key: Option<&SecurityKey>, reason: Failure) -> Screen {
-    let name = name_or(security_key, "The security key");
+    let name = name_or(security_key, "Your security key");
+    // The reason where the agent knows it; the log has the rest.
     let reason = match (reason, key) {
         (Failure::Unplugged, Some(_)) => format!("{name} was unplugged mid-signature"),
         (Failure::Unplugged, None) => format!("{name} was unplugged while loading"),
-        (Failure::Refused, _) => format!("{name} refused"),
-        (Failure::Other, _) => "Something went wrong · see the agent log".to_owned(),
+        (Failure::Refused, Some(_)) => format!("{name} refused to sign"),
+        (Failure::Refused, None) => format!("{name} refused to list its keys"),
+        (Failure::NotOnKey, Some(key)) => format!("{name} doesn't hold {}", key.label),
+        (Failure::NotOnKey, None) => format!("{name} holds no SSH keys"),
+        (Failure::NoPin, _) => format!("{name} has no PIN set"),
+        (Failure::Other, _) => "Something went wrong · see skagent's log".to_owned(),
     };
     let title = if key.is_some() {
         "Couldn't sign"

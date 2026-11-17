@@ -8,7 +8,7 @@ use skagent_pinentry::screen::{
     Anchor, Badge, Body, Close, Glyph, Screen, Tone, glyph, request_subtitle, short_fingerprint,
     tries_left,
 };
-use skagent_popup::{Host, Key, Request, State};
+use skagent_popup::{Failure, Host, Key, Request, SecurityKey, State};
 
 fn screen(name: &str) -> Result<Screen> {
     let (state, _) = fixture(name).with_context(|| format!("no fixture {name}"))?;
@@ -233,5 +233,81 @@ fn screens_without_a_yubikey_name_still_read() {
             .subtitle
             .text()
             .starts_with("Your security key can only")
+    );
+}
+
+fn work_key() -> Key {
+    Key {
+        emoji: None,
+        label: "work".to_owned(),
+        fingerprint: String::new(),
+    }
+}
+
+/// The subtitle of a failed signature (`signing`) or loading.
+fn failed(reason: Failure, signing: bool, name: Option<&str>) -> String {
+    Screen::of(&State::Failed {
+        key: signing.then(work_key),
+        security_key: name.map(|name| SecurityKey {
+            name: name.to_owned(),
+        }),
+        reason,
+    })
+    .subtitle
+    .text()
+}
+
+/// The reason where the agent knows it, short; a pointer to the log
+/// otherwise.
+#[test]
+fn failures_say_why_where_known() {
+    let desk = Some("Desk 5C NFC");
+    for (reason, signing, expected) in [
+        (
+            Failure::Unplugged,
+            true,
+            "Desk 5C NFC was unplugged mid-signature",
+        ),
+        (
+            Failure::Unplugged,
+            false,
+            "Desk 5C NFC was unplugged while loading",
+        ),
+        (Failure::Refused, true, "Desk 5C NFC refused to sign"),
+        (
+            Failure::Refused,
+            false,
+            "Desk 5C NFC refused to list its keys",
+        ),
+        (Failure::NotOnKey, true, "Desk 5C NFC doesn't hold work"),
+        (Failure::NotOnKey, false, "Desk 5C NFC holds no SSH keys"),
+        (Failure::NoPin, true, "Desk 5C NFC has no PIN set"),
+        (
+            Failure::Other,
+            true,
+            "Something went wrong · see skagent's log",
+        ),
+    ] {
+        assert_eq!(failed(reason, signing, desk), expected, "{reason:?}");
+    }
+    assert_eq!(
+        failed(Failure::NotOnKey, true, None),
+        "Your security key doesn't hold work"
+    );
+}
+
+/// Without a name, a security key isn't called a YubiKey: keys that report
+/// no serial aren't.
+#[test]
+fn the_wrong_key_without_names_says_security_key() {
+    let screen = Screen::of(&State::WrongKey {
+        key: work_key(),
+        security_key: None,
+        other: None,
+    });
+    assert_eq!(screen.title, "Plug in your security key");
+    assert_eq!(
+        screen.subtitle.text(),
+        "This security key doesn't hold work"
     );
 }

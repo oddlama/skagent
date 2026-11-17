@@ -272,15 +272,22 @@ pub enum Host {
     Unverified,
 }
 
-/// Why a request failed.
+/// Why a request failed, where the agent knows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Failure {
-    /// The security key was unplugged or stopped answering.
+    /// The security key was unplugged, replaced or stopped answering.
     Unplugged,
-    /// The security key refused.
+    /// The security key refused the operation.
     Refused,
-    /// Something else; the agent's log says what.
+    /// The security key doesn't hold the SSH key, e.g. another one was
+    /// touched, or it was reset since.
+    NotOnKey,
+    /// The security key has no PIN set.
+    NoPin,
+    /// Something else; the agent's log says what. Also any reason this
+    /// popup doesn't know yet.
+    #[serde(other)]
     Other,
 }
 
