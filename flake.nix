@@ -148,6 +148,11 @@
                 inherit pkgs;
                 package = config.packages.default;
               };
+              vm-pinentry = import ./nix/tests/pinentry.nix {
+                inherit pkgs;
+                package = config.packages.default;
+                inherit (config.packages) pinentry testkey;
+              };
               vm-popup = import ./nix/tests/popup.nix {
                 inherit pkgs;
                 package = config.packages.default;
