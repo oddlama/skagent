@@ -4,8 +4,8 @@
 
 use anyhow::{Result, bail, ensure};
 use skagent_popup::{
-    Host, Intent, Key, Message, Mistake, Queued, Request, SecurityKey, State, VERSION, cancel_line,
-    decode_message, encode_message, parse_intent, pin_line, ready_line, retry_line,
+    Failure, Host, Intent, Key, Message, Mistake, Queued, Request, SecurityKey, State, VERSION,
+    cancel_line, decode_message, encode_message, parse_intent, pin_line, ready_line, retry_line,
 };
 
 fn key() -> Key {
@@ -142,4 +142,98 @@ fn pins_have_a_length_limit() {
     let mut line = b"PIN 1 ".to_vec();
     line.extend_from_slice(&[b'1'; 257]);
     assert!(parse_intent(&line).is_err());
+}
+
+/// One state of every kind.
+fn every_state() -> Vec<State> {
+    let desk = || {
+        Some(SecurityKey {
+            name: "Desk 5C NFC".to_owned(),
+        })
+    };
+    let request = || Request::Sign {
+        namespace: "git".to_owned(),
+    };
+    vec![
+        State::Select {
+            key: Some(key()),
+            devices: 2,
+            timeout_ms: 30_000,
+        },
+        State::Pin {
+            key: key(),
+            request: request(),
+            security_key: desk(),
+            mistake: None,
+        },
+        State::LoadPin {
+            security_key: desk(),
+            mistake: None,
+        },
+        State::Touch {
+            key: key(),
+            request: request(),
+            security_key: desk(),
+            timeout_ms: 15_000,
+            again: false,
+        },
+        State::Signed {
+            key: key(),
+            request: request(),
+        },
+        State::Loaded {
+            security_key: desk(),
+            keys: vec![key()],
+        },
+        State::WrongKey {
+            key: key(),
+            security_key: desk(),
+            other: None,
+        },
+        State::NoKey {
+            key: Some(key()),
+            security_key: None,
+        },
+        State::Replug {
+            key: Some(key()),
+            security_key: desk(),
+            tries_left: Some(5),
+        },
+        State::Locked {
+            key: None,
+            security_key: desk(),
+        },
+        State::NewPin {
+            key: None,
+            security_key: desk(),
+        },
+        State::Timeout {
+            key: Some(key()),
+            security_key: desk(),
+        },
+        State::Failed {
+            key: Some(key()),
+            security_key: desk(),
+            reason: Failure::Unplugged,
+        },
+    ]
+}
+
+#[test]
+fn state_names_are_the_ones_on_the_wire() -> Result<()> {
+    let states = every_state();
+    ensure!(states.len() == 13, "a state is missing from the test");
+    for state in states {
+        let name = state.name();
+        let text = String::from_utf8(encode_message(&Message::Show {
+            seq: 1,
+            waiting: Vec::new(),
+            state: Box::new(state),
+        })?)?;
+        ensure!(
+            text.contains(&format!(r#""name":"{name}""#)),
+            "{name}: {text}"
+        );
+    }
+    Ok(())
 }

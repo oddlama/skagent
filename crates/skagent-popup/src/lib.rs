@@ -185,6 +185,28 @@ pub enum State {
     },
 }
 
+impl State {
+    /// The state's name on the wire (its `name` field), for logs.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Select { .. } => "select",
+            Self::Pin { .. } => "pin",
+            Self::LoadPin { .. } => "load-pin",
+            Self::Touch { .. } => "touch",
+            Self::Signed { .. } => "signed",
+            Self::Loaded { .. } => "loaded",
+            Self::WrongKey { .. } => "wrong-key",
+            Self::NoKey { .. } => "no-key",
+            Self::Replug { .. } => "replug",
+            Self::Locked { .. } => "locked",
+            Self::NewPin { .. } => "new-pin",
+            Self::Timeout { .. } => "timeout",
+            Self::Failed { .. } => "failed",
+        }
+    }
+}
+
 /// An SSH key as the user knows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Key {
