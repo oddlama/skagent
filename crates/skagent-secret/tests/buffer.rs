@@ -2,7 +2,10 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![forbid(unsafe_code)]
 
-use anyhow::{Result, ensure};
+use std::fs::File;
+use std::io::{Read as _, Seek as _, SeekFrom};
+
+use anyhow::{Context as _, Result, ensure};
 use skagent_secret::SecretBuffer;
 
 #[test]
@@ -76,5 +79,42 @@ fn large_secrets_span_multiple_pages() -> Result<()> {
     ensure!(buffer.expose() == secret.as_slice());
     let pages = buffer.data_pages();
     ensure!(pages.end.saturating_sub(pages.start) >= 10_000);
+    Ok(())
+}
+
+/// The buffer's memory from its start, past its length, read through
+/// `/proc/self/mem`.
+fn memory(buffer: &SecretBuffer, len: usize) -> Result<Vec<u8>> {
+    let start = u64::try_from(buffer.data_pages().start).context("buffer address")?;
+    let mut mem = File::open("/proc/self/mem").context("opening /proc/self/mem")?;
+    mem.seek(SeekFrom::Start(start))
+        .context("seeking to the buffer in /proc/self/mem")?;
+    let mut bytes = vec![0; len];
+    mem.read_exact(&mut bytes)
+        .context("reading the buffer from /proc/self/mem")?;
+    Ok(bytes)
+}
+
+#[test]
+fn truncate_keeps_the_start_and_wipes_the_rest() -> Result<()> {
+    let mut buffer = SecretBuffer::with_capacity(16)?;
+    buffer.extend_from_slice(b"246810")?;
+    buffer.truncate(4);
+    ensure!(buffer.expose() == b"2468");
+    ensure!(
+        memory(&buffer, 6)? == b"2468\0\0",
+        "the cut bytes are still in memory"
+    );
+    buffer.truncate(10);
+    ensure!(
+        buffer.expose() == b"2468",
+        "truncating past the end changed it"
+    );
+    buffer.truncate(0);
+    ensure!(buffer.is_empty());
+    ensure!(
+        memory(&buffer, 4)? == [0; 4],
+        "the content is still in memory"
+    );
     Ok(())
 }

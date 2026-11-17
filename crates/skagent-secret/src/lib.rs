@@ -41,6 +41,7 @@ use std::sync::OnceLock;
 
 use anyhow::{Context as _, Result, bail, ensure};
 use subtle::ConstantTimeEq as _;
+use zeroize::Zeroize as _;
 
 use crate::mapping::LockedPages;
 
@@ -177,6 +178,18 @@ impl SecretBuffer {
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.capacity
+    }
+
+    /// Keeps the first `len` bytes and zeroizes the rest. Does nothing if
+    /// `len` isn't shorter than the content.
+    pub fn truncate(&mut self, len: usize) {
+        if len >= self.len {
+            return;
+        }
+        if let Some(cut) = self.pages.as_mut_slice().get_mut(len..self.len) {
+            cut.zeroize();
+        }
+        self.len = len;
     }
 
     /// Zeroizes the content and empties the buffer. The memory stays allocated.
