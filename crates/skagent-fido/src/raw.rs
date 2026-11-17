@@ -245,6 +245,21 @@ impl Device {
             .collect()
     }
 
+    /// Verifies `pin` by reading credential management metadata: the device
+    /// trades the PIN for a token, without a touch and without signing.
+    pub(crate) fn credman_metadata(&mut self, pin: &CStr) -> Result<(), FidoError> {
+        // SAFETY: creates an empty owned metadata object, or null on failure.
+        let metadata = Metadata(
+            NonNull::new(unsafe { sys::fido_credman_metadata_new() }).ok_or_else(|| {
+                FidoError::new("fido_credman_metadata_new", sys::FIDO_ERR_INTERNAL)
+            })?,
+        );
+        // SAFETY: exclusive device, owned output object and NUL-terminated PIN.
+        check("fido_credman_get_dev_metadata", unsafe {
+            sys::fido_credman_get_dev_metadata(self.raw.as_ptr(), metadata.0.as_ptr(), pin.as_ptr())
+        })
+    }
+
     pub(crate) fn resident_keys(
         &mut self,
         rp: &CStr,
@@ -398,8 +413,17 @@ pub(crate) struct ResidentKey {
     pub user_name: String,
 }
 
+struct Metadata(NonNull<sys::fido_credman_metadata_t>);
 struct ResidentParties(NonNull<sys::fido_credman_rp_t>);
 struct ResidentKeys(NonNull<sys::fido_credman_rk_t>);
+
+impl Drop for Metadata {
+    fn drop(&mut self) {
+        let mut raw = self.0.as_ptr();
+        // SAFETY: unique owned object allocated by fido_credman_metadata_new.
+        unsafe { sys::fido_credman_metadata_free(&raw mut raw) };
+    }
+}
 
 impl Drop for ResidentParties {
     fn drop(&mut self) {

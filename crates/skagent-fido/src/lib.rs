@@ -285,6 +285,28 @@ impl Device {
         Ok(credentials)
     }
 
+    /// Checks `pin` without a touch, where the device can: it trades the
+    /// PIN for a token to read credential management metadata. A wrong PIN
+    /// costs a retry, like in an assertion. `Ok(false)`: the device has no
+    /// credential management, so only an assertion can check the PIN.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error with a [`FidoError`] inside if the device refuses
+    /// the PIN or the request; see [`error_kind`].
+    pub fn check_pin(&mut self, pin: &SecretBuffer) -> Result<bool> {
+        if !self.inner.supports_credman() {
+            return Ok(false);
+        }
+        let terminated = nul_terminated_pin(pin)?;
+        let pin = CStr::from_bytes_with_nul(terminated.expose())
+            .context("the PIN contains a NUL byte")?;
+        self.inner
+            .credman_metadata(pin)
+            .with_context(|| format!("checking the PIN on {}", self.path))?;
+        Ok(true)
+    }
+
     /// Starts PIN-free touch selection. Consumes the device so no assertion
     /// can race the pending response. Dropping the probe cancels it.
     ///
