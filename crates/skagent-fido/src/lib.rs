@@ -14,6 +14,7 @@ mod error;
 #[allow(unsafe_code)]
 mod raw;
 mod resident;
+pub mod yubikey;
 pub use resident::ResidentCredential;
 
 use std::ffi::{CStr, CString};
@@ -64,6 +65,32 @@ pub fn ensure_debug_off() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// How long reading a YubiKey's serial may take.
+const SERIAL_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The serial number of the YubiKey at `path` (`/dev/hidraw*`), or `None`
+/// for authenticators that don't report one. Doesn't go through libfido2:
+/// call it while no libfido2 request runs on the device, e.g. before opening
+/// it, and under the device's lock.
+///
+/// # Errors
+///
+/// Returns an error if the device can't be opened or answers malformed
+/// frames, or doesn't answer within a second.
+pub fn yubikey_serial(path: &str) -> Result<Option<u32>> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut device = yubikey::Hidraw::open(path)?;
+        yubikey::serial(&mut device, yubikey::nonce(), SERIAL_TIMEOUT)
+            .with_context(|| format!("reading the serial of {path}"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (path, SERIAL_TIMEOUT);
+        Ok(None)
+    }
 }
 
 /// The [`ErrorKind`] of the libfido2 failure inside `error`, if there is one.

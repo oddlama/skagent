@@ -14,3 +14,4 @@ pub mod callbacks;
 pub mod catalog;
 pub mod ctap;
 pub mod touch;
+pub mod vendor;

@@ -97,3 +97,12 @@ fn the_default_path_follows_xdg() -> Result<()> {
     ensure!(path(None, None).is_err());
     Ok(())
 }
+
+#[test]
+fn yubikeys_are_named_by_config_or_their_last_four_digits() -> Result<()> {
+    let config = Config::parse("[security-keys.12345678]\nname = \"Desk 5C NFC\"")?;
+    ensure!(config.yubikey_name(12_345_678) == "Desk 5C NFC");
+    ensure!(config.yubikey_name(23_456_789) == "YubiKey ·6789");
+    ensure!(config.yubikey_name(42) == "YubiKey ·42");
+    Ok(())
+}

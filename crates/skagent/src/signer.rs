@@ -182,6 +182,15 @@ impl Signer {
         self.config.label(&identity.fingerprint())
     }
 
+    /// How the routed security key is named in prompts and logs: the
+    /// YubiKey's name, or its device path if it reports no serial.
+    fn device_name(&self, routed: &RoutedDevice) -> String {
+        routed.serial.map_or_else(
+            || routed.identity.path().to_owned(),
+            |serial| self.config.yubikey_name(serial),
+        )
+    }
+
     /// [`describe`] with the configured label.
     fn describe(&self, identity: &SkIdentity) -> String {
         describe(identity, self.label(identity))
@@ -352,7 +361,7 @@ impl Signer {
             .prompt
             .as_ref()
             .context("resident loading needs a PIN prompt (--pinentry or --askpass)")?;
-        let label = format!("resident SSH credentials on {}", routed.identity.path());
+        let label = format!("resident SSH credentials on {}", self.device_name(&routed));
         let request = PinRequest {
             key: &label,
             retries: Some(retries),
@@ -489,6 +498,12 @@ impl Signer {
             () = ticket.revoked() => bail!("device selection cancelled by PIN eviction or key removal"),
             routed = self.router.route(&key, routing_ticket, &label) => routed?,
         };
+        tracing::info!(
+            key = %self.describe(identity),
+            security_key = %self.device_name(&routed),
+            serial = routed.serial,
+            "signing on the security key"
+        );
         let device = routed.identity.clone();
         let needs_pin = identity.requires_pin();
         let (mut routed, retries) = tokio::task::spawn_blocking(move || {

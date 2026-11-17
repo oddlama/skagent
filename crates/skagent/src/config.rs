@@ -138,6 +138,22 @@ impl Config {
         self.key(fingerprint)?.label.as_deref()
     }
 
+    /// How the YubiKey with `serial` is named: its configured name, else
+    /// `YubiKey ·5678` (the last four digits of the serial).
+    #[must_use]
+    pub fn yubikey_name(&self, serial: u32) -> String {
+        self.security_key_name(serial).map_or_else(
+            || {
+                let digits = serial.to_string();
+                let last = digits
+                    .get(digits.len().saturating_sub(4)..)
+                    .unwrap_or(&digits);
+                format!("YubiKey ·{last}")
+            },
+            ToOwned::to_owned,
+        )
+    }
+
     /// The name of the YubiKey with `serial`, if configured.
     #[must_use]
     pub fn security_key_name(&self, serial: u32) -> Option<&str> {

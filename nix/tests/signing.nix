@@ -137,7 +137,8 @@ pkgs.testers.runNixOSTest {
 
     machine.wait_for_unit("sshd.service")
     machine.wait_until_succeeds("loginctl show-user alice -p Sessions --value | grep . >/dev/null")
-    machine.succeed("${startTestkey "testkey" "test key one"}")
+    # Reports a serial like a YubiKey; the other keys in this test don't.
+    machine.succeed("${startTestkey "testkey" "test key one"} --serial 12345678")
     machine.wait_until_succeeds("fido2-token -L | grep -F 'test key one' >/dev/null")
 
     with subtest("enroll a verify-required key and authorize it for ssh"):
@@ -406,12 +407,15 @@ pkgs.testers.runNixOSTest {
     with subtest("a configured label names the key in prompts"):
         fingerprint = alice_ok("ssh-keygen -lf ~/id_sk.pub").split()[1]
         alice_ok(
-            f"printf '[keys.\"%s\"]\\nlabel = \"work laptop key\"\\n' '{fingerprint}' > ${socketDir}/config.toml"
+            f"printf '[keys.\"%s\"]\\nlabel = \"work laptop key\"\\n[security-keys.12345678]\\nname = \"test desk key\"\\n' '{fingerprint}' > ${socketDir}/config.toml"
         )
         start_agent("skagent-config", askpass_agent, "--config ${socketDir}/config.toml")
         expect_prompt()
         last_prompt = machine.succeed("tail -n 1 ${promptLog}")
         assert f"Enter PIN for work laptop key ({fingerprint})" in last_prompt, last_prompt
+        # The test key reported its serial, and the configuration names it.
+        assert "security_key=test desk key serial=12345678" in journal("skagent-config"), journal("skagent-config")
+        assert "answered READ_CONFIG" in journal("testkey")
         stop_agent("skagent-config")
 
     with subtest("a broken configuration keeps the agent from starting"):

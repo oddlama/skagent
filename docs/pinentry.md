@@ -130,8 +130,9 @@ forget`, the client hung up), the popup closes, or moves to the next request.
 1. ~~**Config file and home-manager options.**~~ Done: `--config`,
    `services.skagent.keys` and `services.skagent.securityKeys`. Labels already
    name keys in the stock prompts and logs.
-2. **YubiKey serials** in `skagent-fido`, and the test key answering
-   `READ_CONFIG`.
+2. ~~**YubiKey serials**~~ Done: `skagent_fido::yubikey_serial`, read once
+   per plug-in before libfido2 opens it; the test key answers `READ_CONFIG`
+   with `--serial`. Logs name the YubiKey. Still to confirm on a real YubiKey.
 3. **Popup protocol and session** in the agent, with a scripted fake popup for
    the VM tests.
 4. **`skagent-pinentry`** with the designed states and the preview mode.

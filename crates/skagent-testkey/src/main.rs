@@ -17,6 +17,7 @@ use skagent_testkey::ctap::{
     STATUS_PIN_AUTH_INVALID, STATUS_USER_ACTION_TIMEOUT, TouchRequirement, touch_requirement,
 };
 use skagent_testkey::touch::{DEFAULT_TOUCH_TIMEOUT, Touch, TouchOutcome};
+use skagent_testkey::vendor;
 use soft_fido2::{Authenticator, AuthenticatorConfig, AuthenticatorOptions};
 use soft_fido2_transport::ctaphid::ErrorCode;
 use soft_fido2_transport::{Cmd, CommandHandler, CtapHidHandler, Packet, UhidDevice};
@@ -52,6 +53,12 @@ struct Cli {
     /// Product name of the HID device.
     #[arg(long, default_value = "skagent test key")]
     name: String,
+
+    /// Serial number reported to Yubico's `READ_CONFIG` vendor command, like a
+    /// YubiKey. Without it the key answers that command with an error, like
+    /// other authenticators.
+    #[arg(long)]
+    serial: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -133,7 +140,7 @@ fn run(cli: Cli) -> Result<()> {
         catalog: Catalog::default(),
         device: Rc::clone(&device),
     });
-    tracing::info!(name = %cli.name, touch = ?cli.touch, "test key ready");
+    tracing::info!(name = %cli.name, touch = ?cli.touch, serial = ?cli.serial, "test key ready");
 
     loop {
         let mut packet = [0_u8; 64];
@@ -142,6 +149,13 @@ fn run(cli: Cli) -> Result<()> {
             .map_err(|error| anyhow!("reading from the uhid device: {error}"))?;
         if received.is_none() {
             std::thread::sleep(IDLE_POLL);
+            continue;
+        }
+        if let Some(reply) = vendor::reply(&packet, cli.serial) {
+            tracing::info!(serial = ?cli.serial, "answered READ_CONFIG");
+            device
+                .write_packet(&reply)
+                .map_err(|error| anyhow!("writing to the uhid device: {error}"))?;
             continue;
         }
         let responses = handler

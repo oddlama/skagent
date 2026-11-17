@@ -6,11 +6,11 @@
 
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
-use skagent_fido::{Device, hid_devices};
+use skagent_fido::{Device, hid_devices, yubikey_serial};
 use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard, OwnedRwLockReadGuard, RwLock};
 
 use crate::cancel::{Abandoned, AbandonedFlag};
@@ -117,9 +117,51 @@ impl<K: Eq + Hash> KeyedLocks<K> {
     }
 }
 
+/// YubiKey serials of the plug-ins seen so far: read once per plug-in,
+/// before libfido2 opens it. `None`: the device reports no serial.
+#[derive(Debug, Default)]
+pub(crate) struct Serials(std::sync::Mutex<HashMap<DeviceIdentity, Option<u32>>>);
+
+impl Serials {
+    /// The serial of `identity`, read from the device the first time. Call it
+    /// under the device's lock, before libfido2 opens it.
+    fn of(&self, identity: &DeviceIdentity) -> Option<u32> {
+        if let Some(serial) = self.lock().get(identity) {
+            return *serial;
+        }
+        // Not under the lock: reading takes up to a second.
+        match yubikey_serial(identity.path()) {
+            Ok(serial) => {
+                self.lock().insert(identity.clone(), serial);
+                serial
+            }
+            Err(error) => {
+                // Possibly transient (busy): asked again next time.
+                tracing::debug!(
+                    device = identity.path(),
+                    error = %format!("{error:#}"),
+                    "reading the security key's serial failed"
+                );
+                None
+            }
+        }
+    }
+
+    /// Forgets plug-ins that aren't connected any more.
+    fn retain(&self, connected: &[DeviceIdentity]) {
+        self.lock()
+            .retain(|identity, _| connected.contains(identity));
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<DeviceIdentity, Option<u32>>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Router {
     bindings: Mutex<Bindings>,
+    serials: Arc<Serials>,
     devices: KeyedLocks<DeviceIdentity>,
     pub credentials: KeyedLocks<CredentialKey>,
     /// Readers are assertions; a writer is touch selection across devices.
@@ -132,6 +174,8 @@ pub(crate) struct Router {
 /// async request cannot release them while a worker still uses the hardware.
 pub(crate) struct RoutedDevice {
     pub identity: DeviceIdentity,
+    /// The YubiKey's serial, if it reports one.
+    pub serial: Option<u32>,
     pub device: Device,
     _operation: OwnedMutexGuard<()>,
     _access: OwnedRwLockReadGuard<()>,
@@ -185,6 +229,7 @@ impl Router {
         let read = within_queue_timeout(Arc::clone(&self.access).read_owned()).await?;
         ticket.check()?;
         let candidates = connected().await?;
+        self.serials.retain(&candidates);
         let decision = self.resolve(key, &candidates).await?;
         if let Resolution::Direct(identity) = decision {
             return self.open_direct(identity, read).await;
@@ -219,21 +264,23 @@ impl Router {
         // stops at its next round instead of blocking everyone for 30 s.
         let abandoned = Abandoned::default();
         let flag = abandoned.flag();
-        let (identity, device, exclusive) = tokio::task::spawn_blocking(move || {
+        let serials = Arc::clone(&self.serials);
+        let (selected, exclusive) = tokio::task::spawn_blocking(move || {
             // Keep exclusive access until the worker stops, even if its caller
             // goes away. Outstanding probes are cancelled on drop.
-            let selected = select_by_touch(candidates, &ticket, &flag)?;
-            Ok::<_, anyhow::Error>((selected.0, selected.1, exclusive))
+            let selected = select_by_touch(candidates, &serials, &ticket, &flag)?;
+            Ok::<_, anyhow::Error>((selected, exclusive))
         })
         .await
         .context("the device selection thread failed")??;
         let operation = self
             .devices
-            .lock_within(identity.clone(), QUEUE_TIMEOUT)
+            .lock_within(selected.identity.clone(), QUEUE_TIMEOUT)
             .await?;
         Ok(RoutedDevice {
-            identity,
-            device,
+            identity: selected.identity,
+            serial: selected.serial,
+            device: selected.device,
             _operation: operation,
             _access: exclusive.downgrade(),
         })
@@ -248,10 +295,12 @@ impl Router {
             .devices
             .lock_within(identity.clone(), QUEUE_TIMEOUT)
             .await?;
+        let serials = Arc::clone(&self.serials);
         tokio::task::spawn_blocking(move || {
-            let device = open_checked(&identity)?;
+            let (device, serial) = open_checked(&identity, &serials)?;
             Ok(RoutedDevice {
                 identity,
+                serial,
                 device,
                 _operation: operation,
                 _access: access,
@@ -286,19 +335,29 @@ async fn connected() -> Result<Vec<DeviceIdentity>> {
     .context("the device listing thread failed")?
 }
 
-fn open_checked(identity: &DeviceIdentity) -> Result<Device> {
+/// Opens the plug-in `identity`, with its YubiKey serial (read first, while
+/// libfido2 doesn't have the device open yet).
+fn open_checked(identity: &DeviceIdentity, serials: &Serials) -> Result<(Device, Option<u32>)> {
     ensure!(
         DeviceIdentity::of(identity.path())? == *identity,
         "security key changed before opening {}",
         identity.path()
     );
+    let serial = serials.of(identity);
     let device = Device::open(identity.path())?;
     ensure!(
         DeviceIdentity::of(identity.path())? == *identity,
         "security key changed while opening {}",
         identity.path()
     );
-    Ok(device)
+    Ok((device, serial))
+}
+
+/// The device a touch selected.
+struct Selected {
+    identity: DeviceIdentity,
+    serial: Option<u32>,
+    device: Device,
 }
 
 /// Asks every candidate for a touch and returns the one that got it.
@@ -310,15 +369,18 @@ fn open_checked(identity: &DeviceIdentity) -> Result<Device> {
 /// devices report a touch in the same round, or nobody touches in time.
 fn select_by_touch(
     identities: Vec<DeviceIdentity>,
+    serials: &Serials,
     ticket: &SigningTicket,
     abandoned: &AbandonedFlag,
-) -> Result<(DeviceIdentity, Device)> {
+) -> Result<Selected> {
     let started = Instant::now();
     let mut probes = Vec::new();
     for identity in identities {
         ticket.check()?;
-        match open_checked(&identity).and_then(Device::begin_touch) {
-            Ok(probe) => probes.push((identity, probe)),
+        let opened = open_checked(&identity, serials)
+            .and_then(|(device, serial)| Ok((device.begin_touch()?, serial)));
+        match opened {
+            Ok((probe, serial)) => probes.push((identity, serial, probe)),
             Err(error) => tracing::warn!(
                 device = identity.path(),
                 error = %format!("{error:#}"),
@@ -337,7 +399,7 @@ fn select_by_touch(
             "the request went away, stopped the touch selection"
         );
         let mut touched: Vec<DeviceIdentity> = Vec::new();
-        probes.retain_mut(|(identity, probe)| match probe.poll(TOUCH_POLL) {
+        probes.retain_mut(|(identity, _, probe)| match probe.poll(TOUCH_POLL) {
             Ok(true) => {
                 touched.push(identity.clone());
                 true
@@ -355,15 +417,19 @@ fn select_by_touch(
         match touched.as_slice() {
             [] => {}
             [selected] => {
-                let (identity, probe) = probes
+                let (identity, serial, probe) = probes
                     .into_iter()
-                    .find(|(identity, _)| identity == selected)
+                    .find(|(identity, _, _)| identity == selected)
                     .context("the touched security key disappeared from the candidates")?;
                 ensure!(
                     DeviceIdentity::of(identity.path())? == identity,
                     "selected security key changed"
                 );
-                return Ok((identity, probe.finish()?));
+                return Ok(Selected {
+                    identity,
+                    serial,
+                    device: probe.finish()?,
+                });
             }
             _ => bail!("several security keys were touched; touch only the one you mean"),
         }
