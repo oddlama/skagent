@@ -147,12 +147,12 @@ the end of input replaces it.
    `--popup`, queued sessions with the waiting keys, PIN retries within a
    request and retrying a timed-out touch (both moved here from later steps),
    tested with a fake popup in `checks.vm-popup`.
-4. **`skagent-pinentry`** with the designed states and the preview mode.
-   In progress. Done: the program in `pinentry/`, a Cargo workspace of its
-   own (GPUI from Zed's repository, pinned), every state in both themes
-   compared against the design's screenshots, and the protocol driven by
-   typed keys in a headless sway. To do: the Nix package, a home-manager
-   option, CI and a VM test with screenshots.
+4. ~~**`skagent-pinentry`**~~ Done: the program in `pinentry/`, a Cargo
+   workspace of its own (GPUI from Zed's repository, pinned), every state in
+   both themes compared against the design's screenshots, Inter and
+   JetBrains Mono bundled by the Nix package, `services.skagent.popup`, and
+   `checks.vm-pinentry` with the agent on a headless sway. CI builds it in
+   its own workflow.
 5. **Bindings by serial,** persistence, the waiting states (`wrong-key`,
    `no-key`, waiting for the re-plug in `replug`).
 6. **Host names** from `known_hosts`, the touch timeout measured on a
