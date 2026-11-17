@@ -18,7 +18,7 @@ skagent is an ssh-agent for FIDO2 `sk-ssh-ed25519@openssh.com` keys created with
 - `nix/home-manager.nix`: the home-manager module, exported as `homeModules.default` (with the package defaulting to this flake's). The `home-manager` input is for that output and its VM test.
 - `clippy.toml`: proper names allowed without backticks in doc comments.
 - `.github/workflows/check.yml`: `nix flake check -L` on pull requests, VM tests included (GitHub's Linux runners have KVM). Actions are pinned by commit SHA; update the SHA and the version comment together.
-- `docs/design.md`: architecture, PIN cache rules, threat model. `docs/research/`: findings with source references. `docs/macos.md`: the plan for macOS support (not implemented yet).
+- `docs/design.md`: architecture, PIN cache rules, threat model. `docs/research/`: findings with source references. `docs/macos.md`: the plan for macOS support (not implemented yet). `docs/pinentry.md`: the plan for skagent's own popup (skagent-pinentry).
 
 ## commands
 
