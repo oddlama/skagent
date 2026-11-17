@@ -121,6 +121,17 @@
             testkey = lib.addMetaAttrs {
               mainProgram = "skagent-testkey";
             } config.nci.outputs.skagent-testkey.packages.release;
+            # The popup (`--popup`), built with the agent's toolchain.
+            pinentry =
+              let
+                toolchain = config.nci.toolchains.mkBuild pkgs;
+              in
+              pkgs.callPackage ./nix/pinentry.nix {
+                rustPlatform = pkgs.makeRustPlatform {
+                  cargo = toolchain;
+                  rustc = toolchain;
+                };
+              };
           };
 
           # Every crate contributes its test suite and its clippy run. The VM
@@ -129,6 +140,10 @@
             lib.mapAttrs' (name: output: lib.nameValuePair "tests-${name}" output.check) crateOutputs
             // lib.mapAttrs' (name: output: lib.nameValuePair "clippy-${name}" output.clippy) crateOutputs
             // {
+              # The popup's own workspace; its tests run in the package build.
+              clippy-pinentry = config.packages.pinentry.clippy;
+              licenses-pinentry = config.packages.pinentry.licenses;
+              tests-pinentry = config.packages.pinentry;
               vm-agent = import ./nix/tests/agent.nix {
                 inherit pkgs;
                 package = config.packages.default;
