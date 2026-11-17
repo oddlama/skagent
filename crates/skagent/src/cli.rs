@@ -64,6 +64,12 @@ pub struct ServeArgs {
     #[command(flatten)]
     pub socket: SocketArgs,
 
+    /// Configuration file: emoji and labels for SSH keys, names for YubiKeys.
+    /// Defaults to `$XDG_CONFIG_HOME/skagent/config.toml`, which may be
+    /// missing; a file given here must exist.
+    #[arg(long, env = "SKAGENT_CONFIG")]
+    pub config: Option<PathBuf>,
+
     /// pinentry program that asks for PINs (the default prompt).
     #[arg(long, default_value = "pinentry", conflicts_with = "askpass")]
     pub pinentry: PathBuf,

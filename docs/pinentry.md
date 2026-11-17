@@ -127,8 +127,9 @@ forget`, the client hung up), the popup closes, or moves to the next request.
 
 ## steps
 
-1. **Config file and home-manager options.** Labels already improve the stock
-   prompts.
+1. ~~**Config file and home-manager options.**~~ Done: `--config`,
+   `services.skagent.keys` and `services.skagent.securityKeys`. Labels already
+   name keys in the stock prompts and logs.
 2. **YubiKey serials** in `skagent-fido`, and the test key answering
    `READ_CONFIG`.
 3. **Popup protocol and session** in the agent, with a scripted fake popup for

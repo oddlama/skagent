@@ -19,6 +19,7 @@ colored = "3"
 futures-util = { version = "0.3", default-features = false }
 libc = "0.2"
 rustix = { version = "1", features = ["fs", "mm", "param", "process"] }
+serde = { version = "1", features = ["derive"] }
 skagent-fds = { path = "crates/skagent-fds" }
 skagent-fido = { path = "crates/skagent-fido" }
 skagent-secret = { path = "crates/skagent-secret" }
@@ -30,6 +31,11 @@ ssh-agent-lib = "0.6"
 subtle = "2"
 signature = "2.2"
 tempfile = "3"
+toml = { version = "1.2", default-features = false, features = [
+  "parse",
+  "serde",
+  "std",
+] }
 tokio = { version = "1", features = [
   "macros",
   "io-util",

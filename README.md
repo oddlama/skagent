@@ -140,6 +140,38 @@ A cached PIN is only ever sent to the security key it was entered for. If you
 replug the key, or someone entered a wrong PIN on it in the meantime, skagent
 asks you again.
 
+### Naming keys
+
+You can give your SSH keys a label and an emoji, and your YubiKeys a name.
+Labels replace the key's comment in prompts and logs, which helps with loaded
+keys called `ssh:work openssh`. Emoji and YubiKey names are for skagent's
+upcoming popup. With home-manager:
+
+```nix
+services.skagent = {
+  keys."SHA256:4NU8jDPeifwDQZBds3tPVzsluIgQ6CTN6zoxKMzxIkQ" = { # as `ssh-add -l` shows it
+    emoji = "🦊";
+    label = "github-work";
+  };
+  securityKeys."12345678".name = "Desk 5C NFC"; # serial, as `ykman list --serials` shows it
+};
+```
+
+Without home-manager, write the same into `~/.config/skagent/config.toml`, or
+pass another file with `--config`:
+
+```toml
+[keys."SHA256:4NU8jDPeifwDQZBds3tPVzsluIgQ6CTN6zoxKMzxIkQ"]
+emoji = "🦊"
+label = "github-work"
+
+[security-keys.12345678]
+name = "Desk 5C NFC"
+```
+
+skagent refuses to start if the file contains anything it doesn't know, so a
+typo can't go unnoticed.
+
 ### When skagent forgets your PIN
 
 skagent drops cached PINs when:

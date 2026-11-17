@@ -45,8 +45,16 @@ let
       )
     );
 
+  # Only what's set: the agent refuses unknown or empty settings.
+  configFile = (pkgs.formats.toml { }).generate "skagent-config.toml" {
+    keys = lib.mapAttrs (_: key: lib.filterAttrs (_: value: value != null) key) cfg.keys;
+    security-keys = cfg.securityKeys;
+  };
+
   serveArgs = [
     "serve"
+    "--config"
+    "${configFile}"
   ]
   ++ (
     if cfg.askpass != null then
@@ -166,6 +174,59 @@ in
       '';
     };
 
+    keys = mkOption {
+      type = types.attrsOf (
+        types.submodule {
+          options = {
+            emoji = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              example = "🦊";
+              description = "Shown for the key in skagent's popup.";
+            };
+            label = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              example = "github-work";
+              description = "Shown instead of the key's comment in prompts and logs.";
+            };
+          };
+        }
+      );
+      default = { };
+      example = lib.literalExpression ''
+        {
+          "SHA256:4NU8jDPeifwDQZBds3tPVzsluIgQ6CTN6zoxKMzxIkQ" = {
+            emoji = "🦊";
+            label = "github-work";
+          };
+        }
+      '';
+      description = ''
+        How SSH keys are shown, by their fingerprint as `ssh-add -l` shows
+        it.
+      '';
+    };
+
+    securityKeys = mkOption {
+      type = types.attrsOf (
+        types.submodule {
+          options.name = mkOption {
+            type = types.str;
+            example = "Desk 5C NFC";
+            description = "The YubiKey's name.";
+          };
+        }
+      );
+      default = { };
+      example = {
+        "12345678".name = "Desk 5C NFC";
+      };
+      description = ''
+        Names for YubiKeys, by serial number (`ykman list --serials`).
+      '';
+    };
+
     secretMemory = mkOption {
       type = types.enum [
         "locked"
@@ -226,7 +287,15 @@ in
         assertion = policy.lifetime != null || policy.idle != null;
         message = "services.skagent.pinPolicies: each rule needs lifetime and/or idle.";
       }
-    ]) cfg.pinPolicies;
+    ]) cfg.pinPolicies
+    ++ map (fingerprint: {
+      assertion = builtins.match "SHA256:[A-Za-z0-9+/]{43}" fingerprint != null;
+      message = "services.skagent.keys: \"${fingerprint}\" is not a SHA256:… fingerprint as `ssh-add -l` shows it.";
+    }) (lib.attrNames cfg.keys)
+    ++ map (serial: {
+      assertion = builtins.match "[0-9]+" serial != null;
+      message = "services.skagent.securityKeys: \"${serial}\" is not a serial number.";
+    }) (lib.attrNames cfg.securityKeys);
 
     # `skagent load` and `skagent forget` in shells.
     home.packages = [ cfg.package ];

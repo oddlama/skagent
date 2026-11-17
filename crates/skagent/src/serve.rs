@@ -10,6 +10,7 @@ use tokio::signal::unix::{Signal, SignalKind, signal};
 
 use crate::agent::SkAgent;
 use crate::cli::{SecretMemory, ServeArgs, SocketArgs};
+use crate::config::{self, Config};
 use crate::logind;
 use crate::notify::Notifier;
 use crate::pin_cache::CachePolicy;
@@ -34,6 +35,27 @@ pub fn socket_path(args: SocketArgs) -> Result<PathBuf> {
         Some(path) => Ok(path),
         None => socket::default_socket_path(std::env::var_os("XDG_RUNTIME_DIR").as_deref()),
     }
+}
+
+/// The configuration from `--config`, or from the default path if it exists.
+///
+/// # Errors
+///
+/// Returns an error if a given file is missing, or any file doesn't parse.
+pub fn load_config(path: Option<&Path>) -> Result<Config> {
+    let (path, required) = match path {
+        Some(path) => (path.to_path_buf(), true),
+        None => (
+            config::default_config_path(
+                std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+                std::env::var_os("HOME").as_deref(),
+            )?,
+            false,
+        ),
+    };
+    let config = Config::load(&path, required)?;
+    tracing::info!(config = %path.display(), "read the configuration");
+    Ok(config)
 }
 
 /// The prompt `args` ask for: askpass if `--askpass` is given, else pinentry.
@@ -92,6 +114,7 @@ pub async fn run(
             "keeping secrets in memfd_secret memory; the system can't hibernate while the agent holds any"
         );
     }
+    let config = load_config(args.config.as_deref())?;
     let prompt = pin_prompt(&args);
     let policy = CachePolicy {
         lifetime: args.pin_lifetime,
@@ -132,7 +155,9 @@ pub async fn run(
     for rule in &args.pin_policies {
         tracing::info!(?rule, "caching the PINs of matching keys differently");
     }
-    let mut signer = Signer::new(Some(prompt), policy).with_pin_policies(args.pin_policies);
+    let mut signer = Signer::new(Some(prompt), policy)
+        .with_pin_policies(args.pin_policies)
+        .with_config(Arc::new(config));
     if args.no_touch_notification {
         tracing::info!("not showing touch notifications");
     } else {

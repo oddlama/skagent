@@ -1,2 +1,2 @@
 # Proper names that doc comments may use without backticks. ".." keeps the defaults.
-doc-valid-idents = ["EdDSA", "GnuPG", "OpenSSH", "YubiKey", ".."]
+doc-valid-idents = ["EdDSA", "GnuPG", "OpenSSH", "YubiKey", "YubiKeys", ".."]

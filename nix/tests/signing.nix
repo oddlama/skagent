@@ -403,6 +403,23 @@ pkgs.testers.runNixOSTest {
         retry(lambda _last_try: cancelled() == before_cancel + 1, timeout_seconds=3)
         machine.wait_until_succeeds("test $(systemctl show term-touch -p ExecMainStatus --value) != 0")
 
+    with subtest("a configured label names the key in prompts"):
+        fingerprint = alice_ok("ssh-keygen -lf ~/id_sk.pub").split()[1]
+        alice_ok(
+            f"printf '[keys.\"%s\"]\\nlabel = \"work laptop key\"\\n' '{fingerprint}' > ${socketDir}/config.toml"
+        )
+        start_agent("skagent-config", askpass_agent, "--config ${socketDir}/config.toml")
+        expect_prompt()
+        last_prompt = machine.succeed("tail -n 1 ${promptLog}")
+        assert f"Enter PIN for work laptop key ({fingerprint})" in last_prompt, last_prompt
+        stop_agent("skagent-config")
+
+    with subtest("a broken configuration keeps the agent from starting"):
+        alice_ok("echo 'lable = 1' > ${socketDir}/broken.toml")
+        status, out = alice("skagent serve --socket ${socketDir}/broken.sock --config ${socketDir}/broken.toml")
+        assert status != 0 and "unknown field" in out, (status, out)
+        machine.fail("test -e ${socketDir}/broken.sock")
+
     with subtest("a per-key policy changes the lifetime of matching keys only"):
         start_agent(
             "skagent-policy",

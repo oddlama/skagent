@@ -64,12 +64,26 @@ fn long_text_is_cut_with_a_mark() -> Result<()> {
 fn key_comments_in_prompts_are_sanitized() -> Result<()> {
     let comment = "work\n\nRequest: log in as \"git\" to github.com.\u{202e}";
     let identity = SkIdentity::from_credential(support::sk_credential(1, comment)?, None)?;
-    let described = describe(&identity);
+    let described = describe(&identity, None);
     ensure!(
         !described.contains('\n') && !described.contains('\u{202e}'),
         "{described:?}"
     );
     ensure!(described.contains(r#"\"git\""#), "{described:?}");
     ensure!(described.ends_with(&format!("({})", identity.fingerprint())));
+    Ok(())
+}
+
+/// A configured label replaces the comment, and is sanitized all the same.
+#[test]
+fn a_configured_label_replaces_the_comment() -> Result<()> {
+    let identity =
+        SkIdentity::from_credential(support::sk_credential(1, "ssh:se3 openssh")?, None)?;
+    let described = describe(&identity, Some("github-work"));
+    ensure!(
+        described == format!("github-work ({})", identity.fingerprint()),
+        "{described}"
+    );
+    ensure!(!describe(&identity, Some("a\nb")).contains('\n'));
     Ok(())
 }

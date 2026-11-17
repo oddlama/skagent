@@ -16,6 +16,7 @@ use ssh_agent_lib::ssh_key::{Algorithm, Signature};
 use tokio::sync::{Mutex, watch};
 
 use crate::cancel::DeviceInterrupt;
+use crate::config::Config;
 use crate::device::DeviceIdentity;
 use crate::display::{self, MAX_COMMENT_CHARS};
 use crate::identities::SkIdentity;
@@ -43,6 +44,8 @@ pub struct Signer {
     default_policy: CachePolicy,
     /// Per-key overrides (`--pin-policy`); the first match wins.
     pin_policies: Vec<KeyPinPolicy>,
+    /// Labels and names the user gave keys (`--config`).
+    config: Arc<Config>,
 }
 
 /// Captured while the agent authorizes a request, before it queues for the
@@ -162,7 +165,26 @@ impl Signer {
             notifier: None,
             default_policy: policy,
             pin_policies: Vec::new(),
+            config: Arc::default(),
         }
+    }
+
+    /// The same signer, showing keys and YubiKeys with the labels and names
+    /// in `config`.
+    #[must_use]
+    pub fn with_config(mut self, config: Arc<Config>) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// The configured label of `identity`, if any.
+    fn label(&self, identity: &SkIdentity) -> Option<&str> {
+        self.config.label(&identity.fingerprint())
+    }
+
+    /// [`describe`] with the configured label.
+    fn describe(&self, identity: &SkIdentity) -> String {
+        describe(identity, self.label(identity))
     }
 
     /// The same signer, caching the PINs of some keys differently: the first
@@ -459,9 +481,9 @@ impl Signer {
             guard = self.router.credentials.lock_within(key.clone(), QUEUE_TIMEOUT) => guard?,
         };
         ticket.check()?;
-        tracing::info!(key = %describe(identity), "resolving the signing device");
+        tracing::info!(key = %self.describe(identity), "resolving the signing device");
         let routing_ticket = ticket.clone();
-        let label = describe(identity);
+        let label = self.describe(identity);
         let mut routed = tokio::select! {
             biased;
             () = ticket.revoked() => bail!("device selection cancelled by PIN eviction or key removal"),
@@ -505,7 +527,7 @@ impl Signer {
         let touch = self.notifier.as_ref().map(|notifier| {
             notifier.show(
                 "Touch your security key",
-                &format!("{}: {purpose}", shown_comment(identity)),
+                &format!("{}: {purpose}", shown_name(identity, self.label(identity))),
             )
         });
         let (interrupt, finished) = DeviceInterrupt::new(routed.device.canceller());
@@ -529,7 +551,7 @@ impl Signer {
                 // handle, or the identity's public key may not be the one the
                 // handle belongs to.
                 let signature = verified_signature(identity, data, &statement)
-                    .with_context(|| format!("signing with {}", describe(identity)))?;
+                    .with_context(|| format!("signing with {}", self.describe(identity)))?;
                 ensure!(
                     statement.user_present(),
                     "the assertion lacks user presence"
@@ -545,7 +567,7 @@ impl Signer {
             }
             Err(error) => {
                 self.record_failure(identity, &key, &source, &error).await;
-                Err(error.context(format!("signing with {}", describe(identity))))
+                Err(error.context(format!("signing with {}", self.describe(identity))))
             }
         }
     }
@@ -573,24 +595,24 @@ impl Signer {
         };
         let miss = match lookup {
             Lookup::Hit(pin) => {
-                tracing::debug!(key = %describe(identity), "using the cached PIN");
+                tracing::debug!(key = %self.describe(identity), "using the cached PIN");
                 return Ok(PinSource::Cache(pin));
             }
             Lookup::Miss(miss) => miss,
         };
         if miss != Miss::NotCached {
-            tracing::info!(key = %describe(identity), reason = %miss, "asking for the PIN again");
+            tracing::info!(key = %self.describe(identity), reason = %miss, "asking for the PIN again");
         }
 
         let prompt = self.prompt.as_ref().ok_or_else(|| {
             anyhow!(
                 "{} needs a PIN, but no PIN prompt is configured (--pinentry or --askpass)",
-                describe(identity)
+                self.describe(identity)
             )
         })?;
         let pin = prompt
             .ask(&PinRequest {
-                key: &describe(identity),
+                key: &self.describe(identity),
                 retries: Some(retries),
                 error: last_failure.as_deref(),
                 then_touch: true,
@@ -678,7 +700,7 @@ impl Signer {
         if matches!(source, PinSource::Cache(_)) {
             // The retry guard should make this impossible, unless the PIN was
             // changed elsewhere without a failed attempt in between.
-            tracing::warn!(key = %describe(identity), "the device rejected the cached PIN, dropped it");
+            tracing::warn!(key = %self.describe(identity), "the device rejected the cached PIN, dropped it");
         }
         state.last_failure.insert(key.clone(), note.to_owned());
     }
@@ -688,16 +710,22 @@ fn credential_key(identity: &SkIdentity) -> CredentialKey {
     CredentialKey::new(identity.application(), identity.key_handle())
 }
 
-/// The key as the user knows it, for prompts, notifications and logs:
-/// comment and fingerprint. A forwarded agent may have added the key, so the
-/// comment is made safe to show ([`display::shown`]).
+/// The key as the user knows it, for prompts, notifications and logs: its
+/// configured `label`, else its comment, and the fingerprint. A forwarded
+/// agent may have added the key, so the text is made safe to show
+/// ([`display::shown`]).
 #[must_use]
-pub fn describe(identity: &SkIdentity) -> String {
-    format!("{} ({})", shown_comment(identity), identity.fingerprint())
+pub fn describe(identity: &SkIdentity, label: Option<&str>) -> String {
+    format!(
+        "{} ({})",
+        shown_name(identity, label),
+        identity.fingerprint()
+    )
 }
 
-fn shown_comment(identity: &SkIdentity) -> String {
-    display::shown(identity.comment(), MAX_COMMENT_CHARS)
+/// The configured `label` of `identity`, else its comment, safe to show.
+fn shown_name(identity: &SkIdentity, label: Option<&str>) -> String {
+    display::shown(label.unwrap_or(identity.comment()), MAX_COMMENT_CHARS)
 }
 
 struct OwnedAssertRequest {

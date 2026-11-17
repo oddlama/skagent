@@ -72,6 +72,11 @@ pkgs.testers.runNixOSTest {
           }
         ];
         secretMemory = "memfd-secret";
+        keys."SHA256:4NU8jDPeifwDQZBds3tPVzsluIgQ6CTN6zoxKMzxIkQ" = {
+          emoji = "🦊";
+          label = "github-work";
+        };
+        securityKeys."12345678".name = "Desk 5C NFC";
       };
       # Stands in for a compositor's session target (sway-session.target).
       systemd.user.targets.test-session.Unit = {
@@ -189,6 +194,9 @@ pkgs.testers.runNixOSTest {
         assert "activated=true" in out, out
         assert "caching the PINs of matching keys differently" in out, out
         assert 'Application("ssh:example")' in out, out
+        config = next(line for line in out.splitlines() if "read the configuration" in line).split("config=")[1].strip()
+        written = machine.succeed(f"cat {config}")
+        assert "github-work" in written and "Desk 5C NFC" in written and "🦊" in written, written
         pid = user_ok("systemctl --user show skagent -p MainPID --value").strip()
         maps = machine.succeed(f"cat /proc/{pid}/maps")
         assert "secretmem" in maps, (pid, maps)

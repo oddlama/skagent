@@ -10,6 +10,7 @@ pub mod agent;
 pub mod cancel;
 pub mod cli;
 pub mod client;
+pub mod config;
 pub mod destination;
 pub mod device;
 pub mod display;
