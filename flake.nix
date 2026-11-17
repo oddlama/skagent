@@ -201,6 +201,11 @@
                 value = lib.makeLibraryPath pinentryLibraries;
               }
               {
+                # The design's fonts, built into skagent-pinentry as in the package.
+                name = "SKAGENT_PINENTRY_FONTS";
+                value = "${pkgs.inter}/share/fonts/truetype/Inter.ttc:${pkgs.jetbrains-mono}/share/fonts/truetype/JetBrainsMono-Regular.ttf";
+              }
+              {
                 # For running skagent-pinentry from pinentry/target.
                 name = "SKAGENT_PINENTRY_LIBRARY_PATH";
                 value = lib.makeLibraryPath (pinentryLibraries ++ pinentryRuntimeLibraries);

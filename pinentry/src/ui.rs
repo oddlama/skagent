@@ -183,15 +183,20 @@ impl Popup {
                     return;
                 }
                 match pin.take_line(seq) {
-                    Ok(line) => self.answers.send(line.expose()),
+                    Ok(line) => {
+                        self.answers.send(line.expose());
+                        tracing::debug!(seq, "sent the PIN");
+                    }
                     Err(error) => {
                         tracing::error!(error = %format!("{error:#}"), "can't hand over the PIN");
                     }
                 }
             }
-            Body::TryAgain => self
-                .answers
-                .send(skagent_popup::retry_line(shown.seq).as_bytes()),
+            Body::TryAgain => {
+                self.answers
+                    .send(skagent_popup::retry_line(shown.seq).as_bytes());
+                tracing::debug!(seq = shown.seq, "asked to try again");
+            }
             _ => return,
         }
         cx.notify();
@@ -203,9 +208,11 @@ impl Popup {
         };
         match shown.screen.close {
             Close::None => {}
-            Close::Cancel => self
-                .answers
-                .send(skagent_popup::cancel_line(shown.seq).as_bytes()),
+            Close::Cancel => {
+                self.answers
+                    .send(skagent_popup::cancel_line(shown.seq).as_bytes());
+                tracing::debug!(seq = shown.seq, "cancelled");
+            }
             Close::Close => {
                 // A final screen: on to what's next, or gone.
                 if let Some((seq, state)) = self.pending.take() {
@@ -215,6 +222,7 @@ impl Popup {
                 } else {
                     self.answers
                         .send(skagent_popup::cancel_line(shown.seq).as_bytes());
+                    tracing::debug!(seq = shown.seq, "closed");
                 }
             }
         }

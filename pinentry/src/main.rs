@@ -4,7 +4,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![forbid(unsafe_code)]
 
-use std::io::{BufRead as _, Write as _};
+use std::io::{BufRead as _, IsTerminal as _, Write as _};
 use std::process::ExitCode;
 
 use anyhow::{Context as _, Result, bail};
@@ -17,9 +17,9 @@ use gpui::{
 };
 use skagent_pinentry::answers::Answers;
 use skagent_pinentry::assets::Assets;
-use skagent_pinentry::fixtures;
 use skagent_pinentry::theme::Mode;
 use skagent_pinentry::ui::{Popup, SIZE};
+use skagent_pinentry::{fixtures, fonts};
 use skagent_popup::{Message, decode_message, ready_line};
 
 /// skagent's popup: the PIN, the touch and the result of a request in one
@@ -50,7 +50,13 @@ enum Input {
 }
 
 fn main() -> ExitCode {
+    // Colour only on a terminal, and never with NO_COLOR set
+    // (<https://no-color.org>): the agent passes its own stderr on, which
+    // usually ends in the journal.
+    let colour = std::io::stderr().is_terminal()
+        && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
     let _logging = tracing_subscriber::fmt()
+        .with_ansi(colour)
         .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("SKAGENT_PINENTRY_LOG")
@@ -74,11 +80,14 @@ fn run(cli: Cli) -> Result<()> {
     let app = gpui_platform::application().with_assets(Assets);
     if let Some(name) = cli.preview {
         let (state, waiting) = fixtures::fixture(&name).context("no such screen")?;
-        app.run(move |cx: &mut App| match open(cx, Answers::Preview, mode) {
-            Ok(popup) => popup.update(cx, |popup, cx| popup.show(1, state, waiting, cx)),
-            Err(error) => {
-                tracing::error!(error = %format!("{error:#}"), "can't open the window");
-                cx.quit();
+        app.run(move |cx: &mut App| {
+            fonts::load_bundled(cx);
+            match open(cx, Answers::Preview, mode) {
+                Ok(popup) => popup.update(cx, |popup, cx| popup.show(1, state, waiting, cx)),
+                Err(error) => {
+                    tracing::error!(error = %format!("{error:#}"), "can't open the window");
+                    cx.quit();
+                }
             }
         });
         return Ok(());
@@ -90,6 +99,7 @@ fn run(cli: Cli) -> Result<()> {
         .spawn(move || read_input(&sender))
         .context("starting the input thread")?;
     app.run(move |cx: &mut App| {
+        fonts::load_bundled(cx);
         Answers::Agent.send(ready_line().as_bytes());
         cx.spawn(async move |cx| serve(receiver, mode, cx).await)
             .detach();
@@ -130,6 +140,12 @@ async fn serve(
                 waiting,
                 state,
             }) => {
+                tracing::debug!(
+                    seq,
+                    state = state.name(),
+                    waiting = waiting.len(),
+                    "showing"
+                );
                 if popup.is_none() {
                     match cx.update(|cx| open(cx, Answers::Agent, mode)) {
                         Ok(opened) => popup = Some(opened),
@@ -150,6 +166,7 @@ async fn serve(
                 }
             }
             Input::End => {
+                tracing::debug!("no more requests");
                 match &popup {
                     Some(popup) => popup.update(cx, Popup::end),
                     None => cx.update(|cx| cx.quit()),
@@ -192,7 +209,10 @@ fn open(cx: &mut App, answers: Answers, mode: Option<Mode>) -> Result<Entity<Pop
         popup
     };
     let opened = match cx.open_window(overlay, build) {
-        Ok(window) => window,
+        Ok(window) => {
+            tracing::debug!("opened a layer-shell overlay");
+            window
+        }
         Err(error) if error.is::<layer_shell::LayerShellNotSupportedError>() => {
             tracing::info!("no layer shell, opening an ordinary window");
             let window = WindowOptions {
