@@ -1,6 +1,7 @@
 # nix flake check on pull requests: formatting, every crate's tests and
 # clippy, the license boundary and the NixOS VM tests. GitHub's Linux runners
-# have KVM, so the VMs run hardware-accelerated.
+# have KVM, so the VMs run hardware-accelerated. The popup's checks (GPUI, a
+# few hundred crates) run in pinentry.yml, only when the popup changes.
 name: check
 
 on:
@@ -36,5 +37,11 @@ jobs:
           # KVM is enabled by default; the VM tests need these features too.
           extra_nix_config: |
             system-features = nixos-test benchmark big-parallel kvm
-      - name: nix flake check
-        run: nix flake check -L
+      - name: Evaluate every output
+        run: nix flake check --no-build
+      - name: Build the checks, but the popup's
+        run: |
+          nix build -L --no-link $(nix eval --raw .#checks.x86_64-linux --apply '
+            checks: builtins.concatStringsSep " " (map (name: ".#checks.x86_64-linux.${name}")
+              (builtins.filter (name: builtins.match ".*-pinentry" name == null) (builtins.attrNames checks)))
+          ')

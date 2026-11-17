@@ -1,0 +1,60 @@
+# The popup's checks (skagent-pinentry): its tests, clippy, the licenses of
+# what it links, and the VM test with the agent on a headless compositor.
+# Building GPUI takes a while on two vCPUs, so this runs only when the popup
+# or what it shares with the agent changes. The agent's side of the protocol
+# is tested with a fake popup in check.yml.
+name: pinentry
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/pinentry.yml"
+      - "Cargo.toml"
+      - "clippy.toml"
+      - "crates/skagent-popup/**"
+      - "crates/skagent-secret/**"
+      - "crates/skagent/src/popup.rs"
+      - "flake.lock"
+      - "flake.nix"
+      - "nix/pinentry-licenses.py"
+      - "nix/pinentry.nix"
+      - "nix/tests/common.nix"
+      - "nix/tests/pinentry.nix"
+      - "pinentry/**"
+  workflow_dispatch:
+
+# A new push to a pull request cancels its run in progress.
+concurrency:
+  group: pinentry-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pinentry:
+    runs-on: ubuntu-latest
+    # GPUI is built twice (package and clippy), the agent once for the VM.
+    timeout-minutes: 120
+    steps:
+      # The runner guarantees 14 GB of disk, which the Rust builds and VM
+      # closures can exceed. Drop preinstalled toolchains nothing here uses.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@3dc140bfc76c49fbd4dd958429132e3746bcb086 # v31.11.5
+        with:
+          # KVM is enabled by default; the VM test needs these features too.
+          extra_nix_config: |
+            system-features = nixos-test benchmark big-parallel kvm
+      - name: Build the popup's checks
+        run: |
+          nix build -L --no-link \
+            .#checks.x86_64-linux.licenses-pinentry \
+            .#checks.x86_64-linux.tests-pinentry \
+            .#checks.x86_64-linux.clippy-pinentry \
+            .#checks.x86_64-linux.vm-pinentry
