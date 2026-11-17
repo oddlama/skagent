@@ -1,0 +1,65 @@
+# skagent's popup. A workspace of its own: GPUI comes from Zed's repository
+# with hundreds of dependencies, and the agent's workspace, lockfile and
+# builds stay free of them. Only the protocol (`skagent-popup`) is shared.
+[workspace]
+resolver = "3"
+
+[package]
+name = "skagent-pinentry"
+description = "skagent's popup: PIN, touch and errors of a request in one window"
+edition = "2024"
+license = "MIT"
+publish = false
+rust-version = "1.98"
+version = "0.1.0"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+# Zed's main has the layer-shell window kind and the wgpu renderer; the
+# crates.io release has neither. Update both together.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "698368515d17a602dd51ea61297e5412ce06f52f" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "698368515d17a602dd51ea61297e5412ce06f52f", default-features = false, features = [
+  "wayland",
+  "x11",
+] }
+skagent-popup = { path = "../crates/skagent-popup" }
+skagent-secret = { path = "../crates/skagent-secret" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = [
+  "env-filter",
+  "fmt",
+  "tracing-log",
+] }
+
+# Zed's workspace patches these; GPUI relies on the patched versions. Keep
+# them in sync with Zed's Cargo.toml at the rev above.
+[patch.crates-io]
+async-task = { git = "https://github.com/smol-rs/async-task", rev = "41fd3359c75e221bd8b187a8ee361aa309c1714c" }
+calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
+khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
+
+# The agent workspace's lints, which this workspace can't inherit.
+[lints.rust]
+missing_docs = "warn"
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+arithmetic_side_effects = "deny"
+dbg_macro = "deny"
+exit = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
+string_slice = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+unwrap_used = "deny"
+
+[profile.release]
+overflow-checks = true

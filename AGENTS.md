@@ -14,6 +14,7 @@ skagent is an ssh-agent for FIDO2 `sk-ssh-ed25519@openssh.com` keys created with
 - `crates/skagent-fds`: descriptors crossing `exec`: adopting the socket systemd passes (socket activation) and `inherit_stdio_only` for spawned prompts (libfido2 opens hidraw without `O_CLOEXEC`). Spawn every child of the agent through `prompt::prompt_command`. Its `unsafe` is confined to `src/activation.rs` and `src/children.rs`.
 - `crates/skagent-fido`: safe wrapper over libfido2 (via `libfido2-sys`, bindgen against the system headers). Its `unsafe` is confined to `src/raw.rs`. Only `/dev/hidraw*` devices are used; libfido2 also lists YubiKeys over `pcsc://`. `src/yubikey.rs` reads YubiKey serials with Yubico's `READ_CONFIG` vendor command over hidraw itself (libfido2 can't send vendor commands): only while libfido2 has the device closed, under the device lock (`routing::Serials`).
 - `crates/skagent-popup`: the protocol between the agent and its popup (`--popup`, `skagent-pinentry`): JSON state messages to the popup, text intent lines back, PINs decoded into `SecretBuffer`s. Shared by both sides, so it stays free of GUI and libfido2 dependencies. The agent side is `crates/skagent/src/popup.rs`.
+- `pinentry/`: `skagent-pinentry`, the popup (GPUI, design B+ in `docs/pinentry.md`). A Cargo workspace of its own with its own lockfile and lints, so GPUI's ~650 dependencies stay out of the agent's. GPUI comes from Zed's repository at a pinned rev; its `[patch.crates-io]` mirrors Zed's and changes with the rev. `src/screen.rs` turns a protocol state into the copy and layout (no GUI, tested); `src/ui.rs` draws it; `src/pin.rs` keeps the typed PIN in a `SecretBuffer`; `--preview SCREEN --theme light|dark` renders the fixtures in `src/fixtures.rs`. GPUI needs Rust newer than the agent's MSRV.
 - `crates/skagent-testkey`: **test-only** virtual FIDO2 key on uhid (soft-fido2, AGPL-3.0). Used inside VM tests only. `checks.license-boundary` (`nix/license-boundary.nix`) fails if a shipped crate ever reaches it or soft-fido2 through `Cargo.lock`; add new shipped crates to its `shippedCrates`.
 - `nix/tests/`: NixOS VM tests (end to end, real OpenSSH tools against the real binary). `common.nix` has the shared helpers (stub key writer, askpass and pinentry that log prompts, uhid/hidraw setup, a private session bus with a fake notification service that records every call).
 - `nix/home-manager.nix`: the home-manager module, exported as `homeModules.default` (with the package defaulting to this flake's). The `home-manager` input is for that output and its VM test.
@@ -30,7 +31,10 @@ cargo build / cargo test / cargo clippy --all-targets
 nix fmt                  # treefmt: nixfmt, deadnix, statix, taplo, rustfmt
 nix flake check -L       # treefmt, per-crate tests + clippy, VM tests
 nix build                # release binary
+(cd pinentry && cargo build)  # the popup, in its own workspace
 ```
+
+- In the devshell, run the popup with `LD_LIBRARY_PATH=$SKAGENT_PINENTRY_LIBRARY_PATH` (GPUI loads Vulkan, EGL and the Wayland client at runtime). nci's `CARGO_BUILD_TARGET` applies there too, so it lands in `pinentry/target/<triple>/debug/`.
 
 - nci sets `CARGO_BUILD_TARGET`, so binaries land in `target/<triple>/debug/`. Use `cargo run -- ...`.
 - `RUSTFLAGS=-D warnings` is set for the nix builds **and** exported into the devshell. Warnings are errors everywhere, including clippy pedantic warnings in the clippy check.

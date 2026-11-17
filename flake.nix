@@ -74,6 +74,20 @@
             ];
           };
           inherit (pkgs.llvmPackages) libclang;
+
+          # skagent-pinentry (GPUI): linked against at build time ...
+          pinentryLibraries = [
+            pkgs.fontconfig
+            pkgs.freetype
+            pkgs.libxcb
+            pkgs.libxkbcommon
+          ];
+          # ... and loaded at runtime (dlopen).
+          pinentryRuntimeLibraries = [
+            pkgs.libGL
+            pkgs.vulkan-loader
+            pkgs.wayland
+          ];
         in
         {
           nci = {
@@ -177,10 +191,22 @@
               pkgs.openssh
               pkgs.libfido2
               pkgs.pkg-config
-            ];
-            # What rustPlatform.bindgenHook sets up inside nix builds, for
-            # cargo builds of libfido2-sys in the shell.
+            ]
+            # skagent-pinentry's own workspace in pinentry/.
+            ++ map lib.getDev pinentryLibraries;
             env = [
+              {
+                # Some of GPUI's -sys crates link by name, without pkg-config.
+                name = "LIBRARY_PATH";
+                value = lib.makeLibraryPath pinentryLibraries;
+              }
+              {
+                # For running skagent-pinentry from pinentry/target.
+                name = "SKAGENT_PINENTRY_LIBRARY_PATH";
+                value = lib.makeLibraryPath (pinentryLibraries ++ pinentryRuntimeLibraries);
+              }
+              # What rustPlatform.bindgenHook sets up inside nix builds, for
+              # cargo builds of libfido2-sys in the shell.
               {
                 name = "LIBCLANG_PATH";
                 value = "${lib.getLib libclang}/lib";
