@@ -123,6 +123,7 @@ home-manager counterparts:
 | `--pin-policy RULE` | `pinPolicies` | | Lifetime and idle timeout for some keys, see below. |
 | `--pinentry PATH` | `pinentry.package` | `pinentry`, home-manager: `pinentry-qt` | The pinentry program that asks for PINs. |
 | `--askpass PATH` | `askpass` | | Ask with an askpass program instead of pinentry. |
+| `--popup PATH` | `popup.enable` | | Use skagent's own popup instead of pinentry, see below. |
 | `--no-touch-notification` | `touchNotification` | | Don't show a notification while a key waits for a touch. |
 | `--secret-memory memfd-secret` | `secretMemory` | `locked` | Keep PINs in `memfd_secret(2)` memory, which is also removed from the kernel's direct map. The system can't hibernate while skagent holds any. |
 
@@ -144,8 +145,8 @@ asks you again.
 
 You can give your SSH keys a label and an emoji, and your YubiKeys a name.
 Labels replace the key's comment in prompts and logs, which helps with loaded
-keys called `ssh:work openssh`. Emoji and YubiKey names are for skagent's
-upcoming popup. With home-manager:
+keys called `ssh:work openssh`. Emoji and YubiKey names show up in skagent's
+popup. With home-manager:
 
 ```nix
 services.skagent = {
@@ -171,6 +172,21 @@ name = "Desk 5C NFC"
 
 skagent refuses to start if the file contains anything it doesn't know, so a
 typo can't go unnoticed.
+
+### The popup
+
+Instead of pinentry, skagent can use its own popup: one window that takes you
+from the PIN to the touch to the result, and tells you what went wrong if
+something does. It replaces the touch notification.
+
+```nix
+services.skagent.popup.enable = true;
+```
+
+Without home-manager, build it with `nix build .#pinentry` and pass it with
+`skagent serve --popup result/bin/skagent-pinentry`. On Wayland compositors
+with layer shell (sway, Hyprland, niri, KDE) it appears on top of everything
+and takes the keyboard. Elsewhere it's an ordinary window.
 
 ### When skagent forgets your PIN
 

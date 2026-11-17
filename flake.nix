@@ -33,14 +33,18 @@
         inputs.treefmt-nix.flakeModule
       ];
 
-      # The package defaults to this flake's build for the host platform.
+      # The packages default to this flake's builds for the host platform.
       flake.homeModules.default =
         { lib, pkgs, ... }:
+        let
+          packages = inputs.self.packages.${pkgs.stdenv.hostPlatform.system};
+        in
         {
           imports = [ ./nix/home-manager.nix ];
-          services.skagent.package =
-            lib.mkDefault
-              inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+          services.skagent = {
+            package = lib.mkDefault packages.default;
+            popup.package = lib.mkDefault packages.pinentry;
+          };
         };
 
       systems = [
@@ -167,6 +171,11 @@
                 inherit pkgs;
                 package = config.packages.default;
                 testkey = config.packages.testkey;
+              };
+              home-manager-options = import ./nix/tests/home-manager-options.nix {
+                inherit lib pkgs;
+                inherit (inputs.home-manager.lib) homeManagerConfiguration;
+                skagentModule = inputs.self.homeModules.default;
               };
               vm-home-manager = import ./nix/tests/home-manager.nix {
                 inherit pkgs;

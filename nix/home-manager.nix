@@ -57,7 +57,12 @@ let
     "${configFile}"
   ]
   ++ (
-    if cfg.askpass != null then
+    if cfg.popup.enable then
+      [
+        "--popup"
+        (lib.getExe cfg.popup.package)
+      ]
+    else if cfg.askpass != null then
       [
         "--askpass"
         "${cfg.askpass}"
@@ -101,6 +106,20 @@ in
         It runs without a terminal, so it must be a graphical one, e.g.
         `pkgs.pinentry-gnome3` on GNOME.
       '';
+    };
+
+    popup = {
+      enable = lib.mkEnableOption ''
+        skagent's own popup (`skagent-pinentry`): PIN, touch and result of a
+        request in one window, instead of pinentry and the touch
+        notification. An overlay that takes the keyboard on Wayland
+        compositors with layer shell (sway, Hyprland, niri, KDE), an ordinary
+        window elsewhere
+      '';
+      package = mkOption {
+        type = types.package;
+        description = "The skagent-pinentry package.";
+      };
     };
 
     askpass = mkOption {
@@ -277,6 +296,10 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       (lib.hm.assertions.assertPlatform "services.skagent" pkgs lib.platforms.linux)
+      {
+        assertion = !(cfg.popup.enable && cfg.askpass != null);
+        message = "services.skagent: popup.enable and askpass exclude each other.";
+      }
     ]
     ++ lib.concatMap (policy: [
       {
