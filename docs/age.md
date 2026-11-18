@@ -319,9 +319,10 @@ get inside: change a script the batch runs, or (with yama's `ptrace_scope` at
 ## the test key
 
 soft-fido2 answers hmac-secret without a touch and without listing the
-extension. Before any VM test counts touches, `skagent-testkey` lists
-`hmac-secret` and refuses a `getAssertion` with the extension and `up=false`,
-in front of soft-fido2 like its other touch decisions.
+extension. So `skagent-testkey` lists `hmac-secret` and refuses a
+`getAssertion` with the extension and `up=false`, in front of soft-fido2 like
+its other touch decisions. Done: `checks.vm-testkey` runs the hardware check
+against it.
 
 ## steps
 

@@ -15,7 +15,8 @@ use skagent_testkey::callbacks::{Callbacks, UndoHandle};
 use skagent_testkey::catalog::Catalog;
 use skagent_testkey::ctap::{
     STATUS_INVALID_CBOR, STATUS_KEEPALIVE_CANCEL, STATUS_OK, STATUS_OPERATION_DENIED,
-    STATUS_PIN_AUTH_INVALID, STATUS_USER_ACTION_TIMEOUT, TouchRequirement, touch_requirement,
+    STATUS_PIN_AUTH_INVALID, STATUS_UP_REQUIRED, STATUS_USER_ACTION_TIMEOUT, TouchRequirement,
+    list_hmac_secret, touch_requirement,
 };
 use skagent_testkey::touch::{DEFAULT_TOUCH_TIMEOUT, Touch, TouchOutcome};
 use skagent_testkey::vendor;
@@ -133,6 +134,8 @@ fn run(cli: Cli) -> Result<()> {
                 .with_credential_management(Some(true))
                 .with_make_cred_uv_not_required(Some(true)),
         )
+        // soft-fido2 lists credProtect only; hmac-secret is added to its
+        // answer in `ctap::list_hmac_secret`.
         .extensions(vec!["credProtect".to_owned()])
         .algorithms(ALGORITHMS.to_vec())
         .force_resident_keys(false)
@@ -245,8 +248,11 @@ impl CborHandler {
             .map_err(|error| {
                 soft_fido2_transport::Error::Other(format!("CTAP2 command failed: {error}"))
             })?;
-        self.catalog.repair(request, response).map_err(|error| {
+        let response = self.catalog.repair(request, response).map_err(|error| {
             soft_fido2_transport::Error::Other(format!("completing credential listing: {error}"))
+        })?;
+        list_hmac_secret(request, response).map_err(|error| {
+            soft_fido2_transport::Error::Other(format!("listing hmac-secret: {error}"))
         })
     }
 }
@@ -302,6 +308,10 @@ impl CommandHandler for CborHandler {
         };
         match requirement {
             TouchRequirement::None => self.forward(data),
+            TouchRequirement::UpRequired => {
+                tracing::info!("refused hmac-secret without a touch");
+                Ok(vec![STATUS_UP_REQUIRED])
+            }
             TouchRequirement::Selection => {
                 let outcome = self.touch("select", "");
                 Ok(touch_failure(outcome).unwrap_or_else(|| vec![STATUS_PIN_AUTH_INVALID]))

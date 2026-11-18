@@ -5,6 +5,8 @@
 let
   common = import ./common.nix { inherit pkgs; };
   pin = "246810";
+  # The check that was run against real YubiKeys (docs/research/hmac-secret.md).
+  hmacSecretCheck = ../../docs/research/hmac-secret-check.sh;
   askpass =
     answer: "SSH_ASKPASS=test-askpass SSH_ASKPASS_REQUIRE=force SKAGENT_TEST_ANSWER=${answer}";
 in
@@ -100,5 +102,30 @@ pkgs.testers.runNixOSTest {
             alice_ok("ssh-keygen -Y verify -f ~/allowed -I alice -n test -s ~/msg.sig < ~/msg")
         prompts = machine.succeed("cat /tmp/agent-prompts")
         assert prompts.count("Enter PIN") == 2, f"expected one PIN prompt per signature: {prompts}"
+
+    with subtest("hmac-secret answers like a YubiKey: never without a touch or the PIN"):
+        before = touches()
+        # Without a terminal, libfido2's tools read each PIN from stdin.
+        status, out = machine.execute(
+            "printf '%s\\n' ${pin} ${pin} ${pin} ${pin} ${pin}"
+            " | su - alice -c 'bash ${hmacSecretCheck}' 2>&1"
+        )
+        assert status == 0, f"the check exited {status}: {out}"
+        for expected in [
+            "extension hmac-secret: listed",
+            "created with hmac-secret and credProtect 3 (signed by the key): yes",
+            "PIN + touch: ok, secret of 32 bytes",
+            "two salts in one request: ok, 64 bytes",
+            "same salt gives the same secret: yes",
+            "another salt gives another secret: yes",
+            "without touch: refused by the key (FIDO_ERR_UP_REQUIRED)",
+            "without PIN: refused (FIDO_ERR_NO_CREDENTIALS), as expected",
+            "delete: ok",
+        ]:
+            assert expected in out, f"{expected!r} missing from: {out}"
+        assert touches() == before + 3, "creating and each of the two derivations take one touch"
+        machine.succeed(
+            "journalctl -u testkey --no-pager -o cat | grep -F 'refused hmac-secret without a touch' >/dev/null"
+        )
   '';
 }

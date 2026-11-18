@@ -50,6 +50,17 @@ No keys to download
 
 `checks.vm-testkey` verifies stock `ssh-keygen -K`, public-key equality, signing with the recovered stub, and `ssh-add -K`. `checks.vm-loading` covers multiple credentials per RP, multiple RPs, skipped ECDSA keys, empty devices and separate PINs on two devices.
 
+### hmac-secret
+
+soft-fido2 computes the hmac-secret extension, but differs from a YubiKey in two ways ([`hmac-secret.md`](hmac-secret.md)), and the test key covers both in front of it (`src/ctap.rs`):
+
+- **It doesn't list the extension.** `get_info.rs` only ever lists `credProtect`, whatever the configuration says. The test key adds `hmac-secret` to successful `authenticatorGetInfo` responses.
+- **It answers without a touch.** A `getAssertion` with the extension and `up=false` gets `CTAP2_ERR_UP_REQUIRED` from the test key and never reaches soft-fido2. That is the status both YubiKeys we checked return.
+
+It keeps one `cred_random` per credential, where CTAP 2.1 has one for requests with user verification and one for those without. Credentials with credProtect 3 can't be used without the PIN, so they never see the difference.
+
+`checks.vm-testkey` runs the check that was run against the real keys, `hmac-secret-check.sh`, and compares its answers and the touches it took.
+
 ### PIN
 
 `Authenticator::set_pin_hash(sha256(pin))` presets the PIN for the next authenticator created, so the key starts with a known PIN (`--pin` / `SKAGENT_TESTKEY_PIN`). Retries are 8, like a YubiKey. State lives in memory; restarting the key resets everything.

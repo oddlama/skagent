@@ -67,7 +67,7 @@ The same script, run in a VM against `skagent-testkey` (which lists only `credPr
 - **One `cred_random` per credential,** as in CTAP 2.0.
 - **No touch needed.** With PIN and `up=false`, the same secret came back.
 
-So before any VM test counts touches for decryption, the test key has to list `hmac-secret` and refuse a `getAssertion` that carries the extension with `up=false`. That belongs in front of soft-fido2, next to its other touch decisions (`src/ctap.rs`, see [`test-key.md`](test-key.md)).
+So `skagent-testkey` lists `hmac-secret` itself and refuses a `getAssertion` that carries the extension with `up=false`, in front of soft-fido2 like its other touch decisions (`src/ctap.rs`, see [`test-key.md`](test-key.md)). Without that, touch counts for decryption in VM tests would mean nothing. `checks.vm-testkey` runs the script against it.
 
 ## what follows for skagent
 
