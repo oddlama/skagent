@@ -315,3 +315,28 @@ fn bindings_live_in_the_state_directory() -> Result<()> {
     ensure!(default_bindings_path(None, None).is_err());
     Ok(())
 }
+
+#[test]
+fn a_serial_reported_twice_gets_no_pin() {
+    let mut bindings = Bindings::default();
+    bindings.bind(&work(), device(1), Some(DESK));
+    // Plug-in 11 is the desk YubiKey again; plug-in 21 claims to be it too.
+    let impostor = |candidate: &DeviceIdentity| {
+        if *candidate == device(21) {
+            Some(DESK)
+        } else {
+            serial(candidate)
+        }
+    };
+    for candidates in [[device(11), device(21)], [device(21), device(11)]] {
+        assert_eq!(
+            bindings.resolve(Some(&work()), &candidates, impostor),
+            Resolution::Ambiguous { serial: DESK }
+        );
+    }
+    // The plug-in that signed before is still trusted while it stays.
+    assert_eq!(
+        bindings.resolve(Some(&work()), &[device(21), device(1)], impostor),
+        Resolution::Direct(device(1))
+    );
+}

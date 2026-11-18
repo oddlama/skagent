@@ -17,7 +17,7 @@ use skagent_secret::SecretBuffer;
 use ssh_agent_lib::ssh_key::{Algorithm, Signature};
 use tokio::sync::{Mutex, watch};
 
-use crate::bindings::{Bindings, Missing, NotPluggedIn};
+use crate::bindings::{Bindings, Missing, NotPluggedIn, SerialClaimedTwice};
 use crate::cancel::{DeviceInterrupt, Ended};
 use crate::config::Config;
 use crate::destination::{Destination, Purpose};
@@ -253,18 +253,25 @@ impl Signer {
         }))
     }
 
-    /// Passes routing's outcome on. If the security key wasn't plugged in,
-    /// the result names the YubiKey waited for.
+    /// Passes routing's outcome on. If routing failed over a known YubiKey
+    /// (not plugged in, its serial claimed twice), the result names it.
     fn waited_for(
         &self,
         routed: Result<RoutedDevice>,
         security_key: &mut Option<SecurityKey>,
     ) -> Result<RoutedDevice> {
         routed.inspect_err(|error| {
-            let missing = error
-                .chain()
-                .find_map(|cause| cause.downcast_ref::<NotPluggedIn>());
-            if let Some(serial) = missing.and_then(|missing| missing.serial) {
+            let serial = error.chain().find_map(|cause| {
+                cause
+                    .downcast_ref::<NotPluggedIn>()
+                    .and_then(|missing| missing.serial)
+                    .or_else(|| {
+                        cause
+                            .downcast_ref::<SerialClaimedTwice>()
+                            .map(|claimed| claimed.serial)
+                    })
+            });
+            if let Some(serial) = serial {
                 *security_key = Some(SecurityKey {
                     name: self.config.yubikey_name(serial),
                 });
@@ -1408,6 +1415,12 @@ fn failure(error: &anyhow::Error, kind: Option<ErrorKind>) -> Failure {
         .find_map(|cause| cause.downcast_ref::<NotPluggedIn>());
     if missing.is_some() {
         return Failure::NotPluggedIn;
+    }
+    let claimed = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<SerialClaimedTwice>());
+    if claimed.is_some() {
+        return Failure::Duplicate;
     }
     match kind {
         Some(ErrorKind::Transport) => Failure::Unplugged,

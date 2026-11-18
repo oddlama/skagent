@@ -52,6 +52,13 @@ pub enum Resolution {
     Touch,
     /// The security key isn't plugged in: wait for it.
     Wait(Missing),
+    /// Several connected devices report the serial of the YubiKey holding
+    /// the credential. At most one of them is that YubiKey, so none gets the
+    /// PIN.
+    Ambiguous {
+        /// The serial claimed more than once.
+        serial: u32,
+    },
 }
 
 /// What a request waits for.
@@ -103,6 +110,27 @@ impl fmt::Display for NotPluggedIn {
 }
 
 impl std::error::Error for NotPluggedIn {}
+
+/// Several security keys reported the serial of the one holding a
+/// credential; the request was refused rather than guessing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SerialClaimedTwice {
+    /// The serial.
+    pub serial: u32,
+}
+
+impl fmt::Display for SerialClaimedTwice {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "several security keys report serial {}, so one of them pretends to be that YubiKey; \
+             not sending the PIN to any",
+            self.serial
+        )
+    }
+}
+
+impl std::error::Error for SerialClaimedTwice {}
 
 /// Credential-to-device associations, independent of cached PINs.
 #[derive(Debug, Default)]
@@ -195,8 +223,8 @@ impl Bindings {
     ///
     /// Never another device in place of a known one: a lost binding needs a
     /// touch, unless its YubiKey is recognized by its serial; a YubiKey that
-    /// isn't plugged in is waited for. The only device is used for a
-    /// credential seen for the first time.
+    /// isn't plugged in is waited for; a serial reported twice is refused.
+    /// The only device is used for a credential seen for the first time.
     #[must_use]
     pub fn resolve(
         &self,
@@ -225,11 +253,13 @@ impl Bindings {
                 Resolution::Touch
             };
         };
-        if let Some(device) = devices
+        let mut claiming = devices
             .iter()
-            .find(|device| serial_of(device) == Some(serial))
-        {
-            return Resolution::Direct(device.clone());
+            .filter(|device| serial_of(device) == Some(serial));
+        match (claiming.next(), claiming.next()) {
+            (Some(device), None) => return Resolution::Direct(device.clone()),
+            (Some(_), Some(_)) => return Resolution::Ambiguous { serial },
+            (None, _) => {}
         }
         Resolution::Wait(if devices.is_empty() {
             Missing::Nothing {

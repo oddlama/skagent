@@ -14,7 +14,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use skagent_fido::{Device, hid_devices, yubikey_serial};
 use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard, OwnedRwLockReadGuard, RwLock};
 
-use crate::bindings::{Bindings, Missing, NotPluggedIn, Resolution};
+use crate::bindings::{Bindings, Missing, NotPluggedIn, Resolution, SerialClaimedTwice};
 use crate::cancel::{Abandoned, AbandonedFlag};
 use crate::device::DeviceIdentity;
 use crate::notify::Notifier;
@@ -271,6 +271,7 @@ impl Router {
             match self.resolve(key, &candidates).await {
                 Resolution::Direct(identity) => return self.open_direct(identity, read).await,
                 Resolution::Touch => break,
+                Resolution::Ambiguous { serial } => return Err(claimed_twice(serial)),
                 Resolution::Wait(missing) => {
                     drop(read);
                     if started.elapsed() >= self.plug_in_timeout {
@@ -313,6 +314,7 @@ impl Router {
                 }
                 .into());
             }
+            Resolution::Ambiguous { serial } => return Err(claimed_twice(serial)),
             Resolution::Touch => {}
         }
         let body = if key.is_some() {
@@ -384,6 +386,16 @@ impl Router {
         .await
         .context("opening the routed security key in the device thread")?
     }
+}
+
+/// Refuses a request because two devices report the bound serial.
+fn claimed_twice(serial: u32) -> anyhow::Error {
+    tracing::warn!(
+        serial,
+        "two plugged-in security keys report the serial of the YubiKey holding the key; one of them \
+         pretends to be it, refusing the request"
+    );
+    SerialClaimedTwice { serial }.into()
 }
 
 fn busy(waited: Duration) -> anyhow::Error {

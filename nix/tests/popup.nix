@@ -353,6 +353,28 @@ pkgs.testers.runNixOSTest {
         assert names(mark) == ["no-key", "pin", "touch", "signed"], names(mark)
         plug_in("other key", "${otherUnpluggedFile}")
 
+    with subtest("a second key claiming the YubiKey's serial gets no PIN"):
+        machine.succeed(
+            "systemd-run --unit impostor --setenv SKAGENT_TESTKEY_PIN=111111"
+            " ${testkey}/bin/skagent-testkey --touch auto --name 'impostor key' --serial 12345678"
+        )
+        machine.wait_until_succeeds("fido2-token -L | grep -F 'impostor key' >/dev/null", timeout=10)
+        # Replugged, the real key's binding knows its serial only.
+        unplug("popup key", "${unpluggedFile}")
+        plug_in("popup key", "${unpluggedFile}")
+        mark = len(popup_log())
+        status, out = sign()
+        assert status != 0, out
+        closed()
+        assert names(mark) == ["failed"], names(mark)
+        failed = shown(mark)[-1]
+        assert failed["reason"] == "duplicate", failed
+        assert failed["security_key"] == {"name": "Desk 5C NFC"}, failed
+        assert "one of them pretends to be it" in journal("skagent")
+        assert "touch requested" not in journal("impostor"), journal("impostor")
+        machine.succeed("systemctl stop impostor")
+        machine.wait_until_fails("fido2-token -L | grep -F 'impostor key' >/dev/null", timeout=10)
+
     with subtest("a key the only security key doesn't hold fails, saying so"):
         # A key of the other security key's own; then only the popup key stays.
         machine.succeed("touch ${otherTouchFile}")
