@@ -40,6 +40,49 @@ let
   # home-manager throws on failed assertions when the configuration is read.
   evaluates = settings: (builtins.tryEval (builtins.deepSeq (execStart settings) true)).success;
 
+  # Every style setting, so the generated file goes through `skagent
+  # check-config` with all of them.
+  styled = {
+    popup = {
+      enable = true;
+      appearance = "dark";
+      font = "IBM Plex Sans";
+      monospaceFont = "Iosevka";
+      fontFeatures = {
+        cv11 = true;
+        ss01 = 1;
+      };
+      monospaceFontFeatures.zero = true;
+      scale = 1.25;
+      light.accent = "#2f6feb";
+      dark = lib.genAttrs [
+        "surface"
+        "text"
+        "accent"
+        "success"
+        "warning"
+        "error"
+        "muted-text"
+        "placeholder"
+        "border"
+        "field"
+        "field-error"
+        "on-accent"
+        "on-success"
+        "on-warning"
+        "avatar"
+        "avatar-warning"
+        "avatar-error"
+        "avatar-missing"
+        "device"
+        "ring-track"
+        "dot"
+        "dot-hollow"
+      ] (_: "#88c0d0");
+    };
+  };
+  styledConfig = (home styled).xdg.configFile."skagent/config.toml".source;
+
   popupExe = builtins.unsafeDiscardStringContext (
     lib.getExe (home { }).services.skagent.popup.package
   );
@@ -65,6 +108,18 @@ let
     "askpass replaces pinentry" = lib.hasInfix ''"--askpass" "/bin/askpass"'' (execStart {
       askpass = "/bin/askpass";
     });
+    # Built by the check below: `skagent check-config` passes on the result.
+    "the popup style lands in the configuration file" =
+      lib.hasInfix "skagent-config.toml" (execStart styled)
+      && (home styled).xdg.configFile."skagent/config.toml".source == styledConfig;
+    "colour names are checked when evaluating" =
+      !evaluates {
+        popup.dark.acent = "#88c0d0";
+      };
+    "colours are checked when evaluating" =
+      !evaluates {
+        popup.dark.accent = "88c0d0";
+      };
     # Each works alone (above), so it's the combination that is refused.
     "the popup and askpass are refused together" =
       !evaluates {
@@ -77,6 +132,10 @@ in
 pkgs.runCommand "home-manager-options" { } (
   if failed == [ ] then
     ''
+      # Building ${styledConfig} ran `skagent check-config` on it.
+      grep -qx 'scale = 1.25' ${styledConfig}
+      grep -qx 'appearance = "dark"' ${styledConfig}
+      grep -qx 'muted-text = "#88c0d0"' ${styledConfig}
       echo "${toString (lib.length (lib.attrNames checks))} checks passed"
       touch $out
     ''

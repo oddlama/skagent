@@ -46,11 +46,88 @@ let
       )
     );
 
-  # Only what's set: the agent refuses unknown or empty settings.
-  configFile = (pkgs.formats.toml { }).generate "skagent-config.toml" {
-    keys = lib.mapAttrs (_: key: lib.filterAttrs (_: value: value != null) key) cfg.keys;
-    security-keys = cfg.securityKeys;
+  # The colours of `[popup.light]` and `[popup.dark]`, as skagent_popup's
+  # `Token::name` spells them; `skagent check-config` below fails the build
+  # if they ever drift apart.
+  colorNames = [
+    "surface"
+    "text"
+    "accent"
+    "success"
+    "warning"
+    "error"
+    "muted-text"
+    "placeholder"
+    "border"
+    "field"
+    "field-error"
+    "on-accent"
+    "on-success"
+    "on-warning"
+    "avatar"
+    "avatar-warning"
+    "avatar-error"
+    "avatar-missing"
+    "device"
+    "ring-track"
+    "dot"
+    "dot-hollow"
+  ];
+  color = types.strMatching "#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})";
+  colorsOption =
+    mode:
+    mkOption {
+      type = types.submodule {
+        options = lib.genAttrs colorNames (
+          name:
+          mkOption {
+            type = types.nullOr color;
+            default = null;
+            description = "The ${mode} theme's `${name}` colour.";
+          }
+        );
+      };
+      default = { };
+      example = {
+        surface = "#2e3440";
+        accent = "#88c0d0";
+      };
+      description = ''
+        Colours of the ${mode} theme, over the design's: `#rgb`, `#rrggbb`
+        or `#rrggbbaa`. A colour you leave unset stays the design's, unless
+        a colour it's made from changed: then it's mixed anew (borders and
+        tints from `surface` and `text`, icons on `accent` in whichever of
+        them stands out). The six base colours are `surface`, `text`,
+        `accent`, `success`, `warning` and `error`.
+      '';
+    };
+  features = types.attrsOf (types.either types.bool types.ints.unsigned);
+
+  popupSettings = lib.filterAttrs (_: value: value != null && value != { }) {
+    appearance = if cfg.popup.appearance == "system" then null else cfg.popup.appearance;
+    inherit (cfg.popup) font scale;
+    monospace-font = cfg.popup.monospaceFont;
+    font-features = cfg.popup.fontFeatures;
+    monospace-font-features = cfg.popup.monospaceFontFeatures;
+    light = lib.filterAttrs (_: value: value != null) cfg.popup.light;
+    dark = lib.filterAttrs (_: value: value != null) cfg.popup.dark;
   };
+
+  # Only what's set: the agent refuses unknown or empty settings.
+  generatedConfig = (pkgs.formats.toml { }).generate "skagent-config.toml" (
+    {
+      keys = lib.mapAttrs (_: key: lib.filterAttrs (_: value: value != null) key) cfg.keys;
+      security-keys = cfg.securityKeys;
+    }
+    // lib.optionalAttrs (popupSettings != { }) { popup = popupSettings; }
+  );
+
+  # Checked while home-manager builds: anything `skagent serve` would refuse
+  # or skip (a feature tag that isn't one, ...) fails the switch instead.
+  configFile = pkgs.runCommand "skagent-config.toml" { } ''
+    ${exe} check-config --config ${generatedConfig} > /dev/null
+    cp ${generatedConfig} $out
+  '';
 
   serveArgs = [
     "serve"
@@ -126,6 +203,59 @@ in
         type = types.package;
         description = "The skagent-pinentry package.";
       };
+      appearance = mkOption {
+        type = types.enum [
+          "system"
+          "light"
+          "dark"
+        ];
+        default = "system";
+        description = "Light, dark, or whichever the desktop prefers.";
+      };
+      font = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "IBM Plex Sans";
+        description = ''
+          Font family for text. Unset, or not installed: the bundled Inter.
+        '';
+      };
+      monospaceFont = mkOption {
+        type = types.nullOr types.str;
+        default = null;
+        example = "Iosevka";
+        description = ''
+          Font family for commands and fingerprints. Unset, or not
+          installed: the bundled JetBrains Mono.
+        '';
+      };
+      fontFeatures = mkOption {
+        type = features;
+        default = { };
+        example = {
+          cv11 = true;
+          ss01 = 1;
+        };
+        description = "OpenType features of `font`.";
+      };
+      monospaceFontFeatures = mkOption {
+        type = features;
+        default = { };
+        example = {
+          zero = true;
+        };
+        description = "OpenType features of `monospaceFont`.";
+      };
+      scale = mkOption {
+        type = types.nullOr (types.numbers.between 0.5 3);
+        default = null;
+        example = 1.25;
+        description = ''
+          Size of the whole popup, text included; 1 is the design's.
+        '';
+      };
+      light = colorsOption "light";
+      dark = colorsOption "dark";
     };
 
     askpass = mkOption {
@@ -348,8 +478,12 @@ in
       message = "services.skagent.securityKeys: \"${serial}\" is not a serial number.";
     }) (lib.attrNames cfg.securityKeys);
 
-    # `skagent load` and `skagent forget` in shells.
-    home.packages = [ cfg.package ];
+    # `skagent load`, `skagent forget` and `skagent check-config` in shells,
+    # and `skagent-pinentry --preview` to try a style.
+    home.packages = [ cfg.package ] ++ lib.optional cfg.popup.enable cfg.popup.package;
+
+    # The file `serve` gets, also where `check-config` and the preview look.
+    xdg.configFile."skagent/config.toml".source = configFile;
 
     sshAuthSock = lib.mkIf cfg.setSshAuthSock {
       enable = true;
