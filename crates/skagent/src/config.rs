@@ -139,17 +139,12 @@ impl Config {
     }
 
     /// How the YubiKey with `serial` is named: its configured name, else
-    /// `YubiKey ·5678` (the last four digits of the serial).
+    /// `YubiKey 12 345 678`, the serial as `ykman list --serials` shows it,
+    /// in groups of three digits.
     #[must_use]
     pub fn yubikey_name(&self, serial: u32) -> String {
         self.security_key_name(serial).map_or_else(
-            || {
-                let digits = serial.to_string();
-                let last = digits
-                    .get(digits.len().saturating_sub(4)..)
-                    .unwrap_or(&digits);
-                format!("YubiKey ·{last}")
-            },
+            || format!("YubiKey {}", grouped_digits(serial)),
             ToOwned::to_owned,
         )
     }
@@ -161,6 +156,22 @@ impl Config {
             .get(&serial)
             .map(|security_key| security_key.name.as_str())
     }
+}
+
+/// `12345678` as `12 345 678`: groups of three digits from the right, to read
+/// a serial at a glance.
+#[must_use]
+pub fn grouped_digits(number: u32) -> String {
+    let digits = number.to_string();
+    let mut grouped = String::with_capacity(digits.len().saturating_mul(2));
+    for (index, digit) in digits.chars().enumerate() {
+        let left = digits.len().saturating_sub(index);
+        if index > 0 && left.is_multiple_of(3) {
+            grouped.push(' ');
+        }
+        grouped.push(digit);
+    }
+    grouped
 }
 
 /// Where the configuration is read from without `--config`:

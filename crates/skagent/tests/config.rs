@@ -6,7 +6,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 
 use anyhow::{Context as _, Result, ensure};
-use skagent::config::{Config, default_config_path};
+use skagent::config::{Config, default_config_path, grouped_digits};
 
 const FINGERPRINT: &str = "SHA256:4NU8jDPeifwDQZBds3tPVzsluIgQ6CTN6zoxKMzxIkQ";
 
@@ -102,7 +102,28 @@ fn the_default_path_follows_xdg() -> Result<()> {
 fn yubikeys_are_named_by_config_or_their_last_four_digits() -> Result<()> {
     let config = Config::parse("[security-keys.12345678]\nname = \"Desk 5C NFC\"")?;
     ensure!(config.yubikey_name(12_345_678) == "Desk 5C NFC");
-    ensure!(config.yubikey_name(23_456_789) == "YubiKey ·6789");
-    ensure!(config.yubikey_name(42) == "YubiKey ·42");
+    ensure!(config.yubikey_name(23_456_789) == "YubiKey 23 456 789");
+    ensure!(config.yubikey_name(42) == "YubiKey 42");
+    Ok(())
+}
+
+#[test]
+fn serials_read_in_groups_of_three() -> Result<()> {
+    for (number, grouped) in [
+        (0, "0"),
+        (42, "42"),
+        (999, "999"),
+        (1_000, "1 000"),
+        (123_456, "123 456"),
+        (1_234_567, "1 234 567"),
+        (12_345_678, "12 345 678"),
+        (u32::MAX, "4 294 967 295"),
+    ] {
+        ensure!(
+            grouped_digits(number) == grouped,
+            "{number}: {}",
+            grouped_digits(number)
+        );
+    }
     Ok(())
 }
