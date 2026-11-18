@@ -26,6 +26,7 @@ pkgs.testers.runNixOSTest {
     users.users.alice.isNormalUser = true;
   };
   testScript = ''
+    import re
     import shlex
 
     def alice(command: str) -> str:
@@ -36,6 +37,11 @@ pkgs.testers.runNixOSTest {
 
     def journal(unit: str) -> str:
         return machine.succeed(f"journalctl -u {unit} --no-pager -o cat")
+
+    def messages(unit: str) -> str:
+        # The journal without the time of day: its microseconds are six
+        # digits, and now and then they spell a PIN.
+        return re.sub(r"T\d\d:\d\d:\d\d\.\d+Z", "", journal(unit))
 
     def prompts() -> int:
         return machine.succeed("cat ${dir}/prompts 2>/dev/null || true").count("Enter PIN")
@@ -245,6 +251,6 @@ pkgs.testers.runNixOSTest {
     with subtest("loading PINs never enter agent logs"):
         for unit in ["skagent", "skagent-no-cache"]:
             for secret in ["${pin}", "135790", "000000"]:
-                assert secret not in journal(unit), "PIN leaked"
+                assert secret not in messages(unit), "PIN leaked"
   '';
 }

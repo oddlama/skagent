@@ -42,6 +42,7 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
+    import re
     import shlex
 
     def run_as_alice(node, command: str) -> str:
@@ -57,6 +58,11 @@ pkgs.testers.runNixOSTest {
 
     def journal(unit: str) -> str:
         return client.succeed(f"journalctl -u {unit} --no-pager -o cat")
+
+    def messages(unit: str) -> str:
+        # The journal without the time of day: its microseconds are six
+        # digits, and now and then they spell a PIN.
+        return re.sub(r"T\d\d:\d\d:\d\d\.\d+Z", "", journal(unit))
 
     def touches() -> int:
         return journal("testkey").count("touch requested")
@@ -195,6 +201,6 @@ pkgs.testers.runNixOSTest {
         assert "only on request from this machine, not through an SSH connection" in journal("skagent")
 
     with subtest("PINs never reach the journal"):
-        assert "${pin}" not in journal("skagent")
+        assert "${pin}" not in messages("skagent")
   '';
 }

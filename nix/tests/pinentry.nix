@@ -64,6 +64,11 @@ pkgs.testers.runNixOSTest {
     def journal(unit: str) -> str:
         return machine.succeed(f"journalctl -u {unit} --no-pager -o cat")
 
+    def messages(unit: str) -> str:
+        # The journal without the time of day: its microseconds are six
+        # digits, and now and then they spell a PIN.
+        return re.sub(r"T\d\d:\d\d:\d\d\.\d+Z", "", journal(unit))
+
     def popup_lines() -> list[str]:
         """What the popup logged (to the agent's stderr)."""
         return [line for line in journal("skagent").splitlines() if "skagent_pinentry" in line]
@@ -203,7 +208,7 @@ pkgs.testers.runNixOSTest {
         assert "pairing declined in the popup" in journal("skagent")
         out = alice_ok("ssh-keygen -Y verify -f ~/allowed -I alice -n git -s ~/first.sig < ~/first")
         assert "Good" in out, out
-        assert "${pin}" not in journal("skagent"), "the PIN was logged"
+        assert "${pin}" not in messages("skagent"), "the PIN was logged"
 
     with subtest("a wrong PIN is asked for again"):
         alice_ok("skagent forget --socket ${socket}")

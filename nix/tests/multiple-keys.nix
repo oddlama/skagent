@@ -50,6 +50,11 @@ pkgs.testers.runNixOSTest {
     def journal(unit: str) -> str:
         return machine.succeed(f"journalctl -u {unit} --no-pager -o cat")
 
+    def messages(unit: str) -> str:
+        # The journal without the time of day: its microseconds are six
+        # digits, and now and then they spell a PIN.
+        return re.sub(r"T\d\d:\d\d:\d\d\.\d+Z", "", journal(unit))
+
     def count(key: str, operation: str, event: str = "requested") -> int:
         return journal(f"key-{key}").count(f'touch {event} operation="{operation}"')
 
@@ -359,6 +364,6 @@ pkgs.testers.runNixOSTest {
 
     with subtest("PINs are absent from the agent journal"):
         for pin in ["246810", "135790", "999999"]:
-            assert pin not in journal("skagent"), "PIN leaked"
+            assert pin not in messages("skagent"), "PIN leaked"
   '';
 }

@@ -68,6 +68,11 @@ pkgs.testers.runNixOSTest {
     def journal(unit: str) -> str:
         return machine.succeed(f"journalctl -u {unit} --no-pager -o cat")
 
+    def messages(unit: str) -> str:
+        # The journal without the time of day: its microseconds are six
+        # digits, and now and then they spell a PIN.
+        return re.sub(r"T\d\d:\d\d:\d\d\.\d+Z", "", journal(unit))
+
     def touches() -> int:
         return journal("testkey").count("touch requested")
 
@@ -489,6 +494,6 @@ pkgs.testers.runNixOSTest {
 
     with subtest("PINs never reach the journal"):
         for unit in ["skagent", "skagent-short", "skagent-idle", "skagent-no-cache", "skagent-policy", "skagent-secretmem", "skagent-pinentry"]:
-            assert "${pin}" not in journal(unit), f"PIN in the journal of {unit}"
+            assert "${pin}" not in messages(unit), f"PIN in the journal of {unit}"
   '';
 }

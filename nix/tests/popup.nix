@@ -42,6 +42,7 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     import json
+    import re
     import shlex
     import time
 
@@ -55,6 +56,11 @@ pkgs.testers.runNixOSTest {
 
     def journal(unit: str) -> str:
         return machine.succeed(f"journalctl -u {unit} --no-pager -o cat")
+
+    def messages(unit: str) -> str:
+        # The journal without the time of day: its microseconds are six
+        # digits, and now and then they spell a PIN.
+        return re.sub(r"T\d\d:\d\d:\d\d\.\d+Z", "", journal(unit))
 
     def touches(operation: str = "") -> int:
         return journal("testkey").count(f'touch requested operation="{operation}' if operation else "touch requested")
@@ -480,7 +486,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("PINs reach neither the journal nor the popup log"):
         for unit in ["skagent", "skagent-broken"]:
-            assert "${pin}" not in journal(unit), f"PIN in the {unit} journal"
+            assert "${pin}" not in messages(unit), f"PIN in the {unit} journal"
         assert "${pin}" not in "\n".join(popup_log()), "PIN in a message to the popup"
   '';
 }
