@@ -14,6 +14,10 @@ needs your PIN and a touch. skagent caches the PIN securely and can handle multi
 - 🌍 **Agent forwarding and `ssh-add -h`** destination constraints, checked like OpenSSH does
 - 💬 **Prompts that tell you what you sign**, plus a notification while the key waits for a touch
 
+<p align="center">
+  <img alt="skagent's popup: the PIN for github-work, then touching the YubiKey, then Signed" src="https://github.com/user-attachments/assets/REPLACE-skagent-popup-flow-light">
+</p>
+
 ## 📦 Installation
 
 skagent runs on Linux 5.11 or newer and asks for PINs with a graphical pinentry.
@@ -179,6 +183,10 @@ typo can't go unnoticed.
 Instead of pinentry, skagent can use its own popup: one window that takes you
 from the PIN to the touch to the result, and tells you what went wrong if
 something does. It replaces the touch notification.
+
+<p align="center">
+  <img alt="skagent's popup in dark mode: asking to plug in Desk 5C NFC, saying the PIN was wrong with 6 tries left, and listing 3 keys it loaded" src="https://github.com/user-attachments/assets/REPLACE-skagent-popup-help-dark">
+</p>
 
 ```nix
 services.skagent.popup.enable = true;
