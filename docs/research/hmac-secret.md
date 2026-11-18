@@ -31,7 +31,7 @@ So there is no "derive again, silently" for a batch of files. Every derivation i
 - **Creating:** `fido_cred_set_extensions(FIDO_EXT_HMAC_SECRET)`, next to `fido_cred_set_prot` and `fido_cred_set_rk`.
 - **Deriving:** `fido_assert_set_extensions(FIDO_EXT_HMAC_SECRET)` and `fido_assert_set_hmac_salt` with 32 or 64 bytes (anything else is `FIDO_ERR_INVALID_ARGUMENT`), then `fido_assert_hmac_secret_ptr` and `fido_assert_hmac_secret_len`.
 - **Where the output lives:** `decrypt_hmac_secrets` (`src/assert.c`) puts it into the assertion's heap blob. `fido_assert_free` wipes it (`fido_blob_reset` calls `freezero`). Like libfido2's copies of the PIN, that memory isn't locked.
-- **Error codes come from the key:** `FIDO_ERR_UP_REQUIRED` and `FIDO_ERR_UNSUPPORTED_OPTION` are CTAP status bytes passed through. `FIDO_ERR_UP_REQUIRED` appears in `src/fido/err.h` and `src/err.c` only; the library never produces it.
+- **The refusal comes from the key:** `FIDO_ERR_UP_REQUIRED` appears in `src/fido/err.h` and `src/err.c` only. The library never produces it, so it is the CTAP status byte the key sent. (`FIDO_ERR_UNSUPPORTED_OPTION` is also what libfido2 itself answers for a U2F-only device asked for an extension.)
 - **`hmac-secret-mc`:** `FIDO_EXT_HMAC_SECRET_MC`, `fido_cred_set_hmac_salt`, `fido_cred_hmac_secret_ptr`.
 
 ## hardware check

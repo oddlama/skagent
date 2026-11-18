@@ -209,6 +209,43 @@ impl Device {
         unsafe { sys::fido_dev_supports_credman(self.raw.as_ptr()) }
     }
 
+    /// The extensions the device lists in `authenticatorGetInfo`.
+    pub(crate) fn extensions(&mut self) -> Result<Vec<String>, FidoError> {
+        // SAFETY: creates an empty owned info object, or null on failure.
+        let info = Info(
+            NonNull::new(unsafe { sys::fido_cbor_info_new() })
+                .ok_or_else(|| FidoError::new("fido_cbor_info_new", sys::FIDO_ERR_INTERNAL))?,
+        );
+        // SAFETY: exclusive open device and an owned output object. The call
+        // only sends and receives on the device and fills `info`; it writes
+        // none of the device fields `CancelSlot::cancel` reads.
+        check("fido_dev_get_cbor_info", unsafe {
+            sys::fido_dev_get_cbor_info(self.raw.as_ptr(), info.0.as_ptr())
+        })?;
+        // SAFETY: populated info; returns an array owned by it, or null.
+        let pointer = unsafe { sys::fido_cbor_info_extensions_ptr(info.0.as_ptr()) };
+        // SAFETY: as above; only reads.
+        let length = unsafe { sys::fido_cbor_info_extensions_len(info.0.as_ptr()) };
+        if pointer.is_null() || length == 0 {
+            return Ok(Vec::new());
+        }
+        if length > 64 {
+            return Err(FidoError::new(
+                "extension count exceeds 64",
+                sys::FIDO_ERR_INTERNAL,
+            ));
+        }
+        // SAFETY: libfido2's pointer and length for the array of string
+        // pointers, valid while `info` lives, which is past this function's
+        // last use of them.
+        let entries = unsafe { std::slice::from_raw_parts(pointer, length) };
+        Ok(entries
+            .iter()
+            // SAFETY: null or a NUL-terminated string owned by the live info.
+            .map(|&entry| unsafe { owned_string(entry) })
+            .collect())
+    }
+
     pub(crate) fn resident_rps(&mut self, pin: &CStr) -> Result<Vec<String>, FidoError> {
         // SAFETY: creates an empty owned RP list, or null on allocation failure.
         let list = ResidentParties(
@@ -428,9 +465,18 @@ pub(crate) struct ResidentKey {
     pub user_name: String,
 }
 
+struct Info(NonNull<sys::fido_cbor_info_t>);
 struct Metadata(NonNull<sys::fido_credman_metadata_t>);
 struct ResidentParties(NonNull<sys::fido_credman_rp_t>);
 struct ResidentKeys(NonNull<sys::fido_credman_rk_t>);
+
+impl Drop for Info {
+    fn drop(&mut self) {
+        let mut raw = self.0.as_ptr();
+        // SAFETY: unique owned object allocated by fido_cbor_info_new.
+        unsafe { sys::fido_cbor_info_free(&raw mut raw) };
+    }
+}
 
 impl Drop for Metadata {
     fn drop(&mut self) {
@@ -542,6 +588,47 @@ impl Assertion {
         })
     }
 
+    /// Asks for the hmac-secret extension: the authenticator answers
+    /// `HMAC-SHA-256(the credential's secret, salt)`.
+    pub(crate) fn derive_with(&mut self, salt: &[u8; 32]) -> Result<(), FidoError> {
+        // SAFETY: valid assertion, an extension libfido2 knows for assertions.
+        check("fido_assert_set_extensions", unsafe {
+            sys::fido_assert_set_extensions(self.raw.as_ptr(), sys::FIDO_EXT_HMAC_SECRET)
+        })?;
+        // SAFETY: valid assertion; libfido2 copies `salt.len()` bytes.
+        check("fido_assert_set_hmac_salt", unsafe {
+            sys::fido_assert_set_hmac_salt(self.raw.as_ptr(), salt.as_ptr(), salt.len())
+        })
+    }
+
+    /// Hands the hmac-secret output of statement `index` to `read`, if the
+    /// authenticator returned one. The bytes stay in libfido2's memory, which
+    /// wipes them when the assertion is freed; `read` decides where a copy
+    /// goes.
+    pub(crate) fn with_hmac_secret<T>(
+        &self,
+        index: usize,
+        read: impl FnOnce(&[u8]) -> T,
+    ) -> Option<T> {
+        if index >= self.count() {
+            return None;
+        }
+        let raw = self.raw.as_ptr();
+        // SAFETY: valid assertion and `index < count`; returns a pointer
+        // into the assertion, or null.
+        let pointer = unsafe { sys::fido_assert_hmac_secret_ptr(raw, index) };
+        // SAFETY: as above; only reads.
+        let length = unsafe { sys::fido_assert_hmac_secret_len(raw, index) };
+        if pointer.is_null() || length == 0 || length > 64 {
+            return None;
+        }
+        // SAFETY: libfido2's pointer and length for this statement, valid
+        // while the assertion is; `&self` keeps it alive and unchanged for
+        // the borrow handed to `read`.
+        let secret = unsafe { std::slice::from_raw_parts(pointer, length) };
+        Some(read(secret))
+    }
+
     pub(crate) fn count(&self) -> usize {
         // SAFETY: valid assertion; the call only reads.
         unsafe { sys::fido_assert_count(self.raw.as_ptr()) }
@@ -648,6 +735,23 @@ impl Credential {
         // SAFETY: valid credential, a protection level libfido2 knows.
         check("fido_cred_set_prot", unsafe {
             sys::fido_cred_set_prot(self.raw.as_ptr(), sys::FIDO_CRED_PROT_UV_OPTIONAL_WITH_ID)
+        })
+    }
+
+    /// credProtect level 3: unusable, and invisible, without user verification.
+    pub(crate) fn set_protection_uv_required(&mut self) -> Result<(), FidoError> {
+        // SAFETY: valid credential, a protection level libfido2 knows.
+        check("fido_cred_set_prot", unsafe {
+            sys::fido_cred_set_prot(self.raw.as_ptr(), sys::FIDO_CRED_PROT_UV_REQUIRED)
+        })
+    }
+
+    /// Asks for the hmac-secret extension: the authenticator keeps a secret
+    /// with the credential that assertions can derive from.
+    pub(crate) fn enable_hmac_secret(&mut self) -> Result<(), FidoError> {
+        // SAFETY: valid credential, an extension libfido2 knows for credentials.
+        check("fido_cred_set_extensions", unsafe {
+            sys::fido_cred_set_extensions(self.raw.as_ptr(), sys::FIDO_EXT_HMAC_SECRET)
         })
     }
 
