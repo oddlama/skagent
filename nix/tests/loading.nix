@@ -57,6 +57,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed(
             f"systemd-run --unit key-{key} --setenv SKAGENT_TESTKEY_PIN={pin}"
             f" ${testkey}/bin/skagent-testkey --name load-{key} --touch file --touch-file /run/load-{key}-touch"
+            f" --unplugged-file /run/load-{key}-unplugged"
         )
         machine.wait_until_succeeds(f"fido2-token -L | grep -F load-{key} >/dev/null")
 
@@ -228,6 +229,8 @@ pkgs.testers.runNixOSTest {
         machine.wait_until_fails("test -e ${socket}")
         alice("echo ${pin} > ${dir}/pin")
         start_agent("skagent-no-cache", "--pin-lifetime 0")
+        # Loaded keys come back with a restarted agent.
+        assert len(listed()) == 4, listed()
         load(3)
         sign("work", prompt=True)
         sign("other", prompt=True)

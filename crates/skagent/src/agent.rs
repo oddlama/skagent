@@ -34,7 +34,9 @@ use zeroize::Zeroize as _;
 use crate::cancel::Hangup;
 use crate::destination::{self, Bound, SESSION_BIND_EXTENSION, SessionBindings};
 use crate::frames::BoundedStream;
-use crate::identities::{AcceptedConstraints, IdentityStore, SkIdentity, evaluate_constraints};
+use crate::identities::{
+    AcceptedConstraints, IdentityStore, Origin, SkIdentity, evaluate_constraints,
+};
 use crate::signer::Signer;
 use crate::socket::PeerCheckedListener;
 
@@ -73,9 +75,20 @@ impl SkAgent {
     /// An agent that signs with `signer`.
     #[must_use]
     pub fn new(signer: Signer) -> Self {
+        Self::with_identities(signer, IdentityStore::default())
+    }
+
+    /// An agent that signs with `signer` and starts with `identities`, e.g.
+    /// the ones remembered from before a restart.
+    #[must_use]
+    pub fn with_identities(signer: Signer, identities: IdentityStore) -> Self {
         Self {
             shared: Arc::new(Shared {
                 signer,
+                state: Mutex::new(State {
+                    identities,
+                    ..State::default()
+                }),
                 ..Shared::default()
             }),
         }
@@ -230,7 +243,13 @@ impl AgentSession {
             .iter()
             .map(destination::DestinationConstraint::skipped_host_keys)
             .sum();
-        let replaced = state.identities.add(identity);
+        // A forwarded agent's keys aren't this machine's to keep.
+        let origin = if self.bindings.is_remote() {
+            Origin::Forwarded
+        } else {
+            Origin::Local
+        };
+        let replaced = state.identities.add(identity, origin);
         tracing::info!(
             %fingerprint,
             %comment,
@@ -373,7 +392,8 @@ impl AgentSession {
         // No awaits from cache commit through identity insertion.
         for identity in imports {
             tracing::info!(fingerprint = %identity.fingerprint(), comment = %identity.comment(), "loaded resident SSH key");
-            state.identities.add(identity);
+            // Loading is refused through a forwarded agent.
+            state.identities.add(identity, Origin::Local);
         }
         loaded.show_loaded(shown);
         Ok(Extension {

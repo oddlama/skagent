@@ -15,7 +15,10 @@ let
     services.openssh.enable = true;
     users.users.alice.isNormalUser = true;
     # Only to send skagent's own extensions through a forwarded agent.
-    environment.systemPackages = [ package ];
+    environment.systemPackages = [
+      package
+      common.makeSkStub
+    ];
   };
 in
 pkgs.testers.runNixOSTest {
@@ -172,6 +175,14 @@ pkgs.testers.runNixOSTest {
         assert "no identities" in listed, listed
         # Directly to target is still not allowed.
         alice_fails(ssh("target", "hostname"))
+
+    with subtest("keys added through a forwarded agent aren't remembered on the client"):
+        run_as_alice(jump, "make-sk-stub ~/remote 7 'added remotely'")
+        alice(ssh("jump", "ssh-add ~/remote", "-A"))
+        assert "added remotely" in alice("SSH_AUTH_SOCK=${socket} ssh-add -l")
+        remembered = alice("cat ~/.local/state/skagent/keys.toml 2>/dev/null || true")
+        assert "added remotely" not in remembered, remembered
+        alice(ssh("jump", "ssh-add -d ~/remote", "-A"))
 
     with subtest("a forwarded agent can't make this machine prompt to load keys"):
         asked = prompts().count("Enter PIN")

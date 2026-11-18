@@ -33,7 +33,7 @@ Not protected:
 
 ```
 ssh / git / ssh-add ── ssh-agent protocol (unix socket, peer-checked) ──> skagent
-                                                                          ├─ identity store   sk public keys + key handles, in memory
+                                                                          ├─ identity store   sk public keys + key handles, remembered across restarts
                                                                           ├─ PIN cache        bounded, see rules below
                                                                           ├─ PIN prompt       pinentry (Assuan)
                                                                           └─ fido layer       libfido2 via FFI, blocking calls on spawn_blocking

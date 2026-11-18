@@ -1,24 +1,62 @@
 //! The keys the agent holds: `sk-ssh-ed25519@openssh.com` keys only, each
 //! with an optional expiry.
 //!
+//! Keys added on this machine without a lifetime or destination constraints
+//! (`ssh-add`, `skagent load`) are remembered in a file and offered again
+//! after a restart; signing still needs the security key, and the PIN.
+//! Nothing in it is secret: public keys, comments and key handles, as stub
+//! files hold them.
+//!
 //! Time is always passed in as `now`, so expiry is deterministic in tests.
 
-use std::fmt;
+use std::ffi::OsStr;
+use std::fmt::{self, Write as _};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
+use serde::Deserialize;
 use skagent_fido::ResidentCredential;
 use ssh_agent_lib::proto::{
     Extension, Identity, KeyConstraint, PrivateCredential, PublicCredential,
 };
-use ssh_agent_lib::ssh_key::HashAlg;
 use ssh_agent_lib::ssh_key::private::KeypairData;
 use ssh_agent_lib::ssh_key::public::{Ed25519PublicKey, KeyData, SkEd25519};
+use ssh_agent_lib::ssh_key::{HashAlg, PublicKey};
 
 use crate::destination::{
     DestinationConstraint, RESTRICT_DESTINATION_CONSTRAINT, parse_destination_constraints,
 };
 use crate::display::{self, MAX_NAME_CHARS};
+use crate::state_files::{self, hex, parse_hex, toml_string};
+
+/// The file's name in `$XDG_STATE_HOME/skagent`.
+pub const DEFAULT_KEYS_NAME: &str = "keys.toml";
+
+/// Most keys remembered; a longer file is refused as a whole.
+const MAX_REMEMBERED_KEYS: usize = 256;
+
+/// Longest key handle and comment read back, in bytes.
+const MAX_KEY_HANDLE_BYTES: usize = 1024;
+const MAX_COMMENT_BYTES: usize = 4096;
+
+const KEYS_HEADER: &str = "\
+# The keys skagent offers again after a restart: those added on this machine
+# without a lifetime or destination constraints (ssh-add, skagent load).
+# Signing still needs the security key and its PIN. skagent rewrites this
+# file; `ssh-add -d` and `ssh-add -D` remove keys from it.
+";
+
+/// Where a key was added from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// This machine. Without a lifetime or destination constraints, the key
+    /// is remembered across restarts.
+    Local,
+    /// Another machine, through a forwarded agent. Never remembered, and it
+    /// doesn't change what is.
+    Forwarded,
+}
 
 /// OpenSSH sk key flag: the key needs a touch for every signature.
 pub const SK_USER_PRESENCE_REQUIRED: u8 = 0x01;
@@ -284,14 +322,50 @@ impl fmt::Debug for SkIdentity {
 #[derive(Debug, Default)]
 pub struct IdentityStore {
     identities: Vec<SkIdentity>,
+    /// The identities remembered across restarts, as written to `file`.
+    remembered: Vec<SkIdentity>,
+    /// Where they are remembered, if anywhere.
+    file: Option<PathBuf>,
 }
 
 impl IdentityStore {
+    /// The identities remembered in `file`, remembering further ones there.
+    /// A missing file holds none; one that can't be read is ignored with a
+    /// warning, and replaced on the next change.
+    #[must_use]
+    pub fn remembered_in(file: PathBuf) -> Self {
+        let remembered = read_keys(&file).unwrap_or_else(|error| {
+            tracing::warn!(
+                file = %file.display(),
+                error = %format!("{error:#}"),
+                "ignoring the remembered keys"
+            );
+            Vec::new()
+        });
+        if !remembered.is_empty() {
+            tracing::info!(
+                file = %file.display(),
+                keys = remembered.len(),
+                "offering the keys remembered from before"
+            );
+        }
+        Self {
+            identities: remembered.clone(),
+            remembered,
+            file: Some(file),
+        }
+    }
+
     /// Adds `identity`, or replaces the entry with the same public key (new
-    /// comment, flags, key handle and expiry), like OpenSSH's agent.
+    /// comment, flags, key handle and expiry), like OpenSSH's agent. Added
+    /// on this machine, it's remembered across restarts if it has no
+    /// lifetime and no destination constraints, and forgotten otherwise.
     ///
     /// Returns whether an existing entry was replaced.
-    pub fn add(&mut self, identity: SkIdentity) -> bool {
+    pub fn add(&mut self, identity: SkIdentity, origin: Origin) -> bool {
+        if origin == Origin::Local {
+            self.remember(&identity);
+        }
         if let Some(existing) = self
             .identities
             .iter_mut()
@@ -348,21 +422,83 @@ impl IdentityStore {
         }).collect()
     }
 
-    /// Removes the identity with public key `key` and returns it.
+    /// Removes the identity with public key `key` and returns it. It isn't
+    /// remembered any more either.
     pub fn remove(&mut self, key: &KeyData, now: Instant) -> Option<SkIdentity> {
         self.expire(now);
         let index = self
             .identities
             .iter()
             .position(|identity| identity.matches(key))?;
-        Some(self.identities.remove(index))
+        let removed = self.identities.remove(index);
+        let remembered = self.remembered.len();
+        self.remembered.retain(|identity| !identity.matches(key));
+        if self.remembered.len() != remembered {
+            self.save();
+        }
+        Some(removed)
     }
 
-    /// Removes all identities. Returns how many there were.
+    /// Removes all identities, remembered ones included. Returns how many
+    /// there were.
     pub fn clear(&mut self) -> usize {
         let removed = self.identities.len();
         self.identities.clear();
+        if !self.remembered.is_empty() {
+            self.remembered.clear();
+            self.save();
+        }
         removed
+    }
+
+    /// Remembers `identity` (added on this machine) if it qualifies, or
+    /// forgets an older entry with its public key if it doesn't: a key added
+    /// again with a lifetime or destinations mustn't come back without them.
+    fn remember(&mut self, identity: &SkIdentity) {
+        let qualifies = identity.expires_at.is_none() && identity.destinations.is_empty();
+        let known = self
+            .remembered
+            .iter()
+            .any(|remembered| remembered.public == identity.public);
+        let changed = if qualifies {
+            if self.remembered.contains(identity) {
+                false
+            } else if known {
+                for remembered in &mut self.remembered {
+                    if remembered.public == identity.public {
+                        *remembered = identity.clone();
+                    }
+                }
+                true
+            } else {
+                self.remembered.push(identity.clone());
+                true
+            }
+        } else if known {
+            self.remembered
+                .retain(|remembered| remembered.public != identity.public);
+            true
+        } else {
+            false
+        };
+        if changed {
+            self.save();
+        }
+    }
+
+    /// Writes the remembered identities down, if there is a file. A failure
+    /// only costs them across restarts, with a warning.
+    fn save(&self) {
+        let Some(file) = &self.file else {
+            return;
+        };
+        if let Err(error) = write_keys(file, &self.remembered) {
+            tracing::warn!(
+                file = %file.display(),
+                error = %format!("{error:#}"),
+                "can't remember the keys across restarts"
+            );
+        }
     }
 
     /// The identities that haven't expired at `now`. Expired ones are dropped.
@@ -400,4 +536,101 @@ impl IdentityStore {
             );
         }
     }
+}
+
+/// Where keys are remembered: `$XDG_STATE_HOME/skagent/keys.toml`, else
+/// `$HOME/.local/state/…`.
+///
+/// # Errors
+///
+/// Returns an error if neither variable gives an absolute path.
+pub fn default_keys_path(xdg_state_home: Option<&OsStr>, home: Option<&OsStr>) -> Result<PathBuf> {
+    state_files::state_path(DEFAULT_KEYS_NAME, xdg_state_home, home)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeysFile {
+    #[serde(default)]
+    key: Vec<RememberedKey>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+struct RememberedKey {
+    public_key: String,
+    flags: u8,
+    key_handle: String,
+    #[serde(default)]
+    comment: String,
+}
+
+fn read_keys(file: &Path) -> Result<Vec<SkIdentity>> {
+    let Some(text) = state_files::read(file)? else {
+        return Ok(Vec::new());
+    };
+    let parsed: KeysFile =
+        toml::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
+    ensure!(
+        parsed.key.len() <= MAX_REMEMBERED_KEYS,
+        "more than {MAX_REMEMBERED_KEYS} keys"
+    );
+    let mut identities: Vec<SkIdentity> = Vec::with_capacity(parsed.key.len());
+    for remembered in parsed.key {
+        let public = PublicKey::from_openssh(&remembered.public_key)
+            .with_context(|| format!("public key {:?}", remembered.public_key))?;
+        let KeyData::SkEd25519(public) = public.key_data().clone() else {
+            bail!(
+                "{:?} is not an sk-ssh-ed25519@openssh.com key",
+                remembered.public_key
+            );
+        };
+        ensure!(
+            remembered.comment.len() <= MAX_COMMENT_BYTES,
+            "a comment longer than {MAX_COMMENT_BYTES} bytes"
+        );
+        let identity = SkIdentity {
+            public,
+            flags: remembered.flags,
+            key_handle: parse_hex(&remembered.key_handle, MAX_KEY_HANDLE_BYTES)
+                .context("key handle")?,
+            comment: remembered.comment,
+            expires_at: None,
+            destinations: Vec::new(),
+        };
+        // Like adding: one entry per public key and per credential.
+        let clash = identities.iter().find(|other| {
+            other.public == identity.public
+                || (other.application() == identity.application()
+                    && other.key_handle == identity.key_handle)
+        });
+        if let Some(other) = clash {
+            bail!(
+                "keys {} and {} share a public key or a credential",
+                other.fingerprint(),
+                identity.fingerprint()
+            );
+        }
+        identities.push(identity);
+    }
+    Ok(identities)
+}
+
+fn write_keys(file: &Path, identities: &[SkIdentity]) -> Result<()> {
+    let mut text = KEYS_HEADER.to_owned();
+    for identity in identities {
+        let public = PublicKey::new(identity.key_data(), "")
+            .to_openssh()
+            .context("encoding a public key")?;
+        writeln!(
+            text,
+            "\n[[key]]\npublic-key = {}\nflags = {}\nkey-handle = \"{}\"\ncomment = {}",
+            toml_string(&public),
+            identity.flags,
+            hex(&identity.key_handle),
+            toml_string(&identity.comment)
+        )
+        .context("formatting the remembered keys")?;
+    }
+    state_files::write(file, &text)
 }

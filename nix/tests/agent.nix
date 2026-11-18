@@ -136,6 +136,37 @@ pkgs.testers.runNixOSTest {
         retry(lambda _last_try: has_no_identities(), timeout_seconds=15)
         assert "key lifetime ended" in journal("skagent")
 
+    with subtest("keys added here are offered again after a restart, unless limited"):
+        def restart() -> None:
+            machine.succeed("systemctl stop skagent")
+            machine.wait_until_fails("test -e ${socket}")
+            machine.succeed("${startAgent "skagent"}")
+            machine.wait_for_file("${socket}")
+
+        alice_ok("make-sk-stub ~/limited 3 'alice limited'")
+        # A host key for `ssh-add -h`, which looks hosts up in known_hosts.
+        alice_ok(
+            "mkdir -p ~/.ssh && ssh-keygen -q -t ed25519 -N ''' -f ~/hostkey"
+            " && echo \"example.com $(cat ~/hostkey.pub)\" > ~/.ssh/known_hosts"
+        )
+        alice_ok("ssh-add ~/work ~/personal")
+        alice_ok("ssh-add -t 600 ~/limited")
+        # Added again with a destination: it mustn't come back without one.
+        alice_ok("ssh-add -h example.com ~/personal")
+        restart()
+        listed = alice_ok("ssh-add -l")
+        assert "yubikey:1" in listed, listed
+        assert "alice personal" not in listed and "alice limited" not in listed, listed
+        mode = machine.succeed("stat -c %a /home/alice/.local/state/skagent/keys.toml").strip()
+        assert mode == "600", mode
+        alice_ok("ssh-add -d ~/work")
+        restart()
+        assert_no_identities()
+        alice_ok("ssh-add ~/work ~/personal")
+        alice_ok("ssh-add -D")
+        restart()
+        assert_no_identities()
+
     with subtest("confirm constraints and non-sk keys are refused"):
         status, out = alice("ssh-add -c ~/work")
         assert status != 0 and "agent refused operation" in out, f"exited {status}: {out}"

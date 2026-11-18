@@ -3,7 +3,8 @@
 # The socket exists from login on; the agent starts with the first client,
 # with the user manager's environment at that moment (WAYLAND_DISPLAY,
 # DISPLAY, the session bus), which pinentry and the touch notification use.
-# It stops with the graphical session, taking cached PINs and keys along.
+# It stops with the graphical session, taking cached PINs along; the keys it
+# had are remembered and offered again by the next session's agent.
 {
   config,
   lib,
@@ -376,8 +377,9 @@ in
         Description = "skagent: ssh-agent for FIDO2 security keys";
         Requires = [ "skagent.socket" ];
         After = [ "skagent.socket" ];
-        # Logging out drops PINs and keys; the next session's first client
-        # starts a fresh agent with that session's display variables.
+        # Logging out drops the PINs; the next session's first client starts
+        # a fresh agent with that session's display variables (and the
+        # remembered keys).
         PartOf = [ "graphical-session.target" ];
       };
       Service = {

@@ -11,7 +11,7 @@ use clap::Parser as _;
 use skagent::agent::LOAD_KEYS_EXTENSION;
 use skagent::cli::{Cli, Command};
 use skagent::client::decode_loaded_count;
-use skagent::identities::{IdentityStore, SkIdentity};
+use skagent::identities::{IdentityStore, Origin, SkIdentity};
 use skagent_fido::ResidentCredential;
 use ssh_agent_lib::agent::Session as _;
 use ssh_agent_lib::proto::{Extension, Unparsed};
@@ -48,7 +48,7 @@ fn reload_preserves_existing_lifetime_and_comment() -> Result<()> {
     let existing =
         SkIdentity::from_credential(support::sk_credential(2, "custom comment")?, Some(expiry))?;
     let mut store = IdentityStore::default();
-    store.add(existing.clone());
+    store.add(existing.clone(), Origin::Local);
     let imports = store.resident_imports(&[resident(3, 2)?], now)?;
     ensure!(imports == [existing]);
     ensure!(

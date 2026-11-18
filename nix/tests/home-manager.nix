@@ -219,15 +219,16 @@ pkgs.testers.runNixOSTest {
         assert "Touch your security key" in shown, shown
         retry(lambda _last_try: "close 1\n" in machine.succeed("cat ${testDir}/notifications"), timeout_seconds=5)
 
-    with subtest("ending the session stops the agent, and with it every PIN and key"):
+    with subtest("ending the session stops the agent and every PIN; the loaded key comes back"):
         logout()
         retry(lambda _last_try: state("skagent") == "inactive", timeout_seconds=15)
         assert state("skagent.socket") == "active"
         machine.succeed("test -S ${socket}")
-        # The next client starts a fresh, empty agent.
-        status, out = user("ssh-add -L")
-        assert status == 1 and "no identities" in out, (status, out)
+        # The next client starts a fresh agent: no PINs, the remembered key.
+        out = user_ok("ssh-add -L")
+        assert "ssh:example" in out, out
         assert state("skagent") == "active"
+        assert "offering the keys remembered from before" in journal("skagent")
         # Started outside a session, it would keep that environment.
         user_ok("systemctl --user stop skagent.service")
 
@@ -253,5 +254,7 @@ pkgs.testers.runNixOSTest {
         retry(lambda _last_try: "No security key connected, nothing to load." in journal("skagent-load"), timeout_seconds=30)
         loaded()
         assert prompts() == asked, "asked for a PIN without a security key"
+        # Nothing loaded, but the key loaded before is offered anyway.
+        assert "ssh:example" in user_ok("ssh-add -L")
   '';
 }

@@ -12,6 +12,7 @@ use crate::agent::SkAgent;
 use crate::bindings::{Bindings, default_bindings_path};
 use crate::cli::{SecretMemory, ServeArgs, SocketArgs};
 use crate::config::{self, Config};
+use crate::identities::{IdentityStore, default_keys_path};
 use crate::logind;
 use crate::notify::Notifier;
 use crate::pin_cache::CachePolicy;
@@ -187,7 +188,20 @@ pub async fn run(
     } else {
         signer = signer.with_notifier(Arc::new(Notifier::default()));
     }
-    let agent = SkAgent::new(signer);
+    let identities = match default_keys_path(
+        std::env::var_os("XDG_STATE_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    ) {
+        Ok(file) => IdentityStore::remembered_in(file),
+        Err(error) => {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "not remembering keys across restarts"
+            );
+            IdentityStore::default()
+        }
+    };
+    let agent = SkAgent::with_identities(signer, identities);
     // Installed before the socket exists, so a signal can't kill the process
     // between binding and serving and leave a stale socket behind.
     let signals = ShutdownSignals::install()?;

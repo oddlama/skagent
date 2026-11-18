@@ -15,9 +15,6 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt::{self, Write as _};
-use std::fs;
-use std::io::{ErrorKind, Write as _};
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, ensure};
@@ -27,6 +24,7 @@ use skagent_fido::PairingCredential;
 use crate::device::DeviceIdentity;
 use crate::pairing::Proof;
 use crate::pin_cache::CredentialKey;
+use crate::state_files::{self, hex, parse_fixed, parse_hex};
 
 /// The file's name in `$XDG_STATE_HOME/skagent`.
 pub const DEFAULT_BINDINGS_NAME: &str = "bindings.toml";
@@ -407,16 +405,7 @@ pub fn default_bindings_path(
     xdg_state_home: Option<&OsStr>,
     home: Option<&OsStr>,
 ) -> Result<PathBuf> {
-    let absolute = |value: Option<&OsStr>| {
-        value
-            .map(Path::new)
-            .filter(|path| path.is_absolute())
-            .map(Path::to_path_buf)
-    };
-    let base = absolute(xdg_state_home)
-        .or_else(|| absolute(home).map(|home| home.join(".local").join("state")))
-        .context("neither XDG_STATE_HOME nor HOME is an absolute path")?;
-    Ok(base.join("skagent").join(DEFAULT_BINDINGS_NAME))
+    state_files::state_path(DEFAULT_BINDINGS_NAME, xdg_state_home, home)
 }
 
 #[derive(Debug, Deserialize)]
@@ -436,12 +425,8 @@ struct Remembered {
 }
 
 fn read_remembered(file: &Path) -> Result<HashMap<[u8; 32], Binding>> {
-    let text = match fs::read_to_string(file) {
-        Ok(text) => text,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(HashMap::new()),
-        Err(error) => {
-            return Err(error).with_context(|| format!("reading {}", file.display()));
-        }
+    let Some(text) = state_files::read(file)? else {
+        return Ok(HashMap::new());
     };
     let parsed: RememberedFile =
         toml::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
@@ -473,18 +458,8 @@ fn read_remembered(file: &Path) -> Result<HashMap<[u8; 32], Binding>> {
         .collect()
 }
 
-/// Replaces `file` with the bindings worth remembering: written to a new,
-/// private file first, then renamed over the old one, so a crash leaves
-/// either.
+/// Replaces `file` with the bindings worth remembering.
 fn write_remembered(file: &Path, entries: &HashMap<[u8; 32], Binding>) -> Result<()> {
-    let directory = file
-        .parent()
-        .with_context(|| format!("{} has no parent directory", file.display()))?;
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(directory)
-        .with_context(|| format!("creating {}", directory.display()))?;
     let mut remembered: Vec<(String, &Binding)> = entries
         .iter()
         .filter(|(_, binding)| binding.remembered())
@@ -508,58 +483,5 @@ fn write_remembered(file: &Path, entries: &HashMap<[u8; 32], Binding>) -> Result
             .context("formatting the remembered bindings")?;
         }
     }
-    let new = file.with_extension("toml.new");
-    match fs::remove_file(&new) {
-        Err(error) if error.kind() != ErrorKind::NotFound => {
-            return Err(error).with_context(|| format!("removing {}", new.display()));
-        }
-        _ => {}
-    }
-    let mut out = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&new)
-        .with_context(|| format!("creating {}", new.display()))?;
-    out.write_all(text.as_bytes())
-        .and_then(|()| out.sync_all())
-        .with_context(|| format!("writing {}", new.display()))?;
-    fs::rename(&new, file)
-        .with_context(|| format!("renaming {} to {}", new.display(), file.display()))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().fold(
-        String::with_capacity(bytes.len().saturating_mul(2)),
-        |mut text, byte| {
-            // Writing to a String can't fail.
-            let _ = write!(text, "{byte:02x}");
-            text
-        },
-    )
-}
-
-/// Hex of at most `max` bytes.
-fn parse_hex(text: &str, max: usize) -> Result<Vec<u8>> {
-    ensure!(
-        !text.is_empty()
-            && text.len().is_multiple_of(2)
-            && text.len() <= max.saturating_mul(2)
-            && text.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "{text:?} is not hex of 1 to {max} bytes"
-    );
-    text.as_bytes()
-        .chunks(2)
-        .map(|pair| {
-            let pair = std::str::from_utf8(pair).context("hex")?;
-            u8::from_str_radix(pair, 16).context("hex")
-        })
-        .collect()
-}
-
-/// Hex of exactly `N` bytes.
-fn parse_fixed<const N: usize>(text: &str) -> Result<[u8; N]> {
-    parse_hex(text, N)?
-        .try_into()
-        .map_err(|bytes: Vec<u8>| anyhow::anyhow!("{} bytes instead of {N}", bytes.len()))
+    state_files::write(file, &text)
 }

@@ -46,7 +46,7 @@ skagent runs on Linux 5.11 or newer and asks for PINs with a graphical pinentry.
 This runs skagent as a socket-activated user service. The socket at
 `$XDG_RUNTIME_DIR/skagent.sock` exists from login on, and the agent starts with
 its first client. It stops together with your graphical session, so logging out
-drops all PINs and loaded keys. Your compositor or desktop has to import the
+drops all PINs. Your keys stay, see below. Your compositor or desktop has to import the
 display variables into the systemd user manager so pinentry and notifications
 can show up. Most do that already.
 
@@ -114,6 +114,13 @@ fine.
 `ssh-add -K` and `ssh-add <stub>` work too. skagent only accepts `ed25519-sk`
 keys and refuses everything else. That includes `ssh-add -c`, since the touch
 already confirms every signature.
+
+skagent remembers the keys you load or add, so they're still there after you log
+out or restart it. Nothing secret is stored: it's the public keys and what a
+stub file holds, in `~/.local/state/skagent/keys.toml`. Signing still needs the
+security key and its PIN. `ssh-add -d` and `ssh-add -D` remove keys for good.
+Keys added with a lifetime (`ssh-add -t`) or destinations (`ssh-add -h`), and
+keys added through a forwarded agent, aren't remembered.
 
 ### PIN caching
 
