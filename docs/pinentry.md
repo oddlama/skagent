@@ -104,6 +104,7 @@ one maps to a protocol state; the popup derives the copy from the data.
 | --- | --- | --- | --- |
 | `pin`, `wrong-pin` | `pin` | key, request, YubiKey, `mistake.tries_left` | wrong-pin when `mistake` is set |
 | `touch`, `touch-again` | `touch` | key, request, YubiKey, `timeout_ms`, `again` | touch-again right after `select` |
+| (none in B+) | `pair` | YubiKey, `timeout_ms` | right after the first signature or load on a key: one more touch to pair skagent with it; `CANCEL` declines |
 | `done` | `signed` | key, request | final |
 | `select` | `select` | key, `devices`, `timeout_ms` | every plugged-in key blinks |
 | `select-load` | `select` without key | `devices`, `timeout_ms` | |
@@ -134,6 +135,7 @@ points to the log. Signing and loading differ only in the verb.
 | `refused` | `FIDO_ERR_OPERATION_DENIED` | `Desk 5C NFC refused to sign` |
 | `not-on-key` | `FIDO_ERR_NO_CREDENTIALS`: another key was touched, or it was reset | `Desk 5C NFC doesn't hold github-work` |
 | `no-pin` | `FIDO_ERR_PIN_NOT_SET` | `Desk 5C NFC has no PIN set` |
+| `unrecognized` | a device reports the paired YubiKey's serial but can't sign skagent's pairing challenge; it gets no PIN | `This isn't the Desk 5C NFC skagent paired` |
 | `duplicate` | two plugged-in security keys report the serial of the YubiKey holding the key; neither gets the PIN | `Two security keys claim to be Desk 5C NFC` |
 | `not-plugged-in` | the wait for the security key (`no-key`, `wrong-key`) ran out | `Desk 5C NFC wasn't plugged in`, without a known YubiKey `No security key was plugged in` |
 | `other` | anything else, and reasons the popup doesn't know yet | `Something went wrong · see skagent's log` |

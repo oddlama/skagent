@@ -288,6 +288,11 @@ fn failures_say_why_where_known() {
             "Two security keys claim to be Desk 5C NFC",
         ),
         (
+            Failure::Unrecognized,
+            true,
+            "This isn't the Desk 5C NFC skagent paired",
+        ),
+        (
             Failure::Other,
             true,
             "Something went wrong · see skagent's log",
@@ -318,5 +323,28 @@ fn the_wrong_key_without_names_says_security_key() {
     assert_eq!(
         screen.subtitle.text(),
         "This security key doesn't hold work"
+    );
+}
+
+/// Right after the first signature on a key: one more touch, which the user
+/// can skip.
+#[test]
+fn pairing_asks_for_one_more_touch() {
+    let pair = |security_key: Option<SecurityKey>| {
+        Screen::of(&State::Pair {
+            security_key,
+            timeout_ms: 15_000,
+        })
+    };
+    let named = pair(Some(SecurityKey {
+        name: "Desk 5C NFC".to_owned(),
+    }));
+    assert_eq!(named.title, "Touch once more");
+    assert_eq!(named.subtitle.text(), "to pair Desk 5C NFC with skagent");
+    assert_eq!(named.badge, Some(Badge::Again));
+    assert_eq!(named.close, Close::Cancel);
+    assert_eq!(
+        pair(None).subtitle.text(),
+        "to pair your security key with skagent"
     );
 }

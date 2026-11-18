@@ -270,6 +270,10 @@ impl Screen {
                 again,
                 request,
             } => touch(key, security_key.as_ref(), request, *timeout_ms, *again),
+            State::Pair {
+                security_key,
+                timeout_ms,
+            } => pair(security_key.as_ref(), *timeout_ms),
             State::Signed { key, request } => signed(key, request),
             State::Select {
                 key,
@@ -453,6 +457,27 @@ fn pin(
         },
         close: Close::Cancel,
         announcement,
+        lingers: None,
+    }
+}
+
+fn pair(security_key: Option<&SecurityKey>, timeout_ms: u64) -> Screen {
+    let subtitle = format!(
+        "to pair {} with skagent",
+        name_or(security_key, "your security key")
+    );
+    Screen {
+        anchor: Anchor::Countdown {
+            glyph: None,
+            duration: Duration::from_millis(timeout_ms),
+            pulse: true,
+        },
+        badge: Some(Badge::Again),
+        announcement: format!("Touch once more {subtitle}"),
+        title: "Touch once more".to_owned(),
+        subtitle: Subtitle::muted(subtitle),
+        body: Body::Empty,
+        close: Close::Cancel,
         lingers: None,
     }
 }
@@ -679,6 +704,10 @@ fn failed(key: Option<&Key>, security_key: Option<&SecurityKey>, reason: Failure
         (Failure::NotOnKey, Some(key)) => format!("{name} doesn't hold {}", key.label),
         (Failure::NotOnKey, None) => format!("{name} holds no SSH keys"),
         (Failure::NoPin, _) => format!("{name} has no PIN set"),
+        (Failure::Unrecognized, _) => format!(
+            "This isn't the {} skagent paired",
+            name_or(security_key, "security key")
+        ),
         (Failure::Duplicate, _) => format!(
             "Two security keys claim to be {}",
             name_or(security_key, "your YubiKey")

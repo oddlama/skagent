@@ -177,6 +177,10 @@ fn every_state() -> Vec<State> {
             timeout_ms: 15_000,
             again: false,
         },
+        State::Pair {
+            security_key: desk(),
+            timeout_ms: 15_000,
+        },
         State::Signed {
             key: key(),
             request: request(),
@@ -222,7 +226,7 @@ fn every_state() -> Vec<State> {
 #[test]
 fn state_names_are_the_ones_on_the_wire() -> Result<()> {
     let states = every_state();
-    ensure!(states.len() == 13, "a state is missing from the test");
+    ensure!(states.len() == 14, "a state is missing from the test");
     for state in states {
         let name = state.name();
         let text = String::from_utf8(encode_message(&Message::Show {
@@ -254,6 +258,7 @@ fn failure_reasons_have_their_names_on_the_wire() -> Result<()> {
         (Failure::NoPin, "no-pin"),
         (Failure::NotPluggedIn, "not-plugged-in"),
         (Failure::Duplicate, "duplicate"),
+        (Failure::Unrecognized, "unrecognized"),
         (Failure::Other, "other"),
     ] {
         let state = State::Failed {

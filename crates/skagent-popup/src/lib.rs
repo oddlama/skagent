@@ -111,6 +111,15 @@ pub enum State {
         /// The key was just selected by touch, so this is the second one.
         again: bool,
     },
+    /// Touch the security key once more: skagent pairs with it, once, to
+    /// tell it from a device claiming to be it later. Comes right after a
+    /// signature or loading succeeded; answered with `CANCEL` to skip it.
+    Pair {
+        /// The YubiKey, if it reports a serial.
+        security_key: Option<SecurityKey>,
+        /// About how long the key waits for the touch.
+        timeout_ms: u64,
+    },
     /// Signed. Final.
     Signed {
         /// The SSH key.
@@ -194,6 +203,7 @@ impl State {
             Self::Pin { .. } => "pin",
             Self::LoadPin { .. } => "load-pin",
             Self::Touch { .. } => "touch",
+            Self::Pair { .. } => "pair",
             Self::Signed { .. } => "signed",
             Self::Loaded { .. } => "loaded",
             Self::WrongKey { .. } => "wrong-key",
@@ -290,6 +300,9 @@ pub enum Failure {
     /// Two plugged-in security keys report the serial of the YubiKey holding
     /// the SSH key: one of them pretends to be it. Neither got the PIN.
     Duplicate,
+    /// A device reports the serial of the paired YubiKey but can't prove
+    /// skagent's pairing: a fake, or the key was reset. It got no PIN.
+    Unrecognized,
     /// Something else; the agent's log says what. Also any reason this
     /// popup doesn't know yet.
     #[serde(other)]
