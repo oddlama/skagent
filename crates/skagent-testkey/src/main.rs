@@ -2,7 +2,8 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![forbid(unsafe_code)]
 
-use std::path::PathBuf;
+use std::cell::Cell;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::time::Duration;
@@ -59,6 +60,29 @@ struct Cli {
     /// other authenticators.
     #[arg(long)]
     serial: Option<u32>,
+
+    /// While this file exists, the key is unplugged: its HID device is gone.
+    /// Removing the file plugs it back in, as a new device node with the
+    /// same credentials, PIN and serial, like replugging a real key.
+    #[arg(long)]
+    unplugged_file: Option<PathBuf>,
+}
+
+/// The uhid device, shared with the handler; empty while unplugged.
+#[derive(Default)]
+struct Port(Cell<Option<Rc<UhidDevice>>>);
+
+impl Port {
+    fn current(&self) -> Option<Rc<UhidDevice>> {
+        let device = self.0.take();
+        self.0.set(device.clone());
+        device
+    }
+
+    /// Replaces the device; the old one is destroyed once nobody uses it.
+    fn set(&self, device: Option<Rc<UhidDevice>>) {
+        drop(self.0.replace(device));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -121,28 +145,35 @@ fn run(cli: Cli) -> Result<()> {
     let authenticator = Authenticator::with_config(callbacks, config.clone())
         .map_err(|error| anyhow!("creating the soft-fido2 authenticator: {error}"))?;
 
-    let device = UhidDevice::create_fido_device_with_ids(
-        config.device_name.as_deref(),
-        config.vendor_id,
-        config.product_id,
-        config.device_version,
-    )
-    .map_err(|error| {
-        anyhow!(
-            "creating the uhid device (is the uhid module loaded, /dev/uhid writable?): {error}"
-        )
-    })?;
-    let device = Rc::new(device);
+    let port = Rc::new(Port::default());
+    if !is_unplugged(cli.unplugged_file.as_deref()) {
+        port.set(Some(Rc::new(plug_in(&config)?)));
+    }
     let mut handler = CtapHidHandler::new(CborHandler {
         authenticator,
         touch,
         undo,
         catalog: Catalog::default(),
-        device: Rc::clone(&device),
+        device: Rc::clone(&port),
     });
     tracing::info!(name = %cli.name, touch = ?cli.touch, serial = ?cli.serial, "test key ready");
 
     loop {
+        match (is_unplugged(cli.unplugged_file.as_deref()), port.current()) {
+            (true, Some(_)) => {
+                port.set(None);
+                tracing::info!("unplugged");
+            }
+            (false, None) => {
+                port.set(Some(Rc::new(plug_in(&config)?)));
+                tracing::info!("plugged in");
+            }
+            _ => {}
+        }
+        let Some(device) = port.current() else {
+            std::thread::sleep(IDLE_POLL);
+            continue;
+        };
         let mut packet = [0_u8; 64];
         let received = device
             .read_packet(&mut packet)
@@ -169,6 +200,26 @@ fn run(cli: Cli) -> Result<()> {
     }
 }
 
+/// Whether `--unplugged-file` says the key is unplugged.
+fn is_unplugged(file: Option<&Path>) -> bool {
+    file.is_some_and(Path::exists)
+}
+
+/// Creates the HID device: the key appears on the bus.
+fn plug_in(config: &AuthenticatorConfig) -> Result<UhidDevice> {
+    UhidDevice::create_fido_device_with_ids(
+        config.device_name.as_deref(),
+        config.vendor_id,
+        config.product_id,
+        config.device_version,
+    )
+    .map_err(|error| {
+        anyhow!(
+            "creating the uhid device (is the uhid module loaded, /dev/uhid writable?): {error}"
+        )
+    })
+}
+
 /// Hands CTAP2 (CBOR) messages to the authenticator, applying the touch policy.
 struct CborHandler {
     authenticator: Authenticator<Callbacks>,
@@ -176,14 +227,14 @@ struct CborHandler {
     undo: UndoHandle,
     catalog: Catalog,
     /// Read while waiting for a touch, to notice `CTAPHID_CANCEL`.
-    device: Rc<UhidDevice>,
+    device: Rc<Port>,
 }
 
 impl CborHandler {
     /// Asks for a touch, ending the wait early when the host cancels.
     fn touch(&self, operation: &str, rp_id: &str) -> TouchOutcome {
-        let device = Rc::clone(&self.device);
-        let mut cancelled = move || cancel_arrived(&device);
+        let port = Rc::clone(&self.device);
+        let mut cancelled = move || port.current().is_some_and(|device| cancel_arrived(&device));
         self.touch.request(operation, rp_id, &mut cancelled)
     }
 
