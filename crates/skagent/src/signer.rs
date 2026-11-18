@@ -2,6 +2,12 @@
 //!
 //! One operation per device and per credential. Bound devices can sign in
 //! parallel; touch selection is exclusive across devices.
+//!
+//! The way from a request to the security key's answer is the same for
+//! whatever is asked of a credential: routing, the PIN from the cache or the
+//! user, the touch, the checks before anything is returned or cached. A
+//! [`Job`] is what differs: a signature with an SSH key here, the secret of
+//! an age identity in [`crate::age`].
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -150,6 +156,144 @@ impl PinSource {
         match self {
             Self::None => None,
             Self::Cache(pin) | Self::User(pin) => Some(pin),
+        }
+    }
+}
+
+/// The security key's part of a [`Job`], run in the device thread with the
+/// PIN, if the credential needs one.
+pub(crate) type Work<T> =
+    Box<dyn FnOnce(&mut skagent_fido::Device, Option<&SecretBuffer>) -> Result<T> + Send>;
+
+/// What one request asks of a credential on a security key.
+/// [`Signer::run`] takes it from routing to the result.
+pub(crate) trait Job: Sync {
+    /// What the security key hands back.
+    type Raw: Send + 'static;
+    /// What the request yields, once [`Job::accept`] checked it.
+    type Done;
+
+    /// The credential on the security key.
+    fn credential(&self) -> &CredentialKey;
+    /// The key as the popup shows it.
+    fn popup_key(&self) -> Key;
+    /// What the request is for, as the popup shows it.
+    fn popup_request(&self) -> Request;
+    /// The key for prompts and logs: its name and what identifies it.
+    fn described(&self) -> &str;
+    /// The key's name alone, for notifications.
+    fn name(&self) -> &str;
+    /// What the request is for, for prompts, notifications and logs.
+    fn purpose(&self) -> String;
+    /// Whether the credential needs the PIN.
+    fn needs_pin(&self) -> bool;
+    /// How long its PIN is cached.
+    fn policy(&self) -> CachePolicy;
+    /// What is done with the key, for errors and logs: "signing".
+    fn doing(&self) -> &'static str;
+    /// The security key's part.
+    fn work(&self) -> Work<Self::Raw>;
+    /// Checks what the security key returned. Nothing is returned to the
+    /// client or cached before this passed. `with_pin`: the request carried
+    /// a PIN.
+    fn accept(&self, raw: Self::Raw, with_pin: bool) -> Result<Self::Done>;
+    /// What the popup shows last, after the request succeeded.
+    fn done(&self) -> Shown;
+}
+
+/// A signature with an SSH key.
+struct SignJob<'a> {
+    identity: &'a SkIdentity,
+    data: &'a [u8],
+    purpose: &'a Purpose,
+    credential: CredentialKey,
+    popup_key: Key,
+    described: String,
+    name: String,
+    policy: CachePolicy,
+}
+
+impl Job for SignJob<'_> {
+    type Raw = Statement;
+    type Done = Signature;
+
+    fn credential(&self) -> &CredentialKey {
+        &self.credential
+    }
+
+    fn popup_key(&self) -> Key {
+        self.popup_key.clone()
+    }
+
+    fn popup_request(&self) -> Request {
+        popup_request(self.purpose)
+    }
+
+    fn described(&self) -> &str {
+        &self.described
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn purpose(&self) -> String {
+        self.purpose.to_string()
+    }
+
+    fn needs_pin(&self) -> bool {
+        self.identity.requires_pin()
+    }
+
+    fn policy(&self) -> CachePolicy {
+        self.policy
+    }
+
+    fn doing(&self) -> &'static str {
+        "signing"
+    }
+
+    fn work(&self) -> Work<Statement> {
+        let request = OwnedAssertRequest {
+            rp_id: self.identity.application().to_owned(),
+            client_data_hash: Sha256::digest(self.data).into(),
+            key_handle: self.identity.key_handle().to_vec(),
+            user_presence: true,
+        };
+        Box::new(move |device, pin| {
+            device.assert(
+                &AssertRequest {
+                    rp_id: &request.rp_id,
+                    client_data_hash: request.client_data_hash,
+                    key_handle: &request.key_handle,
+                    user_presence: request.user_presence,
+                },
+                pin,
+            )
+        })
+    }
+
+    fn accept(&self, statement: Statement, with_pin: bool) -> Result<Signature> {
+        // Neither returned nor cached unless it is the identity's own
+        // signature: the device may hold another credential under that
+        // handle, or the identity's public key may not be the one the
+        // handle belongs to.
+        let signature = verified_signature(self.identity, self.data, &statement)?;
+        ensure!(
+            statement.user_present(),
+            "the assertion lacks user presence"
+        );
+        ensure!(
+            !with_pin || statement.user_verified(),
+            "the assertion lacks user verification"
+        );
+        Ok(signature)
+    }
+
+    fn done(&self) -> Shown {
+        Shown::Signed {
+            key: self.popup_key(),
+            request: self.popup_request(),
         }
     }
 }
@@ -705,35 +849,44 @@ impl Signer {
         ticket: SigningTicket,
         purpose: &Purpose,
     ) -> Result<Signature> {
+        let job = SignJob {
+            identity,
+            data,
+            purpose,
+            credential: credential_key(identity),
+            popup_key: self.popup_key(identity),
+            described: self.describe(identity),
+            name: shown_name(identity, self.label(identity)),
+            policy: self.policy_for(identity),
+        };
+        self.run(&job, ticket).await
+    }
+
+    /// Takes `job` from routing to its result, see [`Signer::sign`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if device selection or the PIN prompt fails, the
+    /// device refuses, or the job doesn't accept what the device returned.
+    pub(crate) async fn run<J: Job>(&self, job: &J, ticket: SigningTicket) -> Result<J::Done> {
         let queued = Queued {
-            key: Some(self.popup_key(identity)),
+            key: Some(job.popup_key()),
         };
         let mut session = self.popup_session(&ticket, queued).await?;
         let mut security_key = None;
-        let signed = self
-            .sign_on_device(
-                identity,
-                data,
-                &ticket,
-                purpose,
-                session.as_mut(),
-                &mut security_key,
-            )
+        let done = self
+            .run_on_device(job, &ticket, session.as_mut(), &mut security_key)
             .await;
         if let Some(session) = session.as_mut() {
-            let key = self.popup_key(identity);
-            let last = match &signed {
-                Ok(_) => Some(Shown::Signed {
-                    key,
-                    request: popup_request(purpose),
-                }),
-                Err(error) => final_state(error, &ticket, Some(key), security_key),
+            let last = match &done {
+                Ok(_) => Some(job.done()),
+                Err(error) => final_state(error, &ticket, Some(job.popup_key()), security_key),
             };
             if let Some(state) = last {
                 show_best_effort(session, state);
             }
         }
-        signed
+        done
     }
 
     /// Waits for the popup, if there is one, and starts it.
@@ -758,55 +911,48 @@ impl Signer {
         Ok(Some(session))
     }
 
-    async fn sign_on_device(
+    async fn run_on_device<J: Job>(
         &self,
-        identity: &SkIdentity,
-        data: &[u8],
+        job: &J,
         ticket: &SigningTicket,
-        purpose: &Purpose,
         mut session: Option<&mut PopupSession>,
         security_key: &mut Option<SecurityKey>,
-    ) -> Result<Signature> {
-        let key = credential_key(identity);
+    ) -> Result<J::Done> {
+        let key = job.credential().clone();
         let _credential = tokio::select! {
             biased;
             () = ticket.revoked() => bail!("queued signature cancelled by PIN eviction or key removal"),
             guard = self.router.credentials.lock_within(key.clone(), QUEUE_TIMEOUT) => guard?,
         };
         ticket.check()?;
-        tracing::info!(key = %self.describe(identity), "resolving the signing device");
-        let label = self.describe(identity);
+        tracing::info!(key = %job.described(), "resolving the signing device");
         let on_select = match session.as_deref() {
-            Some(session) => Some(select_in_popup(session, Some(self.popup_key(identity)))?),
+            Some(session) => Some(select_in_popup(session, Some(job.popup_key()))?),
             None => None,
         };
         let on_wait = self.on_wait(
             session.as_deref(),
-            Some((
-                self.popup_key(identity),
-                shown_name(identity, self.label(identity)),
-            )),
+            Some((job.popup_key(), job.name().to_owned())),
         )?;
         let mut routed = tokio::select! {
             biased;
             () = ticket.revoked() => bail!("device selection cancelled by PIN eviction or key removal"),
             () = popup_cancelled(session.as_deref_mut()) => return Err(anyhow::Error::new(CancelledInPopup)),
-            routed = self.router.route(&key, ticket.clone(), &label, on_select, on_wait) => {
+            routed = self.router.route(&key, ticket.clone(), job.described(), on_select, on_wait) => {
                 self.waited_for(routed, security_key)?
             }
         };
         *security_key = self.security_key(&routed);
         tracing::info!(
-            key = %self.describe(identity),
+            key = %job.described(),
             security_key = %self.device_name(&routed),
             serial = routed.serial,
-            "signing on the security key"
+            "{} on the security key",
+            job.doing()
         );
-        let signing = Signing {
-            identity,
-            data,
+        let running = Running {
+            job,
             ticket,
-            purpose,
             device: routed.identity.clone(),
             serial: routed.serial,
             key,
@@ -819,10 +965,10 @@ impl Signer {
         };
         loop {
             round = match self
-                .sign_attempt(&signing, session.as_deref_mut(), routed, round)
+                .attempt(&running, session.as_deref_mut(), routed, round)
                 .await?
             {
-                Attempt::Signed(signature) => return Ok(signature),
+                Attempt::Done(done) => return Ok(done),
                 Attempt::WrongPin(back) => {
                     routed = back;
                     Round {
@@ -837,8 +983,8 @@ impl Signer {
                         .as_deref_mut()
                         .context("a touch timed out without a popup")?;
                     let state = Shown::Timeout {
-                        key: Some(self.popup_key(identity)),
-                        security_key: signing.security_key.clone(),
+                        key: Some(job.popup_key()),
+                        security_key: running.security_key.clone(),
                     };
                     tokio::select! {
                         biased;
@@ -856,28 +1002,28 @@ impl Signer {
         }
     }
 
-    /// One try at signing on the routed device: PIN (unless cached or kept
+    /// One try at the job on the routed device: PIN (unless cached or kept
     /// from the previous round), touch, result.
-    async fn sign_attempt(
+    async fn attempt<J: Job>(
         &self,
-        signing: &Signing<'_>,
+        running: &Running<'_, J>,
         mut session: Option<&mut PopupSession>,
         routed: RoutedDevice,
         round: Round,
-    ) -> Result<Attempt> {
-        let (identity, ticket) = (signing.identity, signing.ticket);
+    ) -> Result<Attempt<J::Done>> {
+        let (job, ticket) = (running.job, running.ticket);
         let Round {
             again,
             wrong_pin,
             kept,
         } = round;
-        let (mut routed, retries) = read_retries(routed, identity.requires_pin()).await?;
+        let (mut routed, retries) = read_retries(routed, job.needs_pin()).await?;
         let source = match (kept, retries) {
             (Some(kept), _) => kept,
             (None, Some(retries)) => {
                 let popup = session.as_deref_mut().map(|session| PopupPin {
                     session,
-                    security_key: signing.security_key.clone(),
+                    security_key: running.security_key.clone(),
                     mistake: wrong_pin.then_some(Mistake {
                         tries_left: retries,
                     }),
@@ -885,7 +1031,7 @@ impl Signer {
                 tokio::select! {
                     biased;
                     () = ticket.revoked() => bail!("PIN prompt cancelled by PIN eviction or key removal"),
-                    source = self.pin_for(identity, &signing.key, &signing.device, retries, signing.purpose, popup) => source?,
+                    source = self.pin_for(job, &running.device, retries, popup) => source?,
                 }
             }
             (None, None) => PinSource::None,
@@ -898,30 +1044,26 @@ impl Signer {
         ticket.check()?;
         if let Err(error) = checked {
             return self
-                .attempt_failed(signing, session.is_some(), routed, source, error)
+                .attempt_failed(running, session.is_some(), routed, source, error)
                 .await;
         }
 
-        let request = OwnedAssertRequest {
-            rp_id: identity.application().to_owned(),
-            client_data_hash: Sha256::digest(signing.data).into(),
-            key_handle: identity.key_handle().to_vec(),
-            user_presence: true,
-        };
+        let work = job.work();
         ticket.check()?;
         let retry_guard = matches!(source, PinSource::Cache(_))
             .then_some(retries)
             .flatten();
         // Revocation, a cancel in the popup or a dropped request cancels the
-        // assertion on the device, which ends the wait for a touch and with
+        // request on the device, which ends the wait for a touch and with
         // it the PIN copy.
-        let notification = self.show_touch(signing, session.as_deref_mut(), again)?;
+        let notification = self.show_touch(running, session.as_deref_mut(), again)?;
         let (interrupt, finished) = DeviceInterrupt::new(routed.device.canceller());
         let worker = {
-            let device = signing.device.clone();
+            let device = running.device.clone();
+            let doing = job.doing();
             tokio::task::spawn_blocking(move || {
                 let _finished = finished;
-                let outcome = assert_on(&mut routed, &device, &request, source.pin(), retry_guard);
+                let outcome = work_on(&mut routed, &device, work, source.pin(), retry_guard, doing);
                 (routed, source, outcome)
             })
         };
@@ -933,41 +1075,29 @@ impl Signer {
             return Err(anyhow::Error::new(CancelledInPopup));
         }
 
-        // Revoked meanwhile: never return the signature or refill the cache.
+        // Revoked meanwhile: never return the result or refill the cache.
         ticket.check()?;
         match outcome {
-            Ok((statement, retries_after)) => {
-                // Neither returned nor cached unless it is the identity's own
-                // signature: the device may hold another credential under that
-                // handle, or the identity's public key may not be the one the
-                // handle belongs to.
-                let signature = verified_signature(identity, signing.data, &statement)
-                    .with_context(|| format!("signing with {}", self.describe(identity)))?;
-                ensure!(
-                    statement.user_present(),
-                    "the assertion lacks user presence"
-                );
-                ensure!(
-                    source.pin().is_none() || statement.user_verified(),
-                    "the assertion lacks user verification"
-                );
-                // The key just proved it holds the SSH key with a PIN the
+            Ok((raw, retries_after)) => {
+                let done = job
+                    .accept(raw, source.pin().is_some())
+                    .with_context(|| format!("{} with {}", job.doing(), job.described()))?;
+                // The key just proved it holds the credential with a PIN the
                 // user typed: the moment to pair with it, once.
                 let pairing = match &source {
                     PinSource::User(pin) => {
-                        self.pair(Some(&signing.key), ticket, session, routed, pin)
+                        self.pair(Some(&running.key), ticket, session, routed, pin)
                             .await?
                             .1
                     }
                     PinSource::Cache(_) | PinSource::None => None,
                 };
-                let policy = self.policy_for(identity);
-                self.remember(signing, source, retries_after, policy, pairing)
+                self.remember(running, source, retries_after, job.policy(), pairing)
                     .await?;
-                Ok(Attempt::Signed(signature))
+                Ok(Attempt::Done(done))
             }
             Err(error) => {
-                self.attempt_failed(signing, session.is_some(), routed, source, error)
+                self.attempt_failed(running, session.is_some(), routed, source, error)
                     .await
             }
         }
@@ -976,16 +1106,16 @@ impl Signer {
     /// After an attempt failed with `error`: notes it, and in the popup
     /// (`in_popup`) asks again after a wrong typed PIN, or offers to try
     /// again after a touch timeout.
-    async fn attempt_failed(
+    async fn attempt_failed<J: Job>(
         &self,
-        signing: &Signing<'_>,
+        running: &Running<'_, J>,
         in_popup: bool,
         routed: RoutedDevice,
         source: PinSource,
         error: anyhow::Error,
-    ) -> Result<Attempt> {
-        let identity = signing.identity;
-        self.record_failure(identity, &signing.key, &source, &error)
+    ) -> Result<Attempt<J::Done>> {
+        let job = running.job;
+        self.record_failure(job.described(), &running.key, &source, &error)
             .await;
         if in_popup {
             match error_kind(&error) {
@@ -994,29 +1124,29 @@ impl Signer {
                     return Ok(Attempt::WrongPin(routed));
                 }
                 Some(ErrorKind::TouchTimeout) => {
-                    tracing::info!(key = %self.describe(identity), "nobody touched the security key in time");
+                    tracing::info!(key = %job.described(), "nobody touched the security key in time");
                     return Ok(Attempt::TimedOut(routed, source));
                 }
                 _ => {}
             }
         }
-        Err(error.context(format!("signing with {}", self.describe(identity))))
+        Err(error.context(format!("{} with {}", job.doing(), job.described())))
     }
 
     /// Tells the user to touch the key: in the popup, or with a desktop
     /// notification that lasts until the returned guard is dropped.
-    fn show_touch(
+    fn show_touch<J: Job>(
         &self,
-        signing: &Signing<'_>,
+        running: &Running<'_, J>,
         session: Option<&mut PopupSession>,
         again: bool,
     ) -> Result<Option<Notification>> {
-        let identity = signing.identity;
+        let job = running.job;
         if let Some(session) = session {
             session.show(Shown::Touch {
-                key: self.popup_key(identity),
-                request: popup_request(signing.purpose),
-                security_key: signing.security_key.clone(),
+                key: job.popup_key(),
+                request: job.popup_request(),
+                security_key: running.security_key.clone(),
                 timeout_ms: u64::try_from(TOUCH_TIMEOUT_HINT.as_millis()).unwrap_or(u64::MAX),
                 again,
             })?;
@@ -1025,11 +1155,7 @@ impl Signer {
         Ok(self.notifier.as_ref().map(|notifier| {
             notifier.show(
                 "Touch your security key",
-                &format!(
-                    "{}: {}",
-                    shown_name(identity, self.label(identity)),
-                    signing.purpose
-                ),
+                &format!("{}: {}", job.name(), job.purpose()),
             )
         }))
     }
@@ -1197,15 +1323,14 @@ impl Signer {
 
     /// The PIN to use: cached if allowed, otherwise asked for, in the popup
     /// if there is one.
-    async fn pin_for(
+    async fn pin_for<J: Job>(
         &self,
-        identity: &SkIdentity,
-        key: &CredentialKey,
+        job: &J,
         device: &DeviceIdentity,
         retries: u32,
-        purpose: &Purpose,
         popup: Option<PopupPin<'_>>,
     ) -> Result<PinSource> {
+        let key = job.credential();
         let (lookup, last_failure) = {
             let mut state = self.state.lock().await;
             if retries == 0 {
@@ -1220,13 +1345,13 @@ impl Signer {
         };
         let miss = match lookup {
             Lookup::Hit(pin) => {
-                tracing::debug!(key = %self.describe(identity), "using the cached PIN");
+                tracing::debug!(key = %job.described(), "using the cached PIN");
                 return Ok(PinSource::Cache(pin));
             }
             Lookup::Miss(miss) => miss,
         };
         if miss != Miss::NotCached {
-            tracing::info!(key = %self.describe(identity), reason = %miss, "asking for the PIN again");
+            tracing::info!(key = %job.described(), reason = %miss, "asking for the PIN again");
         }
 
         if let Some(PopupPin {
@@ -1237,8 +1362,8 @@ impl Signer {
         {
             let pin = session
                 .ask_pin(Shown::Pin {
-                    key: self.popup_key(identity),
-                    request: popup_request(purpose),
+                    key: job.popup_key(),
+                    request: job.popup_request(),
                     security_key,
                     mistake,
                 })
@@ -1248,13 +1373,13 @@ impl Signer {
         let prompt = self.prompt.as_ref().ok_or_else(|| {
             anyhow!(
                 "{} needs a PIN, but no PIN prompt is configured (--pinentry, --askpass or --popup)",
-                self.describe(identity)
+                job.described()
             )
         })?;
-        let purpose = purpose.to_string();
+        let purpose = job.purpose();
         let pin = prompt
             .ask(&PinRequest {
-                key: &self.describe(identity),
+                key: job.described(),
                 retries: Some(retries),
                 error: last_failure.as_deref(),
                 then_touch: true,
@@ -1266,23 +1391,23 @@ impl Signer {
 
     /// After a successful signature: cache a typed PIN, or note the use of a
     /// cached one. Only if the device node is still the one the PIN went to.
-    async fn remember(
+    async fn remember<J: Job>(
         &self,
-        signing: &Signing<'_>,
+        running: &Running<'_, J>,
         source: PinSource,
         retries_after: Option<u32>,
         policy: CachePolicy,
         pairing: Option<PairingCredential>,
     ) -> Result<()> {
-        let (key, device) = (&signing.key, &signing.device);
+        let (key, device) = (&running.key, &running.device);
         let mut state = self.state.lock().await;
         let mut bindings = self.router.bindings().await;
         // No awaits from here on: a cancelled caller can't stop halfway.
-        signing.ticket.check()?;
+        running.ticket.check()?;
         state.last_failure.remove(key);
         let still_same_device = DeviceIdentity::of(device.path()).is_ok_and(|now| now == *device);
         if still_same_device {
-            bindings.bind(key, device.clone(), signing.serial, pairing);
+            bindings.bind(key, device.clone(), running.serial, pairing);
         }
         if state.caching != Caching::Available {
             return Ok(());
@@ -1319,7 +1444,7 @@ impl Signer {
 
     async fn record_failure(
         &self,
-        identity: &SkIdentity,
+        described: &str,
         key: &CredentialKey,
         source: &PinSource,
         error: &anyhow::Error,
@@ -1342,7 +1467,7 @@ impl Signer {
         if matches!(source, PinSource::Cache(_)) {
             // The retry guard should make this impossible, unless the PIN was
             // changed elsewhere without a failed attempt in between.
-            tracing::warn!(key = %self.describe(identity), "the device rejected the cached PIN, dropped it");
+            tracing::warn!(key = %described, "the device rejected the cached PIN, dropped it");
         }
         state.last_failure.insert(key.clone(), note.to_owned());
     }
@@ -1364,12 +1489,10 @@ impl fmt::Display for TriesLeft {
 
 impl std::error::Error for TriesLeft {}
 
-/// One signature request, as it goes through its attempts.
-struct Signing<'a> {
-    identity: &'a SkIdentity,
-    data: &'a [u8],
+/// One request, as it goes through its attempts.
+struct Running<'a, J: Job> {
+    job: &'a J,
     ticket: &'a SigningTicket,
-    purpose: &'a Purpose,
     key: CredentialKey,
     /// The routed device's plug-in.
     device: DeviceIdentity,
@@ -1379,8 +1502,8 @@ struct Signing<'a> {
 }
 
 /// How an attempt ended, short of an error.
-enum Attempt {
-    Signed(Signature),
+enum Attempt<T> {
+    Done(T),
     /// The user typed a wrong PIN in the popup: ask again on this device.
     WrongPin(RoutedDevice),
     /// Nobody touched the key in time: the popup offers to try again with
@@ -1715,43 +1838,37 @@ struct OwnedAssertRequest {
     user_presence: bool,
 }
 
-/// Signs on the device at `path`. With a PIN, also returns the retry counter
-/// right after, for the cache.
-fn assert_on(
+/// Runs `work` on the device at `path`. With a PIN, also returns the retry
+/// counter right after, for the cache. `doing`: what the work is, for errors.
+fn work_on<T>(
     routed: &mut RoutedDevice,
     expected: &DeviceIdentity,
-    request: &OwnedAssertRequest,
+    work: Work<T>,
     pin: Option<&SecretBuffer>,
     retry_guard: Option<u32>,
-) -> Result<(Statement, Option<u32>)> {
+    doing: &'static str,
+) -> Result<(T, Option<u32>)> {
     let path = expected.path();
     let device = &mut routed.device;
-    expected.ensure_present().context("before signing")?;
+    expected
+        .ensure_present()
+        .with_context(|| format!("before {doing}"))?;
     if let Some(expected_retries) = retry_guard {
         ensure!(
             device.pin_retries()? == expected_retries,
-            "PIN retry counter changed before signing at {path}"
+            "PIN retry counter changed before {doing} at {path}"
         );
     }
-    let result = device.assert(
-        &AssertRequest {
-            rp_id: &request.rp_id,
-            client_data_hash: request.client_data_hash,
-            key_handle: &request.key_handle,
-            user_presence: request.user_presence,
-        },
-        pin,
-    );
-    match result {
-        Ok(statement) => {
+    match work(device, pin) {
+        Ok(raw) => {
             let retries = pin.and_then(|_| match device.pin_retries() {
                 Ok(retries) => Some(retries),
                 Err(error) => {
-                    tracing::warn!(device = path, error = %format!("{error:#}"), "reading the retry counter after signing failed");
+                    tracing::warn!(device = path, error = %format!("{error:#}"), "reading the retry counter after {doing} failed");
                     None
                 }
             });
-            Ok((statement, retries))
+            Ok((raw, retries))
         }
         Err(error) => {
             if error_kind(&error).is_some_and(ErrorKind::invalidates_pin) {
