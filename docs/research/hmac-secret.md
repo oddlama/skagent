@@ -42,19 +42,22 @@ So there is no "derive again, silently" for a batch of files. Every derivation i
 nix shell --inputs-from . nixpkgs#libfido2 -c bash docs/research/hmac-secret-check.sh
 ```
 
-Run on 2026-11-18 against a YubiKey that reports `FIDO_2_0, FIDO_2_1_PRE`, PIN protocol 1 and the options `rk, up, noplat, clientPin, credentialMgmtPreview`. That is the feature set from before firmware 5.7, which moved to CTAP 2.1. The exact version isn't known: this firmware has no version in `getInfo` (`fwversion: 0x0`).
+Run on 2026-11-18 against two YubiKeys:
 
-| question | answer |
-|---|---|
-| discoverable credential, credProtect 3, hmac-secret, relying party that is no web origin | created; the attestation (`packed`) confirms both extensions |
-| derive with PIN and touch | 32 bytes |
-| same salt again | same output |
-| two salts in one request | 64 bytes, the second half differs from the first |
-| derive with PIN and `up=false` | refused by the key: `FIDO_ERR_UP_REQUIRED` |
-| plain assertion without PIN, `up=false` | `FIDO_ERR_NO_CREDENTIALS`: the credential is invisible without the PIN |
-| `hmac-secret-mc` listed | no |
+- **Before 5.7:** reports `FIDO_2_0, FIDO_2_1_PRE`, PIN protocol 1 and the options `rk, up, noplat, clientPin, credentialMgmtPreview`. That is the feature set from before firmware 5.7, which moved to CTAP 2.1. The exact version isn't known: this firmware has no version in `getInfo` (`fwversion: 0x0`).
+- **5.8:** `fwversion: 0x50800`, `FIDO_2_0, FIDO_2_1_PRE, FIDO_2_1, FIDO_2_3`, PIN protocols 2 and 1, 98 discoverable credentials remaining.
 
-Not run yet: a YubiKey with firmware 5.7 or later. Expected there: the same, with `FIDO_ERR_UNSUPPORTED_OPTION` for the refusal.
+| question | before 5.7 | 5.8 |
+|---|---|---|
+| discoverable credential, credProtect 3, hmac-secret, relying party that is no web origin | created; the attestation (`packed`) confirms both extensions | same |
+| derive with PIN and touch | 32 bytes | same |
+| same salt again | same output | same |
+| two salts in one request | 64 bytes, the second half differs from the first | same |
+| derive with PIN and `up=false` | refused by the key: `FIDO_ERR_UP_REQUIRED` | same code |
+| plain assertion without PIN, `up=false` | `FIDO_ERR_NO_CREDENTIALS`: the credential is invisible without the PIN | same |
+| `hmac-secret-mc` listed | no | yes |
+
+Both refuse with `CTAP2_ERR_UP_REQUIRED`, the 5.8 too, although CTAP 2.1 names `CTAP2_ERR_UNSUPPORTED_OPTION` for it.
 
 ## the virtual test key (soft-fido2 0.17)
 
@@ -71,6 +74,6 @@ So before any VM test counts touches for decryption, the test key has to list `h
 - A dedicated credential with credProtect 3 and hmac-secret gives a secret that needs the key, the PIN and a touch, on firmware old and new.
 - One touch can return two outputs, for two salts.
 - The output never changes, so a single derivation by someone else (a stolen PIN and one hijacked touch) is a permanent loss. With a signature it would be one signature.
-- Requests never ask for `up=false`. Both refusal codes are a key saying "touch required".
+- Requests never ask for `up=false`. `UP_REQUIRED` and `UNSUPPORTED_OPTION` are both a key saying "touch required"; YubiKeys send the first.
 - The output and everything derived from it pass through unlocked memory in libfido2. That is the same exposure as the PIN's during an assertion.
-- Discoverable credentials are a limited resource. Yubico's numbers (not checked here): 25 before firmware 5.7, 100 from then on.
+- Discoverable credentials are a limited resource. Yubico's numbers: 25 before firmware 5.7, 100 from then on (the 5.8 above reported 98 remaining).
