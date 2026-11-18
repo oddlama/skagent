@@ -20,7 +20,7 @@ async-trait.workspace = true
 clap.workspace = true
 colored.workspace = true
 futures-util.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["rand"] }
 serde.workspace = true
 sha2.workspace = true
 signature.workspace = true
@@ -38,6 +38,8 @@ zbus.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# Signs pairing challenges in tests, like a security key would.
+ed25519-dalek = "2"
 # Paused time for the logind retry loop.
 tokio = { workspace = true, features = ["test-util"] }
 

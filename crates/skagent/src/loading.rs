@@ -2,6 +2,7 @@
 
 use std::time::Instant;
 
+use skagent_fido::PairingCredential;
 use skagent_popup::{Key, SecurityKey, State};
 use skagent_secret::SecretBuffer;
 
@@ -15,6 +16,8 @@ use crate::signer::SigningTicket;
 pub(crate) struct PreparedLoad {
     pub identities: Vec<SkIdentity>,
     pub pin: SecretBuffer,
+    /// skagent's pairing on the key loaded from, if paired.
+    pub pairing: Option<PairingCredential>,
     pub routed: RoutedDevice,
     pub retries: u32,
     pub accepted_at: Instant,

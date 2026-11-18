@@ -102,7 +102,8 @@ pkgs.testers.runNixOSTest {
             "systemd-run --unit skagent --uid alice"
             " --setenv SKAGENT_TEST_ANSWER_FILE=${dir}/pin"
             " --setenv SKAGENT_TEST_ASKPASS_LOG=${dir}/prompts"
-            " ${package}/bin/skagent serve --log skagent=debug --socket ${socket}"
+            # No pairing: its first-use touch is vm-popup's subject.
+            " ${package}/bin/skagent serve --log skagent=debug --no-pairing --socket ${socket}"
             " --askpass /run/current-system/sw/bin/test-askpass"
         )
         client.wait_for_file("${socket}")

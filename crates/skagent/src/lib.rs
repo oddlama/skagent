@@ -23,6 +23,7 @@ pub mod logging;
 pub mod logind;
 pub mod notify;
 pub mod output;
+pub mod pairing;
 pub mod pin_cache;
 pub mod pinentry;
 pub mod popup;

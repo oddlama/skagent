@@ -130,6 +130,7 @@ home-manager counterparts:
 | `--popup PATH` | `popup.enable` | | Use skagent's own popup instead of pinentry, see below. |
 | `--no-touch-notification` | `touchNotification` | | Don't show a notification while a key waits for a touch. |
 | `--plug-in-timeout 1m` | `plugInTimeout` | `15s` | How long a request waits for its security key to be plugged in. `0` fails right away. |
+| `--no-pairing` | `pairing` | on | Don't pair with security keys on first use, see below. |
 | `--secret-memory memfd-secret` | `secretMemory` | `locked` | Keep PINs in `memfd_secret(2)` memory, which is also removed from the kernel's direct map. The system can't hibernate while skagent holds any. |
 
 A policy rule selects keys by `application` or by `fingerprint` (as
@@ -234,6 +235,14 @@ skagent never silently switches to another security key.
 If the security key isn't plugged in, skagent waits for it for 15 seconds and
 tells you which YubiKey to plug in, in the popup or in a notification. Pressing
 Ctrl-C on `ssh` stops the wait.
+
+The first time you sign with a security key, skagent asks you to touch it once
+more. That pairs skagent with the key: it puts a small credential of its own on
+the key and remembers it. From then on, before your PIN goes to the key, the key
+has to sign a random challenge with that credential, without a touch. A fake key
+that pretends to be yours can't, so it never gets your PIN. Pairing happens once
+per key. On another machine, skagent finds the credential with your PIN, no
+extra touch needed. You can skip it with Esc in the popup.
 
 ### Agent forwarding
 

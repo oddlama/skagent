@@ -63,6 +63,8 @@ pkgs.testers.runNixOSTest {
       programs.bash.enable = true;
       services.skagent = {
         enable = true;
+        # Its first-use touch is vm-popup's subject.
+        pairing = false;
         pinentry.package = envPinentry;
         loadAtLogin = true;
         pinPolicies = [

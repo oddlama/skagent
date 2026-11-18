@@ -145,13 +145,25 @@ pkgs.testers.runNixOSTest {
         retry(lambda _last_try: "machine sleeps (logind)" in journal("skagent"), timeout_seconds=10)
         alice_ok("SSH_AUTH_SOCK=${socket} ssh-add ~/id_sk")
 
-    with subtest("a first signature shows PIN, touch and the result in one popup"):
+    with subtest("a first signature shows PIN, touch, pairing and the result in one popup"):
         mark = len(popup_log())
+        requested = touches()
+        start_sign("first")
+        retry(lambda _last_try: touches() == requested + 1, timeout_seconds=10)
         touch()
-        sign_ok()
+        # The key just signed with a PIN typed for it: pair, with one more touch.
+        retry(lambda _last_try: "pair" in names(mark), timeout_seconds=10)
+        retry(lambda _last_try: touches() == requested + 2, timeout_seconds=10)
+        touch()
+        finished("first")
         closed()
-        assert names(mark) == ["pin", "touch", "signed"], names(mark)
-        pin_state, touch_state, _ = shown(mark)
+        assert names(mark) == ["pin", "touch", "pair", "signed"], names(mark)
+        pin_state, touch_state, pair_state, _ = shown(mark)
+        assert pair_state["security_key"] == {"name": "Desk 5C NFC"}, pair_state
+        assert 'operation="makeCredential" rp_id="skagent:pairing"' in journal("testkey")
+        remembered = alice_ok("cat ~/.local/state/skagent/bindings.toml")
+        assert "serial = 12345678" in remembered and "pairing-key = " in remembered, remembered
+        pairing_key = next(line for line in remembered.splitlines() if line.startswith("pairing-key"))
         assert pin_state["key"] == {"emoji": "🦊", "label": "github-work", "fingerprint": fingerprint}, pin_state
         assert pin_state["request"] == {"kind": "sign", "namespace": "test"}, pin_state
         assert pin_state["security_key"] == {"name": "Desk 5C NFC"}, pin_state
@@ -267,7 +279,7 @@ pkgs.testers.runNixOSTest {
         assert select["key"]["label"] == "github-work", select
         assert touch_state["again"] is True, touch_state
 
-    with subtest("a replugged YubiKey is recognized by its serial, without a selection touch"):
+    with subtest("a replugged YubiKey is recognized by its pairing, without a selection touch"):
         unplug("popup key", "${unpluggedFile}")
         plug_in("popup key", "${unpluggedFile}")
         mark = len(popup_log())
@@ -353,27 +365,56 @@ pkgs.testers.runNixOSTest {
         assert names(mark) == ["no-key", "pin", "touch", "signed"], names(mark)
         plug_in("other key", "${otherUnpluggedFile}")
 
-    with subtest("a second key claiming the YubiKey's serial gets no PIN"):
+    with subtest("on another machine, the pairing is found without a touch"):
+        # A fresh agent remembering nothing stands in for another machine.
+        machine.succeed("systemctl stop skagent")
+        machine.wait_until_fails("test -e ${socket}")
+        alice_ok("rm ~/.local/state/skagent/bindings.toml")
+        machine.succeed("${agent "skagent" "/run/current-system/sw/bin/fake-popup"}")
+        machine.wait_for_file("${socket}")
+        alice_ok("SSH_AUTH_SOCK=${socket} ssh-add ~/id_sk")
+        unplug("other key", "${otherUnpluggedFile}")
+        mark = len(popup_log())
+        requested = touches()
+        touch()
+        sign_ok()
+        closed()
+        assert names(mark) == ["pin", "touch", "signed"], names(mark)
+        assert touches() == requested + 1, "paired with a touch again"
+        assert "found skagent's pairing on the security key" in journal("skagent")
+        # The same credential, found rather than replaced.
+        assert pairing_key in alice_ok("cat ~/.local/state/skagent/bindings.toml")
+        plug_in("other key", "${otherUnpluggedFile}")
+
+    with subtest("a key claiming the paired YubiKey's serial is told apart by the pairing"):
         machine.succeed(
             "systemd-run --unit impostor --setenv SKAGENT_TESTKEY_PIN=111111"
             " ${testkey}/bin/skagent-testkey --touch auto --name 'impostor key' --serial 12345678"
         )
         machine.wait_until_succeeds("fido2-token -L | grep -F 'impostor key' >/dev/null", timeout=10)
-        # Replugged, the real key's binding knows its serial only.
+        # Replugged next to the fake, the real key proves the pairing.
         unplug("popup key", "${unpluggedFile}")
         plug_in("popup key", "${unpluggedFile}")
+        mark = len(popup_log())
+        touch()
+        sign_ok()
+        closed()
+        assert names(mark) == ["pin", "touch", "signed"], names(mark)
+        # Swapped for the fake: refused before any PIN.
+        unplug("popup key", "${unpluggedFile}")
         mark = len(popup_log())
         status, out = sign()
         assert status != 0, out
         closed()
         assert names(mark) == ["failed"], names(mark)
         failed = shown(mark)[-1]
-        assert failed["reason"] == "duplicate", failed
+        assert failed["reason"] == "unrecognized", failed
         assert failed["security_key"] == {"name": "Desk 5C NFC"}, failed
-        assert "one of them pretends to be it" in journal("skagent")
+        assert "can't prove skagent's pairing" in journal("skagent")
         assert "touch requested" not in journal("impostor"), journal("impostor")
         machine.succeed("systemctl stop impostor")
         machine.wait_until_fails("fido2-token -L | grep -F 'impostor key' >/dev/null", timeout=10)
+        plug_in("popup key", "${unpluggedFile}")
 
     with subtest("a key the only security key doesn't hold fails, saying so"):
         # A key of the other security key's own; then only the popup key stays.

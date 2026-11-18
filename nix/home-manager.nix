@@ -90,6 +90,7 @@ let
     cfg.secretMemory
   ]
   ++ lib.optional (!cfg.touchNotification) "--no-touch-notification"
+  ++ lib.optional (!cfg.pairing) "--no-pairing"
   ++ [
     "--plug-in-timeout"
     cfg.plugInTimeout
@@ -267,6 +268,17 @@ in
       type = types.bool;
       default = true;
       description = "Show a desktop notification while a security key waits for a touch.";
+    };
+
+    pairing = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Pair with each security key on first use: one more touch, once per
+        key, after which skagent checks the key's pairing before a PIN goes
+        there, so a device claiming to be it gets none. Pairings made before
+        are checked either way.
+      '';
     };
 
     plugInTimeout = mkOption {

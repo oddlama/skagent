@@ -155,7 +155,8 @@ pkgs.testers.runNixOSTest {
         machine.succeed(
             "systemd-run --unit skagent --uid alice"
             " --setenv DBUS_SESSION_BUS_ADDRESS=${notifications.address}"
-            " ${package}/bin/skagent serve --socket ${socket} --askpass ${askpass}/bin/multi-askpass"
+            # No pairing: its first-use touch is vm-popup's subject.
+            " ${package}/bin/skagent serve --no-pairing --socket ${socket} --askpass ${askpass}/bin/multi-askpass"
         )
         machine.wait_for_file("${socket}")
         retry(lambda _last_try: "machine sleeps (logind)" in journal("skagent"), timeout_seconds=10)

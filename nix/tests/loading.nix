@@ -66,7 +66,8 @@ pkgs.testers.runNixOSTest {
             " --setenv SKAGENT_TEST_ANSWER_FILE=${dir}/pin"
             " --setenv SKAGENT_TEST_ASKPASS_LOG=${dir}/prompts"
             " --setenv SKAGENT_TEST_ASKPASS_GATE=${dir}/hold-prompt"
-            f" ${package}/bin/skagent serve --socket ${socket} --askpass /run/current-system/sw/bin/test-askpass {extra}"
+            # No pairing: its first-use touch is vm-popup's subject.
+            f" ${package}/bin/skagent serve --no-pairing --socket ${socket} --askpass /run/current-system/sw/bin/test-askpass {extra}"
         )
         machine.wait_for_file("${socket}")
         retry(lambda _last_try: "machine sleeps (logind)" in journal(unit), timeout_seconds=10)

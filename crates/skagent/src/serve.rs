@@ -167,7 +167,8 @@ pub async fn run(
     let mut signer = Signer::new(popup.is_none().then_some(prompt), policy)
         .with_pin_policies(args.pin_policies)
         .with_config(Arc::new(config))
-        .with_plug_in_timeout(args.plug_in_timeout);
+        .with_plug_in_timeout(args.plug_in_timeout)
+        .with_pairing(!args.no_pairing);
     match default_bindings_path(
         std::env::var_os("XDG_STATE_HOME").as_deref(),
         std::env::var_os("HOME").as_deref(),

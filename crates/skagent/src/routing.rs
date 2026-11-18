@@ -11,13 +11,16 @@ use std::sync::{Arc, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
-use skagent_fido::{Device, hid_devices, yubikey_serial};
+use skagent_fido::{Device, ErrorKind, PairingCredential, error_kind, hid_devices, yubikey_serial};
 use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard, OwnedRwLockReadGuard, RwLock};
 
-use crate::bindings::{Bindings, Missing, NotPluggedIn, Resolution, SerialClaimedTwice};
+use crate::bindings::{
+    Bindings, Missing, NotPluggedIn, Resolution, SerialClaimedTwice, Unrecognized,
+};
 use crate::cancel::{Abandoned, AbandonedFlag};
 use crate::device::DeviceIdentity;
 use crate::notify::Notifier;
+use crate::pairing::{self, Proof};
 use crate::pin_cache::CredentialKey;
 use crate::signer::SigningTicket;
 
@@ -135,10 +138,41 @@ impl Serials {
     }
 }
 
+/// What plug-ins answered to pairing challenges, by the pairing's public
+/// key. Only definite answers: a plug-in can't become another device, so it
+/// is asked once.
+#[derive(Debug, Default)]
+pub(crate) struct Proofs(std::sync::Mutex<HashMap<(DeviceIdentity, [u8; 32]), bool>>);
+
+impl Proofs {
+    fn get(&self, identity: &DeviceIdentity, public_key: &[u8; 32]) -> Proof {
+        match self.lock().get(&(identity.clone(), *public_key)) {
+            Some(true) => Proof::Proven,
+            Some(false) => Proof::Disproven,
+            None => Proof::Unknown,
+        }
+    }
+
+    fn set(&self, identity: &DeviceIdentity, public_key: &[u8; 32], proven: bool) {
+        self.lock().insert((identity.clone(), *public_key), proven);
+    }
+
+    /// Forgets plug-ins that aren't connected any more.
+    fn retain(&self, connected: &[DeviceIdentity]) {
+        self.lock()
+            .retain(|(identity, _), _| connected.contains(identity));
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<(DeviceIdentity, [u8; 32]), bool>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct Router {
     bindings: Mutex<Bindings>,
     serials: Arc<Serials>,
+    proofs: Arc<Proofs>,
     devices: KeyedLocks<DeviceIdentity>,
     pub credentials: KeyedLocks<CredentialKey>,
     /// Readers are assertions; a writer is touch selection across devices.
@@ -203,15 +237,64 @@ impl Router {
         self.route_key(None, ticket, "", on_select, on_wait).await
     }
 
-    /// The connected devices, with the serials resolving `key` needs.
+    /// The connected devices, with the serials and pairing proofs resolving
+    /// `key` needs.
     async fn candidates(&self, key: Option<&CredentialKey>) -> Result<Vec<DeviceIdentity>> {
         let candidates = connected().await?;
         self.serials.retain(&candidates);
-        let needs_serials = self.bindings.lock().await.needs_serials(key, &candidates);
+        self.proofs.retain(&candidates);
+        let (needs_serials, pairing) = {
+            let bindings = self.bindings.lock().await;
+            (
+                bindings.needs_serials(key, &candidates),
+                bindings.needs_proof(key, &candidates).cloned(),
+            )
+        };
         if needs_serials {
             self.learn_serials(&candidates).await;
         }
+        if let Some(pairing) = pairing {
+            self.prove(&pairing, &candidates).await;
+        }
         Ok(candidates)
+    }
+
+    /// Challenges the plug-ins not asked yet to prove `pairing`, each under
+    /// its device lock, silently (no touch, no PIN).
+    async fn prove(&self, pairing: &PairingCredential, candidates: &[DeviceIdentity]) {
+        for identity in candidates {
+            if self.proofs.get(identity, &pairing.public_key) != Proof::Unknown {
+                continue;
+            }
+            let Ok(operation) = self
+                .devices
+                .lock_within(identity.clone(), SERIAL_LOCK_WAIT)
+                .await
+            else {
+                continue;
+            };
+            let (serials, proofs) = (Arc::clone(&self.serials), Arc::clone(&self.proofs));
+            let (identity, pairing) = (identity.clone(), pairing.clone());
+            // The device lock goes along, as for serials.
+            let asked = tokio::task::spawn_blocking(move || {
+                let _operation = operation;
+                let proof = challenge(&identity, &serials, &pairing);
+                tracing::debug!(
+                    device = identity.path(),
+                    ?proof,
+                    "asked for skagent's pairing"
+                );
+                match proof {
+                    Proof::Proven => proofs.set(&identity, &pairing.public_key, true),
+                    Proof::Disproven => proofs.set(&identity, &pairing.public_key, false),
+                    Proof::Unknown => {}
+                }
+            })
+            .await;
+            if let Err(error) = asked {
+                tracing::debug!(%error, "the pairing challenge thread failed");
+            }
+        }
     }
 
     /// Reads the serials of new plug-ins, each under its device lock.
@@ -247,11 +330,21 @@ impl Router {
         key: Option<&CredentialKey>,
         candidates: &[DeviceIdentity],
     ) -> Resolution {
-        let serials = &self.serials;
-        self.bindings
-            .lock()
-            .await
-            .resolve(key, candidates, |identity| serials.cached(identity))
+        let (serials, proofs) = (&self.serials, &self.proofs);
+        let bindings = self.bindings.lock().await;
+        let pairing = bindings
+            .needs_proof(key, candidates)
+            .map(|pairing| pairing.public_key);
+        bindings.resolve(
+            key,
+            candidates,
+            |identity| serials.cached(identity),
+            |identity| {
+                pairing.map_or(Proof::Unknown, |public_key| {
+                    proofs.get(identity, &public_key)
+                })
+            },
+        )
     }
 
     async fn route_key(
@@ -272,6 +365,7 @@ impl Router {
                 Resolution::Direct(identity) => return self.open_direct(identity, read).await,
                 Resolution::Touch => break,
                 Resolution::Ambiguous { serial } => return Err(claimed_twice(serial)),
+                Resolution::Unrecognized { serial } => return Err(unrecognized(serial)),
                 Resolution::Wait(missing) => {
                     drop(read);
                     if started.elapsed() >= self.plug_in_timeout {
@@ -315,6 +409,7 @@ impl Router {
                 .into());
             }
             Resolution::Ambiguous { serial } => return Err(claimed_twice(serial)),
+            Resolution::Unrecognized { serial } => return Err(unrecognized(serial)),
             Resolution::Touch => {}
         }
         let body = if key.is_some() {
@@ -388,14 +483,47 @@ impl Router {
     }
 }
 
-/// Refuses a request because two devices report the bound serial.
-fn claimed_twice(serial: u32) -> anyhow::Error {
+/// Refuses a request because two devices claim to be the bound key.
+fn claimed_twice(serial: Option<u32>) -> anyhow::Error {
     tracing::warn!(
         serial,
-        "two plugged-in security keys report the serial of the YubiKey holding the key; one of them \
-         pretends to be it, refusing the request"
+        "two plugged-in security keys claim to be the one holding the key; one of them pretends, \
+         refusing the request"
     );
     SerialClaimedTwice { serial }.into()
+}
+
+/// Refuses a request because the device claiming a paired key's serial
+/// can't prove the pairing.
+fn unrecognized(serial: u32) -> anyhow::Error {
+    tracing::warn!(
+        serial,
+        "a security key reports the serial of the paired YubiKey but can't prove skagent's \
+         pairing; refusing the request"
+    );
+    Unrecognized { serial }.into()
+}
+
+/// Asks the plug-in `identity` to prove `pairing`.
+fn challenge(identity: &DeviceIdentity, serials: &Serials, pairing: &PairingCredential) -> Proof {
+    let answer = pairing::challenge().and_then(|challenge| {
+        let (mut device, _) = open_checked(identity, serials)?;
+        let statement = device.sign_challenge(pairing, challenge)?;
+        Ok(pairing::verify(pairing, &challenge, &statement))
+    });
+    match answer {
+        Ok(true) => Proof::Proven,
+        Ok(false) => Proof::Disproven,
+        Err(error) if error_kind(&error) == Some(ErrorKind::NoCredentials) => Proof::Disproven,
+        Err(error) => {
+            tracing::debug!(
+                device = identity.path(),
+                error = %format!("{error:#}"),
+                "a pairing challenge failed"
+            );
+            Proof::Unknown
+        }
+    }
 }
 
 fn busy(waited: Duration) -> anyhow::Error {

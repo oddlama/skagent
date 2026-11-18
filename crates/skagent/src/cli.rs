@@ -122,6 +122,13 @@ pub struct ServeArgs {
     /// fails right away.
     #[arg(long, value_parser = parse_duration, default_value = "15s")]
     pub plug_in_timeout: Duration,
+
+    /// Don't pair with security keys on first use. Pairing takes one more
+    /// touch, once per security key, and lets skagent tell the key from a
+    /// device claiming to be it before a PIN goes there. Pairings made
+    /// before are still checked.
+    #[arg(long)]
+    pub no_pairing: bool,
 }
 
 /// Where secrets live (`--secret-memory`).

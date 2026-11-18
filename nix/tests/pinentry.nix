@@ -176,7 +176,7 @@ pkgs.testers.runNixOSTest {
         alice_ok("SSH_AUTH_SOCK=${socket} ssh-add ~/id_sk")
         assert screenshot("before") < 0.2, "the empty output isn't dark"
 
-    with subtest("a signature goes through the popup: PIN, touch, signed"):
+    with subtest("a signature goes through the popup: PIN, touch, pairing declined, signed"):
         mark = len(popup_lines())
         start_sign("first")
         wait_for_state(mark, "pin")
@@ -188,11 +188,18 @@ pkgs.testers.runNixOSTest {
         settle()
         assert screenshot("touch") > 0.8, "the popup isn't showing"
         touch()
+        # The first signature on the key offers to pair; Escape declines.
+        wait_for_state(mark, "pair")
+        settle()
+        assert screenshot("pair") > 0.8, "the popup isn't showing"
+        type_keys("-k Escape")
         # "signed" shows for 900 ms, too short to catch on a screenshot.
         wait_for_state(mark, "signed")
         finished("first")
         closed()
-        assert states(mark) == ["pin", "touch", "signed"], states(mark)
+        assert states(mark) == ["pin", "touch", "pair", "signed"], states(mark)
+        assert logged(mark, "cancelled seq="), popup_lines()
+        assert "pairing declined in the popup" in journal("skagent")
         out = alice_ok("ssh-keygen -Y verify -f ~/allowed -I alice -n git -s ~/first.sig < ~/first")
         assert "Good" in out, out
         assert "${pin}" not in journal("skagent"), "the PIN was logged"

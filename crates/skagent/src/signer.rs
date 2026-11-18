@@ -3,21 +3,23 @@
 //! One operation per device and per credential. Bound devices can sign in
 //! parallel; touch selection is exclusive across devices.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use sha2::{Digest as _, Sha256};
 use signature::Verifier as _;
-use skagent_fido::{AssertRequest, ErrorKind, ResidentCredential, Statement, error_kind};
+use skagent_fido::{
+    AssertRequest, ErrorKind, PairingCredential, ResidentCredential, Statement, error_kind,
+};
 use skagent_popup::{Failure, Host, Key, Mistake, Queued, Request, SecurityKey, State as Shown};
 use skagent_secret::SecretBuffer;
 use ssh_agent_lib::ssh_key::{Algorithm, Signature};
 use tokio::sync::{Mutex, watch};
 
-use crate::bindings::{Bindings, Missing, NotPluggedIn, SerialClaimedTwice};
+use crate::bindings::{Bindings, Missing, NotPluggedIn, SerialClaimedTwice, Unrecognized};
 use crate::cancel::{DeviceInterrupt, Ended};
 use crate::config::Config;
 use crate::destination::{Destination, Purpose};
@@ -54,6 +56,11 @@ pub struct Signer {
     /// skagent's own popup (`--popup`), which replaces the prompt and the
     /// notifications.
     popup: Option<Arc<Popup>>,
+    /// Whether to pair with security keys on first use (`--no-pairing`).
+    pairing: bool,
+    /// Plug-ins pairing failed on or the user declined it for: not asked
+    /// again until replugged.
+    pairing_skipped: std::sync::Mutex<HashSet<DeviceIdentity>>,
 }
 
 /// Captured while the agent authorizes a request, before it queues for the
@@ -175,7 +182,17 @@ impl Signer {
             pin_policies: Vec::new(),
             config: Arc::default(),
             popup: None,
+            pairing: true,
+            pairing_skipped: std::sync::Mutex::default(),
         }
+    }
+
+    /// The same signer, pairing with security keys on first use or not.
+    /// Pairings made before are checked either way.
+    #[must_use]
+    pub fn with_pairing(mut self, pairing: bool) -> Self {
+        self.pairing = pairing;
+        self
     }
 
     /// The same signer, showing every request in `popup`: one request at a
@@ -254,7 +271,8 @@ impl Signer {
     }
 
     /// Passes routing's outcome on. If routing failed over a known YubiKey
-    /// (not plugged in, its serial claimed twice), the result names it.
+    /// (not plugged in, its serial claimed twice or without the pairing),
+    /// the result names it.
     fn waited_for(
         &self,
         routed: Result<RoutedDevice>,
@@ -268,7 +286,12 @@ impl Signer {
                     .or_else(|| {
                         cause
                             .downcast_ref::<SerialClaimedTwice>()
-                            .map(|claimed| claimed.serial)
+                            .and_then(|claimed| claimed.serial)
+                    })
+                    .or_else(|| {
+                        cause
+                            .downcast_ref::<Unrecognized>()
+                            .map(|unrecognized| unrecognized.serial)
                     })
             });
             if let Some(serial) = serial {
@@ -544,9 +567,18 @@ impl Signer {
                 .identity
                 .ensure_present()
                 .context("during resident loading")?;
+            // The PIN worked and the key holds SSH keys: pair with it, once.
+            let (routed, pairing) = if credentials.is_empty() {
+                (routed, None)
+            } else {
+                self.pair(None, ticket, session.as_deref_mut(), routed, &pin)
+                    .await?
+            };
+            ticket.check()?;
             return Ok(PreparedLoad {
                 identities: credentials.iter().map(SkIdentity::from_resident).collect(),
                 pin,
+                pairing,
                 routed,
                 retries,
                 accepted_at: Instant::now(),
@@ -635,6 +667,7 @@ impl Signer {
                 &credential_key(identity),
                 device.clone(),
                 loaded.routed.serial,
+                loaded.pairing.clone(),
             );
         }
         loaded.pin.clear();
@@ -916,8 +949,18 @@ impl Signer {
                     source.pin().is_none() || statement.user_verified(),
                     "the assertion lacks user verification"
                 );
+                // The key just proved it holds the SSH key with a PIN the
+                // user typed: the moment to pair with it, once.
+                let pairing = match &source {
+                    PinSource::User(pin) => {
+                        self.pair(Some(&signing.key), ticket, session, routed, pin)
+                            .await?
+                            .1
+                    }
+                    PinSource::Cache(_) | PinSource::None => None,
+                };
                 let policy = self.policy_for(identity);
-                self.remember(signing, source, retries_after, policy)
+                self.remember(signing, source, retries_after, policy, pairing)
                     .await?;
                 Ok(Attempt::Signed(signature))
             }
@@ -987,6 +1030,154 @@ impl Signer {
                 ),
             )
         }))
+    }
+
+    /// Pairs with the security key `routed`, right after a PIN the user
+    /// typed worked on it (trust on first use, see `pairing.rs`): finds
+    /// skagent's pairing credential there, or creates one, which takes one
+    /// more touch. `key`: the SSH key that just signed, skipped if already
+    /// paired; `None` when loading. Hands the device back with the pairing.
+    ///
+    /// Pairing never fails the request: a key it fails on, or that the user
+    /// declined it for, isn't asked again until it's replugged.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if the device thread panicked.
+    async fn pair(
+        &self,
+        key: Option<&CredentialKey>,
+        ticket: &SigningTicket,
+        mut session: Option<&mut PopupSession>,
+        routed: RoutedDevice,
+        pin: &SecretBuffer,
+    ) -> Result<(RoutedDevice, Option<PairingCredential>)> {
+        let paired = match key {
+            Some(key) => self.router.bindings().await.pairing_of(key).is_some(),
+            None => false,
+        };
+        if !self.pairing || paired || self.pairing_skipped(&routed.identity) {
+            return Ok((routed, None));
+        }
+        let pin = match SecretBuffer::from_slice(pin.expose()) {
+            Ok(pin) => pin,
+            Err(error) => {
+                tracing::warn!(error = %format!("{error:#}"), "not pairing: can't copy the PIN");
+                return Ok((routed, None));
+            }
+        };
+        // Looking takes only the PIN: on another machine this is all.
+        let (mut routed, pin, found) = tokio::task::spawn_blocking(move || {
+            let mut routed = routed;
+            let found = routed.device.find_pairing(&pin);
+            (routed, pin, found)
+        })
+        .await
+        .context("the pairing thread failed")?;
+        match found {
+            Ok(Some(pairing)) => {
+                tracing::info!(
+                    security_key = %self.device_name(&routed),
+                    "found skagent's pairing on the security key"
+                );
+                return Ok((routed, Some(pairing)));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    security_key = %self.device_name(&routed),
+                    error = %format!("{error:#}"),
+                    "can't look for skagent's pairing; not pairing with this security key"
+                );
+                self.skip_pairing(&routed.identity);
+                return Ok((routed, None));
+            }
+        }
+        tracing::info!(
+            security_key = %self.device_name(&routed),
+            "touch the security key once more to pair skagent with it"
+        );
+        let notification = self.show_pair(session.as_deref_mut(), &routed);
+        let (interrupt, finished) = DeviceInterrupt::new(routed.device.canceller());
+        let worker = tokio::task::spawn_blocking(move || {
+            let _finished = finished;
+            let created = routed.device.create_pairing(&pin);
+            (routed, created)
+        });
+        let ((back, created), ended) = interrupt
+            .run(worker, ticket, popup_cancelled(session))
+            .await?;
+        routed = back;
+        drop(notification);
+        match (created, ended) {
+            (Ok(pairing), Ended::Finished) => {
+                tracing::info!(
+                    security_key = %self.device_name(&routed),
+                    "paired with the security key"
+                );
+                Ok((routed, Some(pairing)))
+            }
+            // The request's own checks refuse it next.
+            (_, Ended::Revoked) => Ok((routed, None)),
+            (_, Ended::Stopped) => {
+                tracing::info!("pairing declined in the popup");
+                self.skip_pairing(&routed.identity);
+                Ok((routed, None))
+            }
+            (Err(error), Ended::Finished) => {
+                tracing::warn!(
+                    security_key = %self.device_name(&routed),
+                    error = %format!("{error:#}"),
+                    "pairing with the security key failed"
+                );
+                self.skip_pairing(&routed.identity);
+                Ok((routed, None))
+            }
+        }
+    }
+
+    fn pairing_skipped(&self, device: &DeviceIdentity) -> bool {
+        self.pairing_skipped
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(device)
+    }
+
+    fn skip_pairing(&self, device: &DeviceIdentity) {
+        let mut skipped = self
+            .pairing_skipped
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Only plug-ins still connected matter; keeps the set small.
+        skipped.retain(|skipped| skipped.ensure_present().is_ok());
+        skipped.insert(device.clone());
+    }
+
+    /// Asks for the pairing touch: in the popup, else in a notification.
+    fn show_pair(
+        &self,
+        session: Option<&mut PopupSession>,
+        routed: &RoutedDevice,
+    ) -> Option<Notification> {
+        if let Some(session) = session {
+            show_best_effort(
+                session,
+                Shown::Pair {
+                    security_key: self.security_key(routed),
+                    timeout_ms: u64::try_from(TOUCH_TIMEOUT_HINT.as_millis()).unwrap_or(u64::MAX),
+                },
+            );
+            return None;
+        }
+        self.notifier.as_ref().map(|notifier| {
+            notifier.show(
+                "Touch your security key once more",
+                &format!(
+                    "To pair {} with skagent. Only this once.",
+                    self.device_name(routed)
+                ),
+            )
+        })
     }
 
     /// The PIN to use: cached if allowed, otherwise asked for, in the popup
@@ -1066,6 +1257,7 @@ impl Signer {
         source: PinSource,
         retries_after: Option<u32>,
         policy: CachePolicy,
+        pairing: Option<PairingCredential>,
     ) -> Result<()> {
         let (key, device) = (&signing.key, &signing.device);
         let mut state = self.state.lock().await;
@@ -1075,7 +1267,7 @@ impl Signer {
         state.last_failure.remove(key);
         let still_same_device = DeviceIdentity::of(device.path()).is_ok_and(|now| now == *device);
         if still_same_device {
-            bindings.bind(key, device.clone(), signing.serial);
+            bindings.bind(key, device.clone(), signing.serial, pairing);
         }
         if state.caching != Caching::Available {
             return Ok(());
@@ -1322,7 +1514,7 @@ fn wait_in_popup(session: &PopupSession, key: Option<Key>, config: Arc<Config>) 
         let state = match (missing, key.clone()) {
             (Missing::Elsewhere { serial, other }, Some(key)) => Shown::WrongKey {
                 key,
-                security_key: Some(name(serial)),
+                security_key: serial.map(name),
                 other: other.map(name),
             },
             (missing, key) => Shown::NoKey {
@@ -1421,6 +1613,12 @@ fn failure(error: &anyhow::Error, kind: Option<ErrorKind>) -> Failure {
         .find_map(|cause| cause.downcast_ref::<SerialClaimedTwice>());
     if claimed.is_some() {
         return Failure::Duplicate;
+    }
+    let unrecognized = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<Unrecognized>());
+    if unrecognized.is_some() {
+        return Failure::Unrecognized;
     }
     match kind {
         Some(ErrorKind::Transport) => Failure::Unplugged,

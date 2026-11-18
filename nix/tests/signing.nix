@@ -115,7 +115,8 @@ pkgs.testers.runNixOSTest {
             " --setenv SKAGENT_TEST_ASKPASS_GATE=${socketDir}/hold-prompt"
             " --setenv SKAGENT_TEST_PINENTRY_LOG=${pinentryLog}"
             " --setenv DBUS_SESSION_BUS_ADDRESS=${notifications.address}"
-            f" ${package}/bin/skagent serve --socket ${socket} {' '.join(args)}"
+            # No pairing: its first-use touch is vm-popup's subject.
+            f" ${package}/bin/skagent serve --no-pairing --socket ${socket} {' '.join(args)}"
         )
         machine.wait_for_file("${socket}")
         retry(lambda _last_try: "machine sleeps (logind)" in journal(unit), timeout_seconds=10)
