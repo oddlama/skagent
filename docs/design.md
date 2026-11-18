@@ -161,3 +161,4 @@ Following OpenSSH's ssh-agent (`destination.rs`, ported from `identity_permitted
 9. ~~Running as a service.~~ Done: systemd socket activation and a home-manager module (socket-activated user service, part of the graphical session, optional load at login), tested in `checks.vm-home-manager`. A NixOS module isn't planned: the agent runs per user, which is home-manager's job.
 10. macOS (aarch64-darwin): planned, see [`macos.md`](macos.md).
 11. skagent-pinentry, a popup of our own for PIN, touch and errors: planned, see [`pinentry.md`](pinentry.md).
+12. Decrypting age files with a key derived from the security key: planned, see [`age.md`](age.md).
