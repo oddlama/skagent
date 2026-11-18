@@ -10,6 +10,7 @@ needs your PIN and a touch. skagent caches the PIN securely and can handle multi
 - ⏱️ **Bounded PIN cache** with a hard lifetime, an optional idle timeout and per-key policies
 - 🔒 **Forgets your PIN** when the screen locks, the machine sleeps or the key is unplugged
 - 🗝️ **Multiple security keys** with separate PIN caches, recognized by their serial number
+- 🤝 **Pairs with your security keys**, so a fake key that pretends to be yours never gets your PIN
 - 📥 **Loads resident keys** straight from the security key, no stub files needed
 - 🌍 **Agent forwarding and `ssh-add -h`** destination constraints, checked like OpenSSH does
 - 💬 **Prompts that tell you what you sign**, plus a notification while the key waits for a touch
@@ -226,23 +227,28 @@ sign. From then on skagent remembers which security key holds which key, so
 signatures need just one touch. Keys on different security keys can even sign
 at the same time.
 
-skagent recognizes a YubiKey by its serial number, so it still knows the key
-after you replug it or restart the agent. It writes this down in
-`~/.local/state/skagent/bindings.toml`. Other security keys have no serial, so
-after a replug you pick them by touch again, even if only one is plugged in.
-skagent never silently switches to another security key.
+skagent recognizes a YubiKey by its serial number and any paired security key
+by its pairing (see below), so it still knows the key after you replug it or
+restart the agent. It writes this down in `~/.local/state/skagent/bindings.toml`.
+An unpaired key without a serial you pick by touch again after a replug, even if
+only one is plugged in. skagent never silently switches to another security key.
 
 If the security key isn't plugged in, skagent waits for it for 15 seconds and
 tells you which YubiKey to plug in, in the popup or in a notification. Pressing
 Ctrl-C on `ssh` stops the wait.
 
+### Pairing
+
 The first time you sign with a security key, skagent asks you to touch it once
 more. That pairs skagent with the key: it puts a small credential of its own on
-the key and remembers it. From then on, before your PIN goes to the key, the key
+the key and remembers it. From then on, before your PIN goes to a key, the key
 has to sign a random challenge with that credential, without a touch. A fake key
-that pretends to be yours can't, so it never gets your PIN. Pairing happens once
-per key. On another machine, skagent finds the credential with your PIN, no
-extra touch needed. You can skip it with Esc in the popup.
+that pretends to be yours, down to your YubiKey's serial number, can't do that,
+so it never gets your PIN.
+
+You pair each key once. On your other machines, skagent finds the credential
+with your PIN, no extra touch needed. Press Esc in the popup to skip pairing, or
+turn it off with `--no-pairing`.
 
 ### Agent forwarding
 
@@ -280,12 +286,13 @@ Protected:
 - **Other users** can't use the agent: its socket is private, and skagent checks every client's user id
 - **A hostile host with your forwarded agent** still needs a touch for every signature, and `ssh-add -h` limits where keys work
 - **Other processes of yours** can't read the agent's memory, since core dumps and ptrace are disabled
+- **A fake security key** swapped in for yours, or plugged in next to it, gets no PIN once skagent paired with your key
 
 Not protected:
 
 - **Malware running as you** in an unlocked session can get signatures whenever you touch the key, like with any agent. It could also log your PIN while you type it.
 - **root** can do anything anyway.
-- **A malicious USB device** that pretends to hold your key receives the PIN, same as with OpenSSH.
+- **A malicious USB device** you use before skagent paired with your real key, or one that sits between your key and the computer and passes its messages on, receives the PIN, same as with OpenSSH.
 
 Have a look at [`docs/design.md`](docs/design.md) for the details, and at
 [`docs/research`](docs/research) for how OpenSSH and GnuPG handle PINs.
