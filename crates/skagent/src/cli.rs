@@ -34,6 +34,18 @@ pub enum Command {
     /// Load resident Ed25519 SSH keys from one security key. With multiple
     /// devices, touch the one to load. The running agent asks for its PIN.
     Load(LoadArgs),
+    /// Check the configuration file: fails if `serve` would refuse it or
+    /// skip any of its settings, and says which.
+    CheckConfig(CheckConfigArgs),
+}
+
+/// Arguments of `skagent check-config`.
+#[derive(Debug, Args)]
+pub struct CheckConfigArgs {
+    /// The file to check. Defaults to `$XDG_CONFIG_HOME/skagent/config.toml`;
+    /// a file given here must exist.
+    #[arg(long, env = "SKAGENT_CONFIG")]
+    pub config: Option<PathBuf>,
 }
 
 /// Arguments of `skagent load`.

@@ -1,7 +1,7 @@
 //! Styling for the few messages skagent writes to the terminal itself.
 //!
 //! Only the basic ANSI colors are used, so the user's terminal theme decides
-//! what they look like. Red marks errors, nothing else is colored yet.
+//! what they look like. Red marks errors, yellow warnings.
 
 use std::ffi::OsStr;
 
@@ -24,4 +24,10 @@ pub fn configure(color: bool) {
 #[must_use]
 pub fn error_label() -> ColoredString {
     "error:".red().bold()
+}
+
+/// The `warning:` prefix of messages about something that still works.
+#[must_use]
+pub fn warning_label() -> ColoredString {
+    "warning:".yellow().bold()
 }

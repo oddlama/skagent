@@ -7,7 +7,8 @@ use std::process::ExitCode;
 
 use anyhow::{Context as _, Result};
 use clap::Parser as _;
-use skagent::cli::{Cli, Command};
+use skagent::cli::{CheckConfigArgs, Cli, Command};
+use skagent::config::Config;
 use skagent::{client, hardening, logging, output, serve};
 
 fn main() -> ExitCode {
@@ -40,7 +41,7 @@ fn run(cli: Cli, color: bool) -> Result<()> {
         Command::Serve(_) => {
             skagent_fds::activated_listener().context("taking over the socket systemd passed")?
         }
-        Command::Forget(_) | Command::Load(_) => None,
+        Command::Forget(_) | Command::Load(_) | Command::CheckConfig(_) => None,
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -58,5 +59,33 @@ fn run(cli: Cli, color: bool) -> Result<()> {
             writeln!(io::stdout(), "Loaded {count} resident SSH key(s).")
                 .context("writing the resident-loading result")
         }
+        Command::CheckConfig(args) => check_config(&args),
     }
+}
+
+/// `skagent check-config`: the skipped settings on stderr, a verdict on
+/// stdout.
+fn check_config(args: &CheckConfigArgs) -> Result<()> {
+    let (path, required) = serve::config_path(args.config.as_deref())?;
+    if !required && !path.exists() {
+        return writeln!(
+            io::stdout(),
+            "No configuration at {}; skagent uses its defaults.",
+            path.display()
+        )
+        .context("writing the check's result");
+    }
+    let config = Config::load(&path, true)?;
+    let mut stderr = io::stderr().lock();
+    for warning in config.warnings() {
+        writeln!(stderr, "{} {warning}", output::warning_label())
+            .context("writing a skipped setting")?;
+    }
+    anyhow::ensure!(
+        config.warnings().is_empty(),
+        "skagent would skip {} setting(s) in {}",
+        config.warnings().len(),
+        path.display()
+    );
+    writeln!(io::stdout(), "{} is fine.", path.display()).context("writing the check's result")
 }
