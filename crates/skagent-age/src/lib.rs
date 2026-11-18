@@ -12,6 +12,7 @@
 //!   returns for [`batch_salt`], gives the recipient, and unwraps stanzas
 //!   to the [`FileKey`].
 //! - [`Recipient::wrap`]: the public side, for encrypting to an identity.
+//! - [`wire`]: the messages between the agent and its plugin.
 //!
 //! Underneath are X-Wing (ML-KEM-768 and X25519, combined with SHA3-256) as
 //! written down in [filippo.io/hpke-pq](https://filippo.io/hpke-pq), and the
@@ -30,6 +31,7 @@ mod identity;
 mod recipient;
 mod seed;
 mod stanza;
+pub mod wire;
 mod xwing;
 
 pub use identity::{Identity, PLUGIN_NAME};
