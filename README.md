@@ -206,6 +206,53 @@ Without home-manager, build it with `nix build .#pinentry` and pass it with
 with layer shell (sway, Hyprland, niri, KDE) it appears on top of everything
 and takes the keyboard. Elsewhere it's an ordinary window.
 
+### Styling the popup
+
+The popup comes in light and dark, following your desktop. Both are presets
+you can adjust: colours, fonts and size.
+
+```nix
+services.skagent.popup = {
+  appearance = "dark"; # or "light"; default: the desktop's
+  font = "IBM Plex Sans";
+  monospaceFont = "Iosevka";
+  fontFeatures.ss01 = true;
+  scale = 1.25; # the whole popup, text included
+  dark = {
+    surface = "#2e3440";
+    text = "#eceff4";
+    accent = "#88c0d0";
+  };
+};
+```
+
+The six base colours are `surface`, `text`, `accent`, `success`, `warning`
+and `error`. Borders, fields, tints and icon colours are mixed from them, so
+changing `surface` alone still looks right. Each of those can be set too:
+`muted-text`, `placeholder`, `border`, `field`, `field-error`, `on-accent`,
+`on-success`, `on-warning`, `avatar`, `avatar-warning`, `avatar-error`,
+`avatar-missing`, `device`, `ring-track`, `dot` and `dot-hollow`. A font
+that isn't installed falls back to the bundled Inter or JetBrains Mono.
+
+Without home-manager, the same goes in `~/.config/skagent/config.toml`:
+
+```toml
+[popup]
+appearance = "dark"
+font = "IBM Plex Sans"
+font-features = { ss01 = true }
+scale = 1.25
+
+[popup.dark]
+surface = "#2e3440"
+accent = "#88c0d0"
+```
+
+`skagent-pinentry --preview touch` shows a screen with your style, and
+`skagent check-config` lists settings skagent would skip. A typo in the
+style doesn't stop the agent: it logs a warning and keeps the preset's
+value.
+
 ### When skagent forgets your PIN
 
 skagent drops cached PINs when:

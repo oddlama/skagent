@@ -40,7 +40,10 @@ protocol is the `skagent-popup` crate, shared with the popup.
   sees the devices, the PIN retries and the requests. It sends the complete
   state to show; the popup only reports what the user did.
 - **Handshake.** The popup's first line is `READY 1` (protocol version), within
-  10 s of starting. Until the first state arrives it shows nothing.
+  10 s of starting. The agent answers with `{"type":"style","style":…}`: the
+  colours of both themes (presets with the `[popup]` overrides of the
+  configuration, mixed as `skagent_popup::style` says), fonts, OpenType
+  features and the scale. Until the first state arrives it shows nothing.
 - **Agent → popup:** `{"type":"show","seq":N,"waiting":W,"state":{"name":…}}`
   replaces what is shown; `{"type":"queue","waiting":W}` says how many other
   requests wait. States: `select`, `pin`, `load-pin`, `touch`, `signed`,
@@ -70,7 +73,16 @@ protocol is the `skagent-popup` crate, shared with the popup.
   the assertion on the key, like a client hangup: the cached PIN stays. A
   revoked request (lock, `skagent forget`, hangup) shows no final state.
 - **The popup** gets a `--preview <state> --theme light|dark` mode that renders
-  fixtures, for comparing against the design and for screenshot tests.
+  fixtures, for comparing against the design and for screenshot tests. It
+  reads the `[popup]` table of the configuration itself (`--config`, else
+  the default path), so users can try a style.
+- **Styles.** Light and dark are presets; the configuration overrides single
+  colours, fonts and the scale. Colours left unset but made from a changed
+  one are mixed anew (borders, fields, tints from surface and text; icons on
+  a colour in light ink where it reaches 3:1). Every size goes through
+  `Theme::px`, so the scale grows the window and everything in it. Long key
+  names wrap once, then end in `…`; in a subtitle only the last piece gives
+  way. A style setting that can't be used is a warning, never fatal.
 
 ## what the agent has to learn
 
