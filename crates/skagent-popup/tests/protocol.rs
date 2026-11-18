@@ -252,6 +252,7 @@ fn failure_reasons_have_their_names_on_the_wire() -> Result<()> {
         (Failure::Refused, "refused"),
         (Failure::NotOnKey, "not-on-key"),
         (Failure::NoPin, "no-pin"),
+        (Failure::NotPluggedIn, "not-plugged-in"),
         (Failure::Other, "other"),
     ] {
         let state = State::Failed {

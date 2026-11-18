@@ -221,7 +221,7 @@ pub struct Key {
 /// A YubiKey.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecurityKey {
-    /// The configured name, else `YubiKey ·<last four digits>`.
+    /// The configured name, else `YubiKey 12 345 678` (its serial).
     pub name: String,
 }
 
@@ -285,6 +285,8 @@ pub enum Failure {
     NotOnKey,
     /// The security key has no PIN set.
     NoPin,
+    /// The security key wasn't plugged in while the request waited for it.
+    NotPluggedIn,
     /// Something else; the agent's log says what. Also any reason this
     /// popup doesn't know yet.
     #[serde(other)]

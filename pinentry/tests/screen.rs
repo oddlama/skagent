@@ -282,6 +282,7 @@ fn failures_say_why_where_known() {
         (Failure::NotOnKey, true, "Desk 5C NFC doesn't hold work"),
         (Failure::NotOnKey, false, "Desk 5C NFC holds no SSH keys"),
         (Failure::NoPin, true, "Desk 5C NFC has no PIN set"),
+        (Failure::NotPluggedIn, true, "Desk 5C NFC wasn't plugged in"),
         (
             Failure::Other,
             true,
@@ -293,6 +294,10 @@ fn failures_say_why_where_known() {
     assert_eq!(
         failed(Failure::NotOnKey, true, None),
         "Your security key doesn't hold work"
+    );
+    assert_eq!(
+        failed(Failure::NotPluggedIn, true, None),
+        "No security key was plugged in"
     );
 }
 
