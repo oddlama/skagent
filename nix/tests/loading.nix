@@ -221,6 +221,13 @@ pkgs.testers.runNixOSTest {
         sign("work")
         retries("one")
         retries("two")
+        # Keys are listed as loaded, but those on a security key at hand first.
+        assert "ssh:second" in listed()[-1], listed()
+        machine.succeed("touch /run/load-one-unplugged")
+        machine.wait_until_fails("fido2-token -L | grep -F load-one >/dev/null", timeout=10)
+        assert "ssh:second" in listed()[0], listed()
+        machine.succeed("rm /run/load-one-unplugged")
+        machine.wait_until_succeeds("fido2-token -L | grep -F load-one >/dev/null", timeout=10)
         machine.succeed("systemctl stop key-two")
         machine.wait_until_fails("fido2-token -L | grep -F load-two >/dev/null")
 

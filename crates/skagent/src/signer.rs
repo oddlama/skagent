@@ -19,7 +19,9 @@ use skagent_secret::SecretBuffer;
 use ssh_agent_lib::ssh_key::{Algorithm, Signature};
 use tokio::sync::{Mutex, watch};
 
-use crate::bindings::{Bindings, Missing, NotPluggedIn, SerialClaimedTwice, Unrecognized};
+use crate::bindings::{
+    Bindings, Missing, NotPluggedIn, SerialClaimedTwice, Unrecognized, present_first,
+};
 use crate::cancel::{DeviceInterrupt, Ended};
 use crate::config::Config;
 use crate::destination::{Destination, Purpose};
@@ -1030,6 +1032,19 @@ impl Signer {
                 ),
             )
         }))
+    }
+
+    /// `identities`, the ones on a plugged-in security key first, then those
+    /// skagent can't place, then those on a security key that isn't plugged
+    /// in, otherwise in their order: of two keys a server accepts, ssh then
+    /// signs with the one at hand.
+    pub async fn present_first(&self, identities: Vec<SkIdentity>) -> Vec<SkIdentity> {
+        if identities.len() < 2 {
+            return identities;
+        }
+        let keys: Vec<CredentialKey> = identities.iter().map(credential_key).collect();
+        let presence = self.router.presence(&keys).await;
+        present_first(identities, &presence)
     }
 
     /// Pairs with the security key `routed`, right after a PIN the user

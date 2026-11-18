@@ -108,6 +108,34 @@ impl Missing {
     }
 }
 
+/// Where a key's security key is right now, as far as skagent can tell.
+/// Listing keys puts the ones on a plugged-in security key first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Presence {
+    /// Its security key is plugged in.
+    Present,
+    /// Not known: never used, or nothing tells the devices apart.
+    Unknown,
+    /// Its security key isn't plugged in.
+    Absent,
+}
+
+/// `items` reordered by their `presence`: present first, then unknown, then
+/// absent, each group in its order. Items without a presence count as
+/// unknown.
+#[must_use]
+pub fn present_first<T>(items: Vec<T>, presence: &[Presence]) -> Vec<T> {
+    let mut placed: Vec<(Presence, T)> = presence
+        .iter()
+        .copied()
+        .chain(std::iter::repeat(Presence::Unknown))
+        .zip(items)
+        .collect();
+    // Stable: equals keep their order.
+    placed.sort_by_key(|(presence, _)| *presence);
+    placed.into_iter().map(|(_, item)| item).collect()
+}
+
 /// A request gave up waiting for its security key to be plugged in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NotPluggedIn {
@@ -250,6 +278,34 @@ impl Bindings {
         self.entries.clear();
         if remembered {
             self.save();
+        }
+    }
+
+    /// Whether skagent knows where `key` lives.
+    #[must_use]
+    pub fn knows(&self, key: &CredentialKey) -> bool {
+        self.entries.contains_key(&key.digest())
+    }
+
+    /// Where `key`'s security key is among `devices`, decided like
+    /// [`Bindings::resolve`] would route it.
+    #[must_use]
+    pub fn presence(
+        &self,
+        key: &CredentialKey,
+        devices: &[DeviceIdentity],
+        serial_of: impl Fn(&DeviceIdentity) -> Option<u32>,
+        proof_of: impl Fn(&DeviceIdentity) -> Proof,
+    ) -> Presence {
+        if !self.knows(key) {
+            return Presence::Unknown;
+        }
+        match self.resolve(Some(key), devices, serial_of, proof_of) {
+            Resolution::Direct(_) => Presence::Present,
+            Resolution::Touch => Presence::Unknown,
+            Resolution::Wait(_)
+            | Resolution::Ambiguous { .. }
+            | Resolution::Unrecognized { .. } => Presence::Absent,
         }
     }
 

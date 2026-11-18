@@ -240,9 +240,45 @@ restart the agent. It writes this down in `~/.local/state/skagent/bindings.toml`
 An unpaired key without a serial you pick by touch again after a replug, even if
 only one is plugged in. skagent never silently switches to another security key.
 
-If the security key isn't plugged in, skagent waits for it for 15 seconds and
-tells you which YubiKey to plug in, in the popup or in a notification. Pressing
-Ctrl-C on `ssh` stops the wait.
+skagent lists keys on a plugged-in security key first. Of two keys a server
+accepts, ssh then uses the one you have at hand. If the security key isn't
+plugged in, skagent waits for it for 15 seconds and tells you which YubiKey to
+plug in, in the popup or in a notification. Pressing Ctrl-C on `ssh` stops the
+wait.
+
+### Several accounts on one host
+
+GitHub tells your accounts apart by the key you log in with, and takes the
+first one it knows. To use your work account for work repositories, tell git
+which key to use there, without host aliases. With home-manager:
+
+```nix
+programs.git.includes = [
+  {
+    # Repositories whose remote is in the work organization
+    condition = "hasconfig:remote.*.url:git@github.com:work-org/**";
+    contents.core.sshCommand = "ssh -o IdentitiesOnly=yes -i ~/.ssh/work.pub";
+  }
+];
+```
+
+Or in `~/.gitconfig`, for everything under `~/work`, clones included:
+
+```ini
+[includeIf "gitdir:~/work/"]
+    path = ~/.config/git/work.gitconfig
+```
+
+with `~/.config/git/work.gitconfig` holding:
+
+```ini
+[core]
+    sshCommand = ssh -o IdentitiesOnly=yes -i ~/.ssh/work.pub
+```
+
+`-i` only needs the public key; ssh then picks that key from skagent. For a
+resident key without a file, write it once with
+`ssh-add -L | grep work > ~/.ssh/work.pub`.
 
 ### Pairing
 

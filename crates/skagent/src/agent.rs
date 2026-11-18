@@ -460,17 +460,22 @@ impl AgentSession {
 #[async_trait]
 impl Session for AgentSession {
     async fn request_identities(&mut self) -> Result<Vec<Identity>, AgentError> {
-        let (mut state, now) = self.shared.state_now().await;
-        if state.lock.is_some() {
-            return Ok(Vec::new());
-        }
-        Ok(state
-            .identities
-            .identities(now)
-            .iter()
-            .filter(|identity| self.visible(identity).is_ok())
-            .map(SkIdentity::identity)
-            .collect())
+        let visible: Vec<SkIdentity> = {
+            let (mut state, now) = self.shared.state_now().await;
+            if state.lock.is_some() {
+                return Ok(Vec::new());
+            }
+            state
+                .identities
+                .identities(now)
+                .iter()
+                .filter(|identity| self.visible(identity).is_ok())
+                .cloned()
+                .collect()
+        };
+        // Not under the state lock: placing the keys may ask the devices.
+        let ordered = self.shared.signer.present_first(visible).await;
+        Ok(ordered.iter().map(SkIdentity::identity).collect())
     }
 
     async fn sign(&mut self, request: SignRequest) -> Result<Signature, AgentError> {

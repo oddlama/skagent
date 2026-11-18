@@ -15,7 +15,7 @@ use skagent_fido::{Device, ErrorKind, PairingCredential, error_kind, hid_devices
 use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard, OwnedRwLockReadGuard, RwLock};
 
 use crate::bindings::{
-    Bindings, Missing, NotPluggedIn, Resolution, SerialClaimedTwice, Unrecognized,
+    Bindings, Missing, NotPluggedIn, Presence, Resolution, SerialClaimedTwice, Unrecognized,
 };
 use crate::cancel::{Abandoned, AbandonedFlag};
 use crate::device::DeviceIdentity;
@@ -235,6 +235,69 @@ impl Router {
         on_wait: Option<OnWait>,
     ) -> Result<RoutedDevice> {
         self.route_key(None, ticket, "", on_select, on_wait).await
+    }
+
+    /// Where each of `keys` is right now, to list the ones on a plugged-in
+    /// security key first. Reads the serials and pairing proofs the bindings
+    /// need, like routing does (once per plug-in); touches no device when
+    /// none of the keys has a binding.
+    pub async fn presence(&self, keys: &[CredentialKey]) -> Vec<Presence> {
+        let unknown = vec![Presence::Unknown; keys.len()];
+        let known = {
+            let bindings = self.bindings.lock().await;
+            keys.iter().any(|key| bindings.knows(key))
+        };
+        if !known {
+            return unknown;
+        }
+        let candidates = match connected().await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                tracing::debug!(error = %format!("{error:#}"), "can't list security keys to order keys");
+                return unknown;
+            }
+        };
+        self.serials.retain(&candidates);
+        self.proofs.retain(&candidates);
+        let (needs_serials, mut pairings) = {
+            let bindings = self.bindings.lock().await;
+            let needs_serials = keys
+                .iter()
+                .any(|key| bindings.needs_serials(Some(key), &candidates));
+            let pairings: Vec<PairingCredential> = keys
+                .iter()
+                .filter_map(|key| bindings.needs_proof(Some(key), &candidates).cloned())
+                .collect();
+            (needs_serials, pairings)
+        };
+        if needs_serials {
+            self.learn_serials(&candidates).await;
+        }
+        // Keys on one security key share its pairing.
+        pairings.sort_by_key(|pairing| pairing.public_key);
+        pairings.dedup_by(|left, right| left.public_key == right.public_key);
+        for pairing in &pairings {
+            self.prove(pairing, &candidates).await;
+        }
+        let (serials, proofs) = (&self.serials, &self.proofs);
+        let bindings = self.bindings.lock().await;
+        keys.iter()
+            .map(|key| {
+                let pairing = bindings
+                    .needs_proof(Some(key), &candidates)
+                    .map(|pairing| pairing.public_key);
+                bindings.presence(
+                    key,
+                    &candidates,
+                    |identity| serials.cached(identity),
+                    |identity| {
+                        pairing.map_or(Proof::Unknown, |public_key| {
+                            proofs.get(identity, &public_key)
+                        })
+                    },
+                )
+            })
+            .collect()
     }
 
     /// The connected devices, with the serials and pairing proofs resolving

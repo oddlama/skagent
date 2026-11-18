@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
 use anyhow::{Context as _, Result, ensure};
-use skagent::bindings::{Bindings, Missing, Resolution, default_bindings_path};
+use skagent::bindings::{Bindings, Missing, Presence, Resolution, default_bindings_path};
 use skagent::device::DeviceIdentity;
 use skagent::pairing::Proof;
 use skagent::pin_cache::CredentialKey;
@@ -543,4 +543,59 @@ fn a_half_remembered_pairing_is_refused() -> Result<()> {
         Resolution::Direct(device(3))
     );
     Ok(())
+}
+
+#[test]
+fn keys_at_hand_are_listed_first_otherwise_in_order() {
+    use skagent::bindings::present_first;
+    let order = present_first(
+        vec![
+            "gone",
+            "first",
+            "unknown",
+            "second",
+            "also gone",
+            "no presence",
+        ],
+        &[
+            Presence::Absent,
+            Presence::Present,
+            Presence::Unknown,
+            Presence::Present,
+            Presence::Absent,
+        ],
+    );
+    assert_eq!(
+        order,
+        [
+            "first",
+            "second",
+            "unknown",
+            "no presence",
+            "gone",
+            "also gone"
+        ]
+    );
+}
+
+#[test]
+fn a_key_is_placed_where_routing_would_send_it() {
+    let mut bindings = Bindings::default();
+    bindings.bind(&work(), device(1), Some(DESK), None);
+    bindings.bind(&personal(), device(3), None, Some(pairing()));
+    let place = |key: &CredentialKey, devices: &[DeviceIdentity]| {
+        bindings.presence(key, devices, serial, holds_pairing)
+    };
+    // The desk YubiKey, replugged: by its serial; the other by its pairing.
+    assert_eq!(place(&work(), &[device(11)]), Presence::Present);
+    assert_eq!(place(&work(), &[device(2)]), Presence::Absent);
+    assert_eq!(place(&work(), &[]), Presence::Absent);
+    assert_eq!(
+        place(&personal(), &[device(2), device(3)]),
+        Presence::Present
+    );
+    assert_eq!(place(&personal(), &[device(2)]), Presence::Absent);
+    // Never used: no telling.
+    let unknown = CredentialKey::new("ssh:new", &[3; 32]);
+    assert_eq!(place(&unknown, &[device(1)]), Presence::Unknown);
 }
