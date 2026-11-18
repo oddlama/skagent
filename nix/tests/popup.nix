@@ -138,7 +138,9 @@ pkgs.testers.runNixOSTest {
         fingerprint = alice_ok("ssh-keygen -lf ~/id_sk.pub").split()[1]
         alice_ok(
             f"printf '[keys.\"%s\"]\\nemoji = \"🦊\"\\nlabel = \"github-work\"\\n"
-            f"[security-keys.12345678]\\nname = \"Desk 5C NFC\"\\n' '{fingerprint}' > ${dir}/config.toml"
+            f"[security-keys.12345678]\\nname = \"Desk 5C NFC\"\\n"
+            f"[popup]\\nscale = 1.25\\nsurprise = 1\\n[popup.dark]\\naccent = \"#88c0d0\"\\n'"
+            f" '{fingerprint}' > ${dir}/config.toml"
         )
         machine.succeed("${agent "skagent" "/run/current-system/sw/bin/fake-popup"}")
         machine.wait_for_file("${socket}")
@@ -170,6 +172,15 @@ pkgs.testers.runNixOSTest {
         assert pin_state["mistake"] is None, pin_state
         assert touch_state["again"] is False and touch_state["timeout_ms"] > 0, touch_state
         assert popup_log()[mark:].count("start") == 1
+        # Right after READY, before any state: how to look, from [popup].
+        lines = popup_log()
+        first = json.loads(lines[lines.index("start", mark) + 1])
+        assert first["type"] == "style", first
+        style = first["style"]
+        assert style["scale-percent"] == 125 and style["dark"]["accent"] == "#88c0d0", style
+        assert style["light"]["accent"] == "#1c71d8", style
+        # A setting it can't use is skipped with a warning, not fatal.
+        assert "skipped a setting: popup.surprise: no such setting" in journal("skagent")
 
     with subtest("a cached PIN goes straight to the touch"):
         mark = len(popup_log())

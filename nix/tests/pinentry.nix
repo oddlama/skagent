@@ -237,5 +237,37 @@ pkgs.testers.runNixOSTest {
         assert not logged(mark, "sent the PIN"), popup_lines()
         assert "cancelled in the popup" in journal("skagent")
         assert "pin retries: 8" in tries()
+
+    with subtest("the popup takes colours, size and fonts from [popup]"):
+        machine.succeed("systemctl stop skagent")
+        machine.wait_until_fails("test -e ${socket}")
+        alice_ok(
+            "printf '[popup]\\nappearance = \"dark\"\\nscale = 1.25\\nfont = \"Comic Neue\"\\n"
+            "[popup.dark]\\nsurface = \"#2e3440\"\\naccent = \"#88c0d0\"\\n' >> ${dir}/config.toml"
+        )
+        machine.succeed(
+            f"systemd-run --unit skagent --uid alice --setenv XDG_RUNTIME_DIR=${runtime}"
+            f" --setenv WAYLAND_DISPLAY={display} --setenv SKAGENT_PINENTRY_LOG=skagent_pinentry=debug"
+            " ${package}/bin/skagent serve --log skagent=debug --socket ${socket}"
+            " --config ${dir}/config.toml --popup ${pinentry}/bin/skagent-pinentry"
+        )
+        machine.wait_for_file("${socket}")
+        mark = len(popup_lines())
+        start_sign("styled")
+        wait_for_state(mark, "pin")
+        settle()
+        # 450 px instead of 360, centred: the card's top edge, between the
+        # border and the anchor, is where a 360 px popup has no window.
+        path = "/tmp/shots/styled.png"
+        on_display(f"grim -g '25,25 450x450' {path}")
+        machine.copy_from_machine(path)
+        top = machine.succeed(
+            f"magick {path} -crop 200x20+350+20 +repage -scale '1x1!' -format '%[hex:p{{0,0}}]' info:"
+        ).strip()
+        assert top == "2E3440", top
+        assert logged(mark, 'font="Comic Neue" instead="Inter"'), popup_lines()
+        type_keys("-k Escape")
+        finished("styled", success=False)
+        closed()
   '';
 }

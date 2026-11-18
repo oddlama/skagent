@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use skagent_popup::style::Style;
 use skagent_popup::{
     Intent, MAX_INTENT_LINE, Message, Queued, State, VERSION, encode_message, parse_intent,
 };
@@ -69,6 +70,8 @@ pub fn cancelled_in_popup(error: &anyhow::Error) -> bool {
 #[derive(Debug)]
 pub struct Popup {
     program: PathBuf,
+    /// How it looks, sent first to every started popup.
+    style: Style,
     /// The running popup, owned by the current session.
     current: Arc<tokio::sync::Mutex<Option<Running>>>,
     /// Requests waiting for a session, oldest first, with their numbers.
@@ -80,11 +83,12 @@ pub struct Popup {
 }
 
 impl Popup {
-    /// Shows prompts with `program`.
+    /// Shows prompts with `program`, looking like `style`.
     #[must_use]
-    pub fn new(program: PathBuf) -> Self {
+    pub fn new(program: PathBuf, style: Style) -> Self {
         Self {
             program,
+            style,
             current: Arc::default(),
             waiting: watch::channel(Vec::new()).0,
             seq: AtomicU64::new(1),
@@ -391,6 +395,13 @@ impl Running {
             Some(_) => bail!("the popup didn't start with READY"),
             None => bail!("the popup exited before it was ready"),
         }
+
+        let style = encode_message(&Message::Style {
+            style: Box::new(popup.style.clone()),
+        })?;
+        lines
+            .send(style)
+            .map_err(|_closed| anyhow!("the popup exited before it got its style"))?;
 
         let queue = tokio::spawn(forward_queue(popup.waiting.subscribe(), lines.downgrade()));
         tracing::debug!(popup = %popup.program.display(), "started the popup");

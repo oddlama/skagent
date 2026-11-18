@@ -127,3 +127,31 @@ fn serials_read_in_groups_of_three() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn popup_settings_that_cant_be_used_are_warnings_not_errors() -> Result<()> {
+    let config = Config::parse(
+        "[security-keys.12345678]\nname = \"Desk 5C NFC\"\n\n\
+         [popup]\nscale = 1.25\nfont = 3\n\n[popup.dark]\nacent = \"#88c0d0\"\n",
+    )?;
+    ensure!(config.yubikey_name(12_345_678) == "Desk 5C NFC");
+    ensure!(config.style().scale_percent == 125);
+    ensure!(config.style().font.is_none());
+    ensure!(config.warnings().len() == 2, "{:?}", config.warnings());
+    ensure!(
+        config
+            .warnings()
+            .iter()
+            .any(|warning| warning.starts_with("popup.font: 3 "))
+    );
+    ensure!(
+        config
+            .warnings()
+            .iter()
+            .any(|warning| warning.starts_with("popup.dark.acent: no such colour"))
+    );
+    // Everywhere else a typo still stops the agent.
+    ensure!(Config::parse("[popups]\nscale = 1\n").is_err());
+    ensure!(Config::parse("popup = 1\n").is_err());
+    Ok(())
+}

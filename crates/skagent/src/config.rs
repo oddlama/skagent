@@ -7,11 +7,21 @@
 //!
 //! [security-keys.12345678]
 //! name = "Desk 5C NFC"
+//!
+//! [popup]
+//! appearance = "dark"
+//! scale = 1.25
+//!
+//! [popup.dark]
+//! accent = "#88c0d0"
 //! ```
 //!
 //! Everything is optional, and nothing in it is secret. Unknown settings are
-//! refused, so a typo can't silently do nothing. home-manager generates the
-//! file from `services.skagent.keys` and `services.skagent.securityKeys`.
+//! refused, so a typo can't silently do nothing. The exception is `[popup]`
+//! (see `skagent_popup::style`): how the popup looks is cosmetic, so a setting
+//! there that can't be used is skipped with a warning instead of stopping
+//! the agent. home-manager generates the file from `services.skagent.keys`,
+//! `services.skagent.securityKeys` and `services.skagent.popup`.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -21,6 +31,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use serde::Deserialize;
+use skagent_popup::style::Style;
 
 /// File name below `$XDG_CONFIG_HOME/skagent`.
 pub const DEFAULT_CONFIG_NAME: &str = "config.toml";
@@ -40,6 +51,8 @@ const FINGERPRINT_BASE64_CHARS: usize = 43;
 pub struct Config {
     keys: BTreeMap<String, KeyConfig>,
     security_keys: BTreeMap<u32, SecurityKeyConfig>,
+    style: Style,
+    warnings: Vec<String>,
 }
 
 /// How an SSH key is shown.
@@ -68,6 +81,9 @@ struct RawConfig {
     keys: BTreeMap<String, KeyConfig>,
     #[serde(default)]
     security_keys: BTreeMap<String, SecurityKeyConfig>,
+    /// Checked setting by setting, see the module documentation.
+    #[serde(default)]
+    popup: toml::Table,
 }
 
 impl Config {
@@ -99,10 +115,26 @@ impl Config {
                 bail!("security key {parsed} is configured twice");
             }
         }
+        let (style, warnings) = Style::from_table(&raw.popup);
         Ok(Self {
             keys: raw.keys,
             security_keys,
+            style,
+            warnings,
         })
+    }
+
+    /// How the popup looks.
+    #[must_use]
+    pub const fn style(&self) -> &Style {
+        &self.style
+    }
+
+    /// The settings that were skipped, one line each: `popup.dark.acent: no
+    /// such colour …`.
+    #[must_use]
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     /// Reads `path`. With `required` false a missing file is an empty

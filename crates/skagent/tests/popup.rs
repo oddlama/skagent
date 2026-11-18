@@ -8,9 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result, ensure};
+use anyhow::{Context as _, Result, bail, ensure};
 use skagent::popup::{Popup, cancelled_in_popup};
-use skagent_popup::{Key, Queued, Request, State};
+use skagent_popup::style::Style;
+use skagent_popup::{Key, Message, Queued, Request, State, decode_message};
 
 const SOON: Duration = Duration::from_secs(5);
 
@@ -99,7 +100,39 @@ async fn log_until(dir: &Path, done: impl Fn(&str) -> bool) -> Result<String> {
 }
 
 fn popup(dir: &Path) -> Result<Arc<Popup>> {
-    Ok(Arc::new(Popup::new(fake_popup(dir)?)))
+    Ok(Arc::new(Popup::new(fake_popup(dir)?, Style::default())))
+}
+
+#[tokio::test]
+async fn every_started_popup_first_learns_how_to_look() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let config = skagent::config::Config::parse(
+        "[popup]\nscale = 1.5\n[popup.dark]\naccent = \"#88c0d0\"\n",
+    )?;
+    let popup = Arc::new(Popup::new(fake_popup(dir.path())?, config.style().clone()));
+    for round in 1..=2 {
+        let mut session = popup.session(SOON, queued()).await?;
+        session.start().await?;
+        drop(session);
+        log_until(dir.path(), |text| text.matches("exit\n").count() == round).await?;
+    }
+    let text = log(dir.path());
+    let lines: Vec<&str> = text.lines().collect();
+    let firsts: Vec<&str> = lines
+        .windows(2)
+        .filter_map(|pair| match pair {
+            ["start", first] => Some(*first),
+            _ => None,
+        })
+        .collect();
+    ensure!(firsts.len() == 2, "{text}");
+    for first in firsts {
+        let Message::Style { style } = decode_message(first)? else {
+            bail!("the first line wasn't the style: {first}");
+        };
+        ensure!(style.scale_percent == 150 && style.dark.accent.to_string() == "#88c0d0");
+    }
+    Ok(())
 }
 
 #[tokio::test]

@@ -40,13 +40,14 @@ pub fn socket_path(args: SocketArgs) -> Result<PathBuf> {
     }
 }
 
-/// The configuration from `--config`, or from the default path if it exists.
+/// The configuration file to read: `--config`, which must exist, or the
+/// default path, which may be missing.
 ///
 /// # Errors
 ///
-/// Returns an error if a given file is missing, or any file doesn't parse.
-pub fn load_config(path: Option<&Path>) -> Result<Config> {
-    let (path, required) = match path {
+/// Returns an error if there's no `--config` and no default path.
+pub fn config_path(path: Option<&Path>) -> Result<(PathBuf, bool)> {
+    Ok(match path {
         Some(path) => (path.to_path_buf(), true),
         None => (
             config::default_config_path(
@@ -55,9 +56,21 @@ pub fn load_config(path: Option<&Path>) -> Result<Config> {
             )?,
             false,
         ),
-    };
+    })
+}
+
+/// The configuration from `--config`, or from the default path if it exists.
+///
+/// # Errors
+///
+/// Returns an error if a given file is missing, or any file doesn't parse.
+pub fn load_config(path: Option<&Path>) -> Result<Config> {
+    let (path, required) = config_path(path)?;
     let config = Config::load(&path, required)?;
     tracing::info!(config = %path.display(), "read the configuration");
+    for warning in config.warnings() {
+        tracing::warn!(config = %path.display(), "skipped a setting: {warning}");
+    }
     Ok(config)
 }
 
@@ -126,7 +139,7 @@ pub async fn run(
     let popup = args
         .popup
         .as_ref()
-        .map(|program| Arc::new(Popup::new(program.clone())));
+        .map(|program| Arc::new(Popup::new(program.clone(), config.style().clone())));
     match (&popup, &prompt) {
         (Some(popup), _) => {
             tracing::info!(popup = %popup.program().display(), "showing prompts in the popup");
