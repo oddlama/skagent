@@ -24,9 +24,7 @@ With agenix-rekey that would look like this (a sketch, checked in step 6):
 
 ```nix
 age.rekey = {
-  masterIdentities = [
-    { identity = ./skagent-identity.txt; pubkey = "age1pq1…"; }
-  ];
+  masterIdentities = [ ./skagent-identity.pub ]; # from `skagent age identity`
   extraEncryptionPubkeys = [ "age1pq1…" ]; # a backup key from `age-keygen -pq`
   agePlugins = [ pkgs.age skagent ]; # age-plugin-pq for rage, age-plugin-skagent
 };
@@ -54,8 +52,10 @@ Agreed before any code.
   plugin once and encrypting to the new recipient.
 - **The private key is derived at decryption time, in the agent.** FIDO2 has
   no decryption, and no security key does ML-KEM. The agent decapsulates and
-  hands out the file key, nothing else. The plugin holds no key and does no
-  cryptography.
+  hands out the file key, nothing else. The plugin never holds a secret: the
+  only cryptography it does is encrypting to an identity's public key.
+- **An identity carries its public key.** So `-i` works for encrypting too,
+  without the agent and without the security key.
 - **One touch, one file key.** Outside a batch, a request gets at most one
   file key, whatever it sends.
 - **A batch keeps the seed.** The security key wants a touch for every
@@ -182,18 +182,24 @@ one request still yield one key.
   asked for another.
 - **Identity strings:** `AGE-PLUGIN-SKAGENT-1…`. Without data it means "the
   identity on the security key at hand", which is what `age -d -j skagent`
-  sends. With data (a version byte and the first 8 bytes of the recipient's
-  SHA-256) it names one. With several identities at hand, an unnamed request
-  fails and says so, without a touch.
-- **`skagent age identity`** prints an identity file with the recipient in a
-  comment, `skagent age list` the known identities.
+  sends. With data (a version byte and the recipient's 1216 bytes) it names
+  one, and is all that encrypting to it needs. After a derivation the agent
+  compares the public key it derived with the one named, before it tries a
+  stanza. With several identities at hand, an unnamed request fails and says
+  so, without a touch.
+- **`skagent age identity`** prints an identity file: the string, and the
+  recipient in a `# Recipient:` comment for people and for tools that read it.
+  `skagent age list` prints the known identities.
 
 ## the plugin
 
 `age-plugin-skagent`, started by age or rage for one file:
 
-- `identity-v1` only. Encrypting goes to the recipient (`-r age1pq1…`), not
-  to the identity.
+- `identity-v1` for decrypting. `recipient-v1` for encrypting to an identity
+  (`age -e -i`), which is X-Wing encapsulation to the public key inside it and
+  produces the native stanza. It reports the label `postquantum`, so the
+  clients keep it apart from classic recipients like a native `age1pq1…`.
+  There is no recipient type of ours: `-r` takes the `age1pq1…`.
 - It keeps `mlkem768x25519` stanzas, ignores other types and rejects malformed
   ones the way the age specification asks: two arguments, an `enc` that is the
   canonical base64 of 1120 bytes, a body of exactly 32 bytes.
@@ -204,7 +210,9 @@ one request still yield one key.
   hangs. PIN and touch are asked for by the agent.
 - It reports why a request failed: not for this key, cancelled, timed out,
   forwarding switched off, agent locked.
-- It is the `skagent` binary under another name (open question 2).
+- A binary of its own, built from the same Cargo package as the agent and so
+  always installed next to it. It doesn't link libfido2, and a check keeps it
+  that way.
 
 ## agent protocol
 
@@ -229,11 +237,12 @@ Extension messages of the ssh-agent protocol, so forwarding carries them:
 
 - **A second socket,** `$XDG_RUNTIME_DIR/skagent-age.sock` (`0600`, peer uid
   checked, bound like the first). systemd passes both by name.
-- **Local means proven local.** On it, the peer's executable has to be
-  skagent's own (same file as the agent's), and any `session-bind` ends the
-  connection. So a socket forwarded by hand (`ssh -R`) doesn't pass for local.
-  After an update the old agent refuses the new plugin until it restarts, and
-  says so.
+- **Local means proven local.** On it, the peer's executable has to be one of
+  skagent's own: the plugin next to the agent's binary for decryptions, the
+  agent's binary for `skagent batch` and `skagent age`. Any `session-bind`
+  ends the connection. So a socket forwarded by hand (`ssh -R`) doesn't pass
+  for local. After an update the old agent refuses the new plugin until it
+  restarts, and says so.
 - **Everything on the ssh-agent socket counts as forwarded,** with or without
   a session bind. Clients that forward without binding (their own SSH
   implementations) then show up as an unverified host, not as local.
@@ -252,8 +261,8 @@ Extension messages of the ssh-agent protocol, so forwarding carries them:
 
 1. The command line tool connects to the local socket and sends
    `age-batch@skagent`. The agent keeps a pidfd of that peer (`SO_PEERPIDFD`,
-   Linux 6.5; without it there are no batches) and checks that it runs
-   skagent's executable.
+   Linux 6.5; without it there are no batches) and checks that it runs the
+   agent's executable.
 2. The tool marks itself as child subreaper, so orphaned descendants are
    re-parented to it and not to the service manager. It runs the command as a
    child, with the terminal, and waits.
@@ -274,7 +283,7 @@ Extension messages of the ssh-agent protocol, so forwarding carries them:
    - the user presses Stop in the popup.
 
 **Who is a member:** a request on the local socket whose peer runs skagent's
-executable and descends from the batch's tool. The agent walks from the peer's
+plugin and descends from the batch's tool. The agent walks from the peer's
 pid up its parents, pinned with pidfds and with start times (a parent is older
 than its child), so a reused pid can't stand in. Whatever it can't prove is
 not a member and gets an ordinary request with a touch. A process can't choose
@@ -324,17 +333,20 @@ break it, watch the test fail, restore.
    `SecretBuffer`. A VM test with libfido2's tools as the baseline, like
    `vm-testkey`.
 2. **`skagent-age`.** A crate without I/O and without `unsafe`: stanza
-   parsing, recipient and identity strings, X-Wing expansion and
-   decapsulation, HPKE's receiving side. Tested with age's `hybrid*` vectors
-   and, in a Nix check, against stock age: a file from `age -r` decrypts, and
-   the recipient equals `age-keygen -y` of the same seed. Added to the license
-   boundary's shipped crates.
+   parsing, recipient and identity strings, X-Wing expansion, decapsulation
+   and encapsulation, both sides of HPKE's base mode. Tested with age's
+   `hybrid*` vectors and, in a Nix check, against stock age with the same seed
+   as an `AGE-SECRET-KEY-PQ-1…`: its files open here, ours open there, and the
+   recipient equals `age-keygen -y`. Added to the license boundary's shipped
+   crates.
 3. **One file at a time.** The second socket, `age.toml`, `age-unwrap`,
    `skagent age new|list|identity`, the plugin, the texts. A VM test
    (`vm-age`): files from stock age and from rage with `age-plugin-pq`,
-   decrypted through the plugin by both; one touch per file; the cached PIN; a
-   file for another key; stanzas of two files yielding one key; an eviction
-   during the touch; a client that hangs up; a locked agent.
+   decrypted through the plugin by both; a file encrypted with `-e -i`, next
+   to a native recipient and refused next to a classic one; one touch per
+   file; the cached PIN; a file for another key; stanzas of two files yielding
+   one key; an eviction during the touch; a client that hangs up; a locked
+   agent.
 4. **Batches.** The backend per buffer, the peer's pidfd and ancestry,
    `skagent batch`, every way a batch ends, the popup's count and Stop. In the
    VM: many files and one touch; a program outside the batch gets a touch; an
@@ -359,7 +371,7 @@ break it, watch the test fail, restore.
   the hardware too. It would cover cached PINs as well.
 - **The never-batched identity.**
 - **`hmac-secret-mc`,** which saves the second touch of `skagent age new` on
-  keys that have it.
+  keys that have it (a YubiKey 5.8 does, one from before 5.7 doesn't).
 - **macOS,** with [`macos.md`](macos.md): no `memfd_secret`, and peer and
   ancestry come from other interfaces.
 - **Not planned:** forwarded batches (a remote host's processes can't be told
@@ -367,16 +379,10 @@ break it, watch the test fail, restore.
 
 ## open questions
 
-1. **Newer firmware.** The hardware check ran on a YubiKey older than 5.7.
-   Run it on 5.7 or later; expected is the same with another refusal code.
-2. **One binary or two.** As a second name of the `skagent` binary, "the peer
-   runs my own executable" is one comparison and nothing has to be located.
-   The price is libfido2 as a dependency of the plugin on remote hosts. Split
-   it if that hurts.
-3. **Ancestry without races.** `PIDFD_GET_INFO` (Linux 6.13) or
+1. **Ancestry without races.** `PIDFD_GET_INFO` (Linux 6.13) or
    `/proc/<pid>/stat` with start times. rustix 1.1 has no `SO_PEERPIDFD`, so
    the socket option needs a wrapper where `unsafe` is allowed
    (`skagent-fds`).
-4. **`libcrux-ml-kem`.** Key generation straight from the 64-byte seed,
+2. **`libcrux-ml-kem`.** Key generation straight from the 64-byte seed,
    wiping of its key types, and its MSRV against the workspace's.
-5. **Popup.** The design of the decrypt and batch screens.
+3. **Popup.** The design of the decrypt and batch screens.
