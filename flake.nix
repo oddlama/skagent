@@ -201,6 +201,7 @@
                 cargoLock = ./Cargo.lock;
                 shippedCrates = [
                   "skagent"
+                  "skagent-age"
                   "skagent-fido"
                   "skagent-fds"
                   "skagent-popup"

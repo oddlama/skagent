@@ -1,5 +1,6 @@
 # Proper names that doc comments may use without backticks. ".." keeps the defaults.
 doc-valid-idents = [
+  "ChaCha20Poly1305",
   "EdDSA",
   "GnuPG",
   "JetBrains",

@@ -7,7 +7,8 @@ stock age. Decrypting takes the PIN, cached as for SSH, and one touch per file,
 or one touch for all the files one command decrypts.
 
 Findings this is based on: [`research/hmac-secret.md`](research/hmac-secret.md)
-and [`research/age.md`](research/age.md). Nothing here is implemented yet.
+and [`research/age.md`](research/age.md). Steps 1 and 2 below are done;
+nothing a user can call exists yet.
 
 ## what it is for
 
@@ -329,17 +330,19 @@ against it.
 Each step ends with `nix flake check` green. For every safety property below:
 break it, watch the test fail, restore.
 
-1. **Test key and fido layer.** The test key as above. `skagent-fido` creates
+1. ~~**Test key and fido layer.**~~ Done. The test key as above, with
+   libfido2's tools as the baseline in `vm-testkey`. `skagent-fido` creates
    the credential, lists `skagent:age` credentials and derives into a
-   `SecretBuffer`. A VM test with libfido2's tools as the baseline, like
-   `vm-testkey`.
-2. **`skagent-age`.** A crate without I/O and without `unsafe`: stanza
-   parsing, recipient and identity strings, X-Wing expansion, decapsulation
-   and encapsulation, both sides of HPKE's base mode. Tested with age's
-   `hybrid*` vectors and, in a Nix check, against stock age with the same seed
-   as an `AGE-SECRET-KEY-PQ-1…`: its files open here, ours open there, and the
-   recipient equals `age-keygen -y`. Added to the license boundary's shipped
-   crates.
+   `SecretBuffer` (`src/age.rs`); tried against the virtual key, and used for
+   real from step 3 on.
+2. ~~**`skagent-age`.**~~ Done. A crate without I/O and without `unsafe`:
+   stanzas, recipient and identity strings, the derivation of the seed, X-Wing
+   expansion, decapsulation and encapsulation, both sides of HPKE's base mode.
+   Tested with age's `hybrid*` vectors, the X-Wing draft's vectors, the
+   specification's example, and a recipient and a file that stock age made for
+   a seed derived outside this crate (`tests/data/README.md`). In the license
+   boundary's shipped crates. What stock age does with a stanza of ours is
+   checked in step 3, where the plugin can be run.
 3. **One file at a time.** The second socket, `age.toml`, `age-unwrap`,
    `skagent age new|list|identity`, the plugin, the texts. A VM test
    (`vm-age`): files from stock age and from rage with `age-plugin-pq`,
