@@ -689,6 +689,10 @@ fn failed(key: Option<&Key>, security_key: Option<&SecurityKey>, reason: Failure
         (Failure::NotOnKey, Some(key)) => format!("{name} doesn't hold {}", key.label),
         (Failure::NotOnKey, None) => format!("{name} holds no SSH keys"),
         (Failure::NoPin, _) => format!("{name} has no PIN set"),
+        (Failure::Duplicate, _) => format!(
+            "Two security keys claim to be {}",
+            name_or(security_key, "your YubiKey")
+        ),
         (Failure::NotPluggedIn, _) => match security_key {
             Some(security_key) => format!("{} wasn't plugged in", security_key.name),
             None => "No security key was plugged in".to_owned(),

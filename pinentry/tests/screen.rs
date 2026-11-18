@@ -284,6 +284,11 @@ fn failures_say_why_where_known() {
         (Failure::NoPin, true, "Desk 5C NFC has no PIN set"),
         (Failure::NotPluggedIn, true, "Desk 5C NFC wasn't plugged in"),
         (
+            Failure::Duplicate,
+            true,
+            "Two security keys claim to be Desk 5C NFC",
+        ),
+        (
             Failure::Other,
             true,
             "Something went wrong · see skagent's log",

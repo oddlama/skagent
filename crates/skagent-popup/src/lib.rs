@@ -287,6 +287,9 @@ pub enum Failure {
     NoPin,
     /// The security key wasn't plugged in while the request waited for it.
     NotPluggedIn,
+    /// Two plugged-in security keys report the serial of the YubiKey holding
+    /// the SSH key: one of them pretends to be it. Neither got the PIN.
+    Duplicate,
     /// Something else; the agent's log says what. Also any reason this
     /// popup doesn't know yet.
     #[serde(other)]
