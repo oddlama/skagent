@@ -120,9 +120,10 @@ pkgs.testers.runNixOSTest {
         return alice_ok(f"XDG_RUNTIME_DIR=${runtime} WAYLAND_DISPLAY={display} {command}")
 
     def type_keys(arguments: str) -> None:
-        # wtype uploads a keymap first; a Shift press lets the client take
-        # it in before the keys that count.
-        on_display(f"wtype -k Shift_L {arguments}")
+        # wtype uploads a keymap first; a Shift press and a pause let the
+        # client take it in before the keys that count. Without the pause a
+        # busy machine decoded a PIN with the old keymap: a wrong PIN.
+        on_display(f"wtype -k Shift_L -s 300 {arguments}")
 
     def screenshot(name: str) -> float:
         """Saves the popup's square, returns its mean brightness (0 to 1)."""
