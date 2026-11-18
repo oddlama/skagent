@@ -26,6 +26,11 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "69836851
 ] }
 skagent-popup = { path = "../crates/skagent-popup" }
 skagent-secret = { path = "../crates/skagent-secret" }
+toml = { version = "1.2", default-features = false, features = [
+  "parse",
+  "serde",
+  "std",
+] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = [
   "env-filter",

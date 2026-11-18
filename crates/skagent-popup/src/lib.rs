@@ -5,8 +5,9 @@
 //! reports what the user did.
 //!
 //! - **Popup → agent, first:** `READY <version>` once it can show states.
-//! - **Agent → popup:** one JSON object per line, a [`Message`]: the state to
-//!   show, or which other requests wait for the popup. Never a secret.
+//! - **Agent → popup:** one JSON object per line, a [`Message`]: first how to
+//!   look ([`Message::Style`]), then the states to show and which other
+//!   requests wait for the popup. Never a secret.
 //! - **Popup → agent:** text lines, each an [`Intent`]: `PIN <seq> <data>`,
 //!   `CANCEL <seq>` or `RETRY <seq>`. `seq` names the state the user acted on,
 //!   so the agent can ignore answers to states it already replaced. The PIN
@@ -27,6 +28,8 @@ use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use serde::{Deserialize, Serialize};
 use skagent_secret::SecretBuffer;
 
+pub mod style;
+
 /// The protocol version in `READY`. Changes that alter the meaning of a
 /// message bump it; new optional fields don't.
 pub const VERSION: u32 = 1;
@@ -41,6 +44,12 @@ pub const MAX_PIN_BYTES: usize = 256;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Message {
+    /// How to look: sent once, right after `READY`. A popup that gets none
+    /// uses the design's presets.
+    Style {
+        /// Colours, fonts and size.
+        style: Box<style::Style>,
+    },
     /// Show `state`. Replaces whatever was shown before.
     Show {
         /// Names this state in the popup's answers.

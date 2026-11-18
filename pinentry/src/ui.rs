@@ -12,6 +12,7 @@ use gpui::{
     LineJoin, PathBuilder, PathStyle, Pixels, Render, SharedString, StrokeOptions, Window,
     WindowAppearance, canvas, div, point, prelude::*, px, relative, svg,
 };
+use skagent_popup::style::Style;
 use skagent_popup::{Queued, State};
 
 use crate::answers::Answers;
@@ -19,13 +20,13 @@ use crate::pin::PinInput;
 use crate::screen::{
     Anchor, Badge, Body, Close, Contact, Glyph, Screen, Span, TOTAL_TRIES, Tint, Tone, glyph,
 };
-use crate::theme::{Mode, Theme};
+use crate::theme::{Fonts, Mode, Theme};
 
-/// The window is a fixed square.
+/// The window is a fixed square, this many design pixels wide.
 pub const SIZE: f32 = 360.;
 
-const FONT: &str = "Inter";
-const MONO: &str = "JetBrains Mono";
+/// Widest single line of text: the card less its padding.
+const LINE: f32 = 312.;
 
 /// How long a new screen fades in.
 const CROSSFADE: Duration = Duration::from_millis(180);
@@ -47,8 +48,12 @@ pub struct Popup {
     pin: Option<PinInput>,
     /// The error ring after a wrong PIN, until the user types.
     field_error: bool,
-    /// Forced light or dark; else the system's.
+    /// Forced light or dark; else the style's or the system's.
     mode: Option<Mode>,
+    /// Colours, fonts and size from the agent.
+    style: Style,
+    /// The fonts of `style` that are installed.
+    fonts: Fonts,
     answers: Answers,
     /// A state that waits for a final screen to have had its moment.
     pending: Option<(u64, State)>,
@@ -57,8 +62,15 @@ pub struct Popup {
 }
 
 impl Popup {
-    /// An empty popup that answers through `answers`.
-    pub fn new(answers: Answers, mode: Option<Mode>, cx: &mut Context<Self>) -> Self {
+    /// An empty popup that answers through `answers`, drawn in `style` with
+    /// `fonts`.
+    pub fn new(
+        answers: Answers,
+        mode: Option<Mode>,
+        style: Style,
+        fonts: Fonts,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let pin = match PinInput::new() {
             Ok(pin) => Some(pin),
             Err(error) => {
@@ -73,6 +85,8 @@ impl Popup {
             pin,
             field_error: false,
             mode,
+            style,
+            fonts,
             answers,
             pending: None,
             ended: false,
@@ -110,6 +124,13 @@ impl Popup {
             }
             None => self.apply(seq, &state),
         }
+        cx.notify();
+    }
+
+    /// Draws in `style` with `fonts` from now on. The window keeps its size.
+    pub fn restyle(&mut self, style: Style, fonts: Fonts, cx: &mut Context<Self>) {
+        self.style = style;
+        self.fonts = fonts;
         cx.notify();
     }
 
@@ -266,17 +287,21 @@ impl Popup {
 
 impl Render for Popup {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mode = self.mode.unwrap_or(match window.appearance() {
-            WindowAppearance::Dark | WindowAppearance::VibrantDark => Mode::Dark,
-            WindowAppearance::Light | WindowAppearance::VibrantLight => Mode::Light,
-        });
-        let theme = Theme::new(mode);
+        let mode = self
+            .mode
+            .or(Mode::forced_by(self.style.appearance))
+            .unwrap_or(match window.appearance() {
+                WindowAppearance::Dark | WindowAppearance::VibrantDark => Mode::Dark,
+                WindowAppearance::Light | WindowAppearance::VibrantLight => Mode::Light,
+            });
+        let theme = Theme::styled(&self.style, mode, &self.fonts);
         let root = div()
             .id("popup")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| this.key_down(event, cx)))
-            .size(px(SIZE))
-            .font_family(FONT)
+            .size(theme.px(SIZE))
+            .font_family(theme.font.clone())
+            .font_features(theme.font_features.clone())
             // CSS's `normal` for Inter, which the design was drawn with.
             .line_height(relative(1.21))
             .text_color(theme.text);
@@ -298,19 +323,23 @@ impl Render for Popup {
             .bg(theme.surface)
             .border_1()
             .border_color(theme.border)
-            .rounded(px(24.))
+            .rounded(theme.px(24.))
             .opacity(fraction(elapsed, CROSSFADE))
             // Every screen is one block, centred: anchor, title, subtitle and
             // whatever comes below them.
             .justify_center()
-            .p(px(24.))
+            .p(theme.px(24.))
             .child(anchor(screen, &theme, elapsed))
             .child(
                 div()
-                    .mt(px(title_gap(screen)))
-                    .text_size(px(19.))
+                    .mt(theme.px(title_gap(screen)))
+                    .max_w(theme.px(LINE))
+                    .text_size(theme.px(19.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_center()
+                    // Long key names wrap once, then end in an ellipsis.
+                    .text_ellipsis()
+                    .line_clamp(2)
                     .child(screen.title.clone()),
             )
             .child(subtitle(screen, &theme))
@@ -401,12 +430,12 @@ fn anchor(screen: &Screen, theme: &Theme, elapsed: Duration) -> AnyElement {
             missing,
         } => {
             let square = div()
-                .size(px(88.))
-                .rounded(px(26.))
+                .size(theme.px(88.))
+                .rounded(theme.px(26.))
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(46.))
+                .text_size(theme.px(46.))
                 .child(glyph_text(glyph));
             let square = if *missing {
                 square
@@ -424,8 +453,8 @@ fn anchor(screen: &Screen, theme: &Theme, elapsed: Duration) -> AnyElement {
             contact,
         } => {
             let square = div()
-                .size(px(88.))
-                .rounded(px(26.))
+                .size(theme.px(88.))
+                .rounded(theme.px(26.))
                 .bg(tint(theme, *fill))
                 .flex()
                 .items_center()
@@ -440,12 +469,12 @@ fn anchor(screen: &Screen, theme: &Theme, elapsed: Duration) -> AnyElement {
         } => {
             let remaining = 1. - fraction(elapsed, *duration);
             let circle = div()
-                .size(px(100.))
+                .size(theme.px(100.))
                 .rounded_full()
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(50.))
+                .text_size(theme.px(50.))
                 .map(|circle| match glyph {
                     Some(glyph) => circle.bg(theme.avatar_tint).child(glyph_text(glyph)),
                     None => {
@@ -456,7 +485,7 @@ fn anchor(screen: &Screen, theme: &Theme, elapsed: Duration) -> AnyElement {
                 });
             let mut slot_element = div()
                 .relative()
-                .size(px(132.))
+                .size(theme.px(132.))
                 .flex()
                 .items_center()
                 .justify_center();
@@ -467,9 +496,9 @@ fn anchor(screen: &Screen, theme: &Theme, elapsed: Duration) -> AnyElement {
                     slot_element = slot_element.child(
                         div()
                             .absolute()
-                            .left(px((132. - size) / 2.))
-                            .top(px((132. - size) / 2.))
-                            .size(px(size))
+                            .left(theme.px((132. - size) / 2.))
+                            .top(theme.px((132. - size) / 2.))
+                            .size(theme.px(size))
                             .rounded_full()
                             .bg(theme.accent)
                             .opacity(theme.pulse_opacity * (1. - t)),
@@ -499,7 +528,7 @@ fn slot(
 ) -> AnyElement {
     div()
         .relative()
-        .size(px(size))
+        .size(theme.px(size))
         .flex()
         .items_center()
         .justify_center()
@@ -511,20 +540,21 @@ fn slot(
 /// The countdown ring: a track and an arc from 12 o'clock that drains
 /// counter-clockwise as `remaining` goes from 1 to 0.
 fn ring(theme: &Theme, remaining: f32) -> impl IntoElement {
-    let (track, arc) = (theme.ring_track, theme.accent);
+    let (track, arc, scale) = (theme.ring_track, theme.accent, theme.scale);
     div()
         .absolute()
-        .left(px(4.))
-        .top(px(4.))
-        .size(px(124.))
+        .left(theme.px(4.))
+        .top(theme.px(4.))
+        .size(theme.px(124.))
         .child(
             canvas(
                 |_, _, _| (),
                 move |bounds, (), window, _| {
                     let center = bounds.center();
-                    paint_arc(window, center, 58., 0., 1., 4., track);
+                    let (radius, width) = (58. * scale, 4. * scale);
+                    paint_arc(window, center, radius, 0., 1., width, track);
                     if remaining > 0. {
-                        paint_arc(window, center, 58., 0., remaining, 4., arc);
+                        paint_arc(window, center, radius, 0., remaining, width, arc);
                     }
                 },
             )
@@ -571,23 +601,25 @@ fn device(width: f32, height: f32, contact: Contact, theme: &Theme) -> impl Into
     let diameter = width * 9. / 20.;
     let dot = div()
         .absolute()
-        .left(px((width - diameter) / 2.))
-        .top(px(height * 17. / 30. - diameter / 2.))
-        .size(px(diameter))
+        .left(theme.px((width - diameter) / 2.))
+        .top(theme.px(height * 17. / 30. - diameter / 2.))
+        .size(theme.px(diameter))
         .rounded_full();
     let dot = match contact {
         Contact::Filled => dot.bg(theme.warning),
-        Contact::Outline => dot.border(px(width * 1.6 / 20.)).border_color(theme.text),
+        Contact::Outline => dot
+            .border(theme.px(width * 1.6 / 20.))
+            .border_color(theme.text),
     };
     div()
         .relative()
-        .w(px(width))
-        .h(px(height))
+        .w(theme.px(width))
+        .h(theme.px(height))
         .child(
             svg()
                 .path("icons/device-frame.svg")
-                .w(px(width))
-                .h(px(height))
+                .w(theme.px(width))
+                .h(theme.px(height))
                 .text_color(theme.text),
         )
         .child(dot)
@@ -627,12 +659,12 @@ fn badge_element(badge: Badge, theme: &Theme, elapsed: Duration, inset: f32) -> 
     let shrink = (38. - size) / 2.;
     let ring = div()
         .absolute()
-        .right(px(inset + shrink))
-        .bottom(px(inset + shrink - lift))
+        .right(theme.px(inset + shrink))
+        .bottom(theme.px(inset + shrink - lift))
         .flex()
         .rounded_full()
         .bg(theme.surface)
-        .p(px(3. * scale));
+        .p(theme.px(3. * scale));
     let fill = div()
         .flex()
         .items_center()
@@ -642,20 +674,23 @@ fn badge_element(badge: Badge, theme: &Theme, elapsed: Duration, inset: f32) -> 
         .text_color(ink);
     match icon {
         Some(path) => ring
-            .size(px(size))
+            .size(theme.px(size))
             // Nothing to draw yet at the start of a pop.
-            .child(fill.size_full().children(
-                (scale > 0.05).then(|| svg().path(path).size(px(15. * scale)).text_color(ink)),
-            ))
+            .child(
+                fill.size_full().children(
+                    (scale > 0.05)
+                        .then(|| svg().path(path).size(theme.px(15. * scale)).text_color(ink)),
+                ),
+            )
             .into_any_element(),
         // The design's pill is 32 px high including its ring.
         None => ring
-            .h(px(32.))
+            .h(theme.px(32.))
             .child(
                 fill.h_full()
-                    .min_w(px(26.))
-                    .px(px(6.))
-                    .text_size(px(13.))
+                    .min_w(theme.px(26.))
+                    .px(theme.px(6.))
+                    .text_size(theme.px(13.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child("2×"),
             )
@@ -672,10 +707,10 @@ fn subtitle(screen: &Screen, theme: &Theme) -> impl IntoElement {
     // The lock screen's subtitle is a sentence that wraps.
     let paragraph = screen.badge == Some(Badge::Lock);
     let line = div()
-        .mt(px(4.))
-        .max_w(px(if paragraph { 270. } else { 312. }))
+        .mt(theme.px(4.))
+        .max_w(theme.px(if paragraph { 270. } else { LINE }))
         .when(paragraph, |line| line.line_height(relative(1.45)))
-        .text_size(px(14.))
+        .text_size(theme.px(14.))
         .font_weight(weight)
         .text_color(color)
         .text_center();
@@ -683,19 +718,40 @@ fn subtitle(screen: &Screen, theme: &Theme) -> impl IntoElement {
         line.flex()
             .flex_row()
             .justify_center()
-            .children(screen.subtitle.spans.iter().map(span_element))
+            .children(
+                screen
+                    .subtitle
+                    .spans
+                    .iter()
+                    .enumerate()
+                    .map(|(index, span)| {
+                        let last = index.saturating_add(1) == screen.subtitle.spans.len();
+                        span_element(span, last, theme)
+                    }),
+            )
             .into_any_element()
-    } else {
+    } else if paragraph {
         line.child(screen.subtitle.text()).into_any_element()
+    } else {
+        line.truncate()
+            .child(screen.subtitle.text())
+            .into_any_element()
     }
 }
 
-fn span_element(span: &Span) -> impl IntoElement {
+/// A piece of a subtitle. Only the `last` text gives way to a long line
+/// (`… · via` a long host name): fingerprints and the text before them
+/// keep their width.
+fn span_element(span: &Span, last: bool, theme: &Theme) -> impl IntoElement {
     let text = div().child(span.text.clone());
     if span.mono {
-        text.font_family(MONO)
+        text.flex_none()
+            .font_family(theme.mono.clone())
+            .font_features(theme.mono_features.clone())
+    } else if last {
+        text.min_w(theme.px(0.)).truncate()
     } else {
-        text
+        text.flex_none()
     }
 }
 
@@ -727,7 +783,7 @@ fn try_again(theme: &Theme, cx: &mut Context<Popup>) -> impl IntoElement {
         .child(
             div()
                 .flex_1()
-                .text_size(px(16.))
+                .text_size(theme.px(16.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child("Try again"),
         )
@@ -736,16 +792,17 @@ fn try_again(theme: &Theme, cx: &mut Context<Popup>) -> impl IntoElement {
 
 fn command_box(theme: &Theme, command: &'static str) -> impl IntoElement {
     div()
-        .mt(px(28.))
+        .mt(theme.px(28.))
         .w_full()
-        .h(px(52.))
-        .rounded(px(14.))
+        .h(theme.px(52.))
+        .rounded(theme.px(14.))
         .bg(theme.field)
         .flex()
         .items_center()
         .justify_center()
-        .font_family(MONO)
-        .text_size(px(13.))
+        .font_family(theme.mono.clone())
+        .font_features(theme.mono_features.clone())
+        .text_size(theme.px(13.))
         .child(command)
 }
 
@@ -757,28 +814,28 @@ fn devices(theme: &Theme, elapsed: Duration, count: usize) -> impl IntoElement {
                 - (2. * ease_in_out(phase(elapsed, Duration::from_secs(1), Duration::ZERO)) - 1.)
                     .abs());
     div()
-        .mt(px(22.))
+        .mt(theme.px(22.))
         .flex()
         .items_center()
-        .gap(px(10.))
+        .gap(theme.px(10.))
         .children((0..count).map(|_| {
             div()
                 .relative()
-                .w(px(20.))
-                .h(px(30.))
+                .w(theme.px(20.))
+                .h(theme.px(30.))
                 .child(
                     svg()
                         .path("icons/device-outline.svg")
-                        .w(px(20.))
-                        .h(px(30.))
+                        .w(theme.px(20.))
+                        .h(theme.px(30.))
                         .text_color(theme.text_muted),
                 )
                 .child(
                     div()
                         .absolute()
-                        .left(px(5.5))
-                        .top(px(12.5))
-                        .size(px(9.))
+                        .left(theme.px(5.5))
+                        .top(theme.px(12.5))
+                        .size(theme.px(9.))
                         .rounded_full()
                         .bg(theme.accent)
                         .opacity(blink),
@@ -786,8 +843,8 @@ fn devices(theme: &Theme, elapsed: Duration, count: usize) -> impl IntoElement {
         }))
         .child(
             div()
-                .ml(px(2.))
-                .text_size(px(12.))
+                .ml(theme.px(2.))
+                .text_size(theme.px(12.))
                 .text_color(theme.text_muted)
                 .child(format!("{count} plugged in")),
         )
@@ -796,27 +853,27 @@ fn devices(theme: &Theme, elapsed: Duration, count: usize) -> impl IntoElement {
 /// The PIN tries left, as dots.
 fn tries(theme: &Theme, left: u32) -> impl IntoElement {
     div()
-        .mt(px(28.))
+        .mt(theme.px(28.))
         .flex()
         .flex_col()
         .items_center()
         .child(
             div()
                 .flex()
-                .gap(px(5.))
+                .gap(theme.px(5.))
                 .children((0..TOTAL_TRIES).map(|index| {
-                    let dot = div().size(px(8.)).rounded_full();
+                    let dot = div().size(theme.px(8.)).rounded_full();
                     if index < left {
                         dot.bg(theme.dot_filled)
                     } else {
-                        dot.border(px(1.5)).border_color(theme.dot_hollow)
+                        dot.border(theme.px(1.5)).border_color(theme.dot_hollow)
                     }
                 })),
         )
         .child(
             div()
-                .mt(px(8.))
-                .text_size(px(12.))
+                .mt(theme.px(8.))
+                .text_size(theme.px(12.))
                 .text_color(theme.text_muted)
                 .child(crate::screen::tries_left(left)),
         )
@@ -825,9 +882,9 @@ fn tries(theme: &Theme, left: u32) -> impl IntoElement {
 /// The loaded keys, popping in one after another.
 fn tiles(theme: &Theme, elapsed: Duration, glyphs: &[Glyph], more: usize) -> impl IntoElement {
     div()
-        .mt(px(22.))
+        .mt(theme.px(22.))
         .flex()
-        .gap(px(8.))
+        .gap(theme.px(8.))
         .children((0_u32..).zip(glyphs).map(|(index, tile)| {
             let delay = Duration::from_millis(100).saturating_mul(index);
             let size = 40. * pop(elapsed, delay);
@@ -837,28 +894,28 @@ fn tiles(theme: &Theme, elapsed: Duration, glyphs: &[Glyph], more: usize) -> imp
                 theme.device_tint
             };
             div()
-                .size(px(40.))
+                .size(theme.px(40.))
                 .flex()
                 .items_center()
                 .justify_center()
                 .child(
                     div()
-                        .size(px(size))
-                        .rounded(px(12. * size / 40.))
+                        .size(theme.px(size))
+                        .rounded(theme.px(12. * size / 40.))
                         .bg(fill)
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_size(px(22. * size / 40.))
+                        .text_size(theme.px(22. * size / 40.))
                         .child(glyph_text(tile)),
                 )
         }))
         .children((more > 0).then(|| {
             div()
-                .h(px(40.))
+                .h(theme.px(40.))
                 .flex()
                 .items_center()
-                .text_size(px(12.))
+                .text_size(theme.px(12.))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme.text_muted)
                 .child(format!("+{more}"))
@@ -868,27 +925,27 @@ fn tiles(theme: &Theme, elapsed: Duration, glyphs: &[Glyph], more: usize) -> imp
 /// The bar that drains until a final screen closes.
 fn closing(theme: &Theme, elapsed: Duration, duration: Duration) -> impl IntoElement {
     div()
-        .mt(px(28.))
+        .mt(theme.px(28.))
         .flex()
         .flex_col()
         .items_center()
         .child(
             div()
-                .w(px(96.))
-                .h(px(3.))
-                .rounded(px(2.))
+                .w(theme.px(96.))
+                .h(theme.px(3.))
+                .rounded(theme.px(2.))
                 .bg(theme.ring_track)
                 .child(
                     div()
-                        .h(px(3.))
-                        .w(px(96. * (1. - fraction(elapsed, duration))))
+                        .h(theme.px(3.))
+                        .w(theme.px(96. * (1. - fraction(elapsed, duration))))
                         .bg(theme.dot_hollow),
                 ),
         )
         .child(
             div()
-                .mt(px(8.))
-                .text_size(px(12.))
+                .mt(theme.px(8.))
+                .text_size(theme.px(12.))
                 .text_color(theme.text_muted)
                 .child("Closing"),
         )
@@ -920,10 +977,10 @@ fn shake_offset(t: f32) -> f32 {
 /// The 52 px field shape with its 2 px ring.
 fn field_shell(theme: &Theme, error: bool) -> gpui::Div {
     div()
-        .mt(px(28.))
+        .mt(theme.px(28.))
         .w_full()
-        .h(px(52.))
-        .rounded(px(14.))
+        .h(theme.px(52.))
+        .rounded(theme.px(14.))
         .bg(if error {
             theme.field_error
         } else {
@@ -933,21 +990,26 @@ fn field_shell(theme: &Theme, error: bool) -> gpui::Div {
         .border_color(if error { theme.error } else { theme.accent })
         .flex()
         .items_center()
-        .pl(px(14.))
-        .pr(px(4.))
+        .pl(theme.px(14.))
+        .pr(theme.px(4.))
 }
 
 /// The 40 px accent square with an icon, inside a field.
 fn action_square(theme: &Theme, icon: &'static str, opacity: f32) -> impl IntoElement {
     div()
-        .size(px(40.))
-        .rounded(px(11.))
+        .size(theme.px(40.))
+        .rounded(theme.px(11.))
         .bg(theme.accent)
         .opacity(opacity)
         .flex()
         .items_center()
         .justify_center()
-        .child(svg().path(icon).size(px(18.)).text_color(theme.on_accent))
+        .child(
+            svg()
+                .path(icon)
+                .size(theme.px(18.))
+                .text_color(theme.on_accent),
+        )
 }
 
 fn pin_field(
@@ -969,8 +1031,8 @@ fn pin_field(
     };
     field_shell(theme, error)
         .relative()
-        .left(px(shake))
-        .child(div().flex_1().text_size(px(17.)).child(text))
+        .left(theme.px(shake))
+        .child(div().flex_1().text_size(theme.px(17.)).child(text))
         .child(
             div()
                 .id("submit")
@@ -985,19 +1047,19 @@ fn pin_field(
 }
 
 fn spinner(theme: &Theme, elapsed: Duration) -> impl IntoElement {
-    let accent = theme.accent;
+    let (accent, scale) = (theme.accent, theme.scale);
     let start = phase(elapsed, Duration::from_secs(1), Duration::ZERO);
-    div().mt(px(28.)).size(px(20.)).child(
+    div().mt(theme.px(28.)).size(theme.px(20.)).child(
         canvas(
             |_, _, _| (),
             move |bounds, (), window, _| {
                 paint_arc(
                     window,
                     bounds.center(),
-                    7.5,
+                    7.5 * scale,
                     start,
                     300. / 360.,
-                    2.2,
+                    2.2 * scale,
                     accent,
                 );
             },
@@ -1012,9 +1074,9 @@ fn close_button(screen: &Screen, theme: &Theme, cx: &mut Context<Popup>) -> Opti
         div()
             .id("close")
             .absolute()
-            .top(px(10.))
-            .right(px(10.))
-            .size(px(44.))
+            .top(theme.px(10.))
+            .right(theme.px(10.))
+            .size(theme.px(44.))
             .rounded_full()
             .flex()
             .items_center()
@@ -1023,7 +1085,7 @@ fn close_button(screen: &Screen, theme: &Theme, cx: &mut Context<Popup>) -> Opti
             .child(
                 svg()
                     .path("icons/close.svg")
-                    .size(px(16.))
+                    .size(theme.px(16.))
                     .text_color(theme.text_muted),
             )
             .into_any_element(),
@@ -1037,7 +1099,7 @@ fn queue_pill(waiting: &[Queued], theme: &Theme) -> Option<AnyElement> {
     }
     let circles = waiting.iter().take(2).enumerate().map(|(index, queued)| {
         let circle = div()
-            .size(px(24.))
+            .size(theme.px(24.))
             .rounded_full()
             .bg(theme.device_tint)
             .border_2()
@@ -1045,19 +1107,19 @@ fn queue_pill(waiting: &[Queued], theme: &Theme) -> Option<AnyElement> {
             .flex()
             .items_center()
             .justify_center()
-            .text_size(px(13.))
+            .text_size(theme.px(13.))
             .map(|circle| match &queued.key {
                 Some(key) => circle.child(glyph_text(&glyph(key))),
                 None => circle.child(
                     svg()
                         .path("icons/device-outline.svg")
-                        .w(px(8.))
-                        .h(px(12.))
+                        .w(theme.px(8.))
+                        .h(theme.px(12.))
                         .text_color(theme.text_muted),
                 ),
             });
         if index > 0 {
-            circle.ml(px(-8.))
+            circle.ml(theme.px(-8.))
         } else {
             circle
         }
@@ -1065,20 +1127,20 @@ fn queue_pill(waiting: &[Queued], theme: &Theme) -> Option<AnyElement> {
     Some(
         div()
             .absolute()
-            .top(px(18.))
-            .left(px(16.))
-            .h(px(30.))
-            .rounded(px(15.))
+            .top(theme.px(18.))
+            .left(theme.px(16.))
+            .h(theme.px(30.))
+            .rounded(theme.px(15.))
             .bg(theme.field)
             .flex()
             .items_center()
-            .pl(px(3.))
-            .pr(px(10.))
-            .gap(px(6.))
+            .pl(theme.px(3.))
+            .pr(theme.px(10.))
+            .gap(theme.px(6.))
             .child(div().flex().children(circles))
             .child(
                 div()
-                    .text_size(px(12.))
+                    .text_size(theme.px(12.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.text_muted)
                     .child(format!("+{}", waiting.len())),

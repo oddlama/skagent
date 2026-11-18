@@ -1,6 +1,17 @@
-//! Design B+'s colours (`tokens.json`), light and dark.
+//! The colours, fonts and size the popup is drawn with: design B+'s presets
+//! (`tokens.json`), or what the agent's configuration made of them
+//! (`skagent_popup::style`).
 
-use gpui::{Hsla, rgb};
+use std::sync::Arc;
+
+use gpui::{FontFeatures, Hsla, Pixels, SharedString, px, rgba};
+use skagent_popup::style::{Appearance, Color, Palette, SCALE_PERCENT, Style};
+
+/// The design's font for text, bundled with the package.
+pub const DESIGN_FONT: &str = "Inter";
+
+/// The design's font for commands and fingerprints, bundled with the package.
+pub const DESIGN_MONO: &str = "JetBrains Mono";
 
 /// Light or dark.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,8 +22,39 @@ pub enum Mode {
     Dark,
 }
 
-/// Every colour the popup uses.
-#[derive(Debug, Clone, Copy)]
+impl Mode {
+    /// The mode `appearance` forces, if it does.
+    #[must_use]
+    pub const fn forced_by(appearance: Appearance) -> Option<Self> {
+        match appearance {
+            Appearance::System => None,
+            Appearance::Light => Some(Self::Light),
+            Appearance::Dark => Some(Self::Dark),
+        }
+    }
+}
+
+/// The font families to draw with: the configured ones where the system
+/// has them, else the design's (see [`crate::fonts::available`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fonts {
+    /// For text.
+    pub text: SharedString,
+    /// For commands and fingerprints.
+    pub mono: SharedString,
+}
+
+impl Default for Fonts {
+    fn default() -> Self {
+        Self {
+            text: DESIGN_FONT.into(),
+            mono: DESIGN_MONO.into(),
+        }
+    }
+}
+
+/// Every colour the popup uses, its fonts and its size.
+#[derive(Debug, Clone)]
 pub struct Theme {
     /// Light or dark.
     pub mode: Mode,
@@ -22,109 +64,139 @@ pub struct Theme {
     pub border: Hsla,
     /// `text`.
     pub text: Hsla,
-    /// `textMuted`.
+    /// `muted-text`.
     pub text_muted: Hsla,
     /// `placeholder`.
     pub placeholder: Hsla,
     /// `field`.
     pub field: Hsla,
-    /// `fieldError`.
+    /// `field-error`.
     pub field_error: Hsla,
     /// `accent`.
     pub accent: Hsla,
-    /// `onAccent`.
+    /// `on-accent`.
     pub on_accent: Hsla,
     /// `error`.
     pub error: Hsla,
     /// `warning`.
     pub warning: Hsla,
-    /// `onWarning`.
+    /// `on-warning`.
     pub on_warning: Hsla,
     /// `success`.
     pub success: Hsla,
-    /// `onSuccess`.
+    /// `on-success`.
     pub on_success: Hsla,
-    /// `avatarTint`.
+    /// `avatar`.
     pub avatar_tint: Hsla,
-    /// `avatarTintWarning`.
+    /// `avatar-warning`.
     pub avatar_tint_warning: Hsla,
-    /// `avatarTintError`.
+    /// `avatar-error`.
     pub avatar_tint_error: Hsla,
-    /// `avatarMissingBorder`.
+    /// `avatar-missing`.
     pub avatar_missing_border: Hsla,
-    /// `deviceTint`.
+    /// `device`.
     pub device_tint: Hsla,
-    /// `ringTrack`.
+    /// `ring-track`.
     pub ring_track: Hsla,
-    /// `dotFilled`.
+    /// `dot`.
     pub dot_filled: Hsla,
-    /// `dotHollow`.
+    /// `dot-hollow`.
     pub dot_hollow: Hsla,
     /// Peak opacity of the pulse rings.
     pub pulse_opacity: f32,
+    /// The font family for text.
+    pub font: SharedString,
+    /// Its OpenType features.
+    pub font_features: FontFeatures,
+    /// The font family for commands and fingerprints.
+    pub mono: SharedString,
+    /// Its OpenType features.
+    pub mono_features: FontFeatures,
+    /// The popup's size relative to the design's.
+    pub scale: f32,
 }
 
-fn color(hex: u32) -> Hsla {
-    Hsla::from(rgb(hex))
+fn hsla(color: Color) -> Hsla {
+    Hsla::from(rgba(u32::from_be_bytes([
+        color.red,
+        color.green,
+        color.blue,
+        color.alpha,
+    ])))
+}
+
+fn features(configured: &std::collections::BTreeMap<String, u32>) -> FontFeatures {
+    if configured.is_empty() {
+        return FontFeatures::default();
+    }
+    FontFeatures(Arc::new(
+        configured
+            .iter()
+            .map(|(tag, value)| (tag.clone(), *value))
+            .collect(),
+    ))
 }
 
 impl Theme {
-    /// The theme for `mode`.
+    /// The design's theme for `mode`.
     #[must_use]
     pub fn new(mode: Mode) -> Self {
-        match mode {
-            Mode::Light => Self {
-                mode,
-                surface: color(0x00ff_ffff),
-                border: color(0x00e4_e4e8),
-                text: color(0x001f_1f23),
-                text_muted: color(0x006b_6970),
-                placeholder: color(0x006b_6970),
-                field: color(0x00f4_f4f6),
-                field_error: color(0x00fd_f0f1),
-                accent: color(0x001c_71d8),
-                on_accent: color(0x00ff_ffff),
-                error: color(0x00c0_1c28),
-                warning: color(0x00e5_a50a),
-                on_warning: color(0x001f_1f23),
-                success: color(0x001a_7f5a),
-                on_success: color(0x00ff_ffff),
-                avatar_tint: color(0x00ff_f1e5),
-                avatar_tint_warning: color(0x00fd_f3e1),
-                avatar_tint_error: color(0x00fd_f0f1),
-                avatar_missing_border: color(0x00b9_b8bf),
-                device_tint: color(0x00ee_f0f4),
-                ring_track: color(0x00ec_ecf0),
-                dot_filled: color(0x001f_1f23),
-                dot_hollow: color(0x009a_99a0),
-                pulse_opacity: 0.35,
-            },
-            Mode::Dark => Self {
-                mode,
-                surface: color(0x001c_1c1f),
-                border: color(0x0030_3036),
-                text: color(0x00f2_f2f4),
-                text_muted: color(0x00a3_a2a8),
-                placeholder: color(0x009a_99a0),
-                field: color(0x002a_2a2f),
-                field_error: color(0x0035_2224),
-                accent: color(0x0035_84e4),
-                on_accent: color(0x00ff_ffff),
-                error: color(0x00ff_7b72),
-                warning: color(0x00f5_c26b),
-                on_warning: color(0x001c_1c1f),
-                success: color(0x0057_e389),
-                on_success: color(0x001c_1c1f),
-                avatar_tint: color(0x003d_2b1f),
-                avatar_tint_warning: color(0x003a_2f1a),
-                avatar_tint_error: color(0x0035_2224),
-                avatar_missing_border: color(0x005a_5960),
-                device_tint: color(0x002c_2e33),
-                ring_track: color(0x002f_2f35),
-                dot_filled: color(0x00f2_f2f4),
-                dot_hollow: color(0x006b_6a70),
-                pulse_opacity: 0.4,
-            },
+        Self::styled(&Style::default(), mode, &Fonts::default())
+    }
+
+    /// `style`'s theme for `mode`, drawn with `fonts`.
+    #[must_use]
+    pub fn styled(style: &Style, mode: Mode, fonts: &Fonts) -> Self {
+        let (palette, pulse_opacity): (&Palette, f32) = match mode {
+            Mode::Light => (&style.light, 0.35),
+            Mode::Dark => (&style.dark, 0.4),
+        };
+        Self {
+            mode,
+            surface: hsla(palette.surface),
+            border: hsla(palette.border),
+            text: hsla(palette.text),
+            text_muted: hsla(palette.muted_text),
+            placeholder: hsla(palette.placeholder),
+            field: hsla(palette.field),
+            field_error: hsla(palette.field_error),
+            accent: hsla(palette.accent),
+            on_accent: hsla(palette.on_accent),
+            error: hsla(palette.error),
+            warning: hsla(palette.warning),
+            on_warning: hsla(palette.on_warning),
+            success: hsla(palette.success),
+            on_success: hsla(palette.on_success),
+            avatar_tint: hsla(palette.avatar),
+            avatar_tint_warning: hsla(palette.avatar_warning),
+            avatar_tint_error: hsla(palette.avatar_error),
+            avatar_missing_border: hsla(palette.avatar_missing),
+            device_tint: hsla(palette.device),
+            ring_track: hsla(palette.ring_track),
+            dot_filled: hsla(palette.dot),
+            dot_hollow: hsla(palette.dot_hollow),
+            pulse_opacity,
+            font: fonts.text.clone(),
+            font_features: features(&style.font_features),
+            mono: fonts.mono.clone(),
+            mono_features: features(&style.monospace_font_features),
+            scale: scale(style),
         }
     }
+
+    /// `value` design pixels at this theme's size.
+    #[must_use]
+    pub fn px(&self, value: f32) -> Pixels {
+        px(value * self.scale)
+    }
+}
+
+/// `style`'s size relative to the design's, kept within
+/// [`SCALE_PERCENT`] whatever the agent sent.
+#[must_use]
+pub fn scale(style: &Style) -> f32 {
+    let percent = style
+        .scale_percent
+        .clamp(*SCALE_PERCENT.start(), *SCALE_PERCENT.end());
+    f32::from(percent) / 100.
 }
