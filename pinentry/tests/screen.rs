@@ -8,7 +8,7 @@ use skagent_pinentry::screen::{
     Anchor, Badge, Body, Close, Glyph, Screen, Tone, glyph, request_subtitle, short_fingerprint,
     tries_left,
 };
-use skagent_popup::{Failure, Host, Key, Request, SecurityKey, State};
+use skagent_popup::{Failure, Host, Key, Request, Requester, SecurityKey, State};
 
 fn screen(name: &str) -> Result<Screen> {
     let (state, _) = fixture(name).with_context(|| format!("no fixture {name}"))?;
@@ -170,6 +170,36 @@ fn subtitles_name_what_is_signed() {
             "Signature for \"file\"",
         ),
         (Request::Unknown, "Unknown request"),
+        (
+            Request::Decrypt {
+                by: Requester::Program {
+                    name: Some("agenix".to_owned()),
+                },
+            },
+            "Decrypt a file · agenix",
+        ),
+        (
+            Request::Decrypt {
+                by: Requester::Program { name: None },
+            },
+            "Decrypt a file",
+        ),
+        (
+            Request::Decrypt {
+                by: Requester::Forwarded {
+                    host: named("build-host"),
+                },
+            },
+            "Decrypt a file · for build-host",
+        ),
+        (
+            Request::Decrypt {
+                by: Requester::Forwarded {
+                    host: Host::Unverified,
+                },
+            },
+            "Decrypt a file · for Unknown host",
+        ),
     ];
     for (request, expected) in cases {
         assert_eq!(request_subtitle(&request).text(), expected);
@@ -205,6 +235,55 @@ fn small_words_and_fallbacks() {
     );
     assert_eq!(glyph(&key(None, "  ")), Glyph::Initial("?".to_owned()));
     assert_eq!(glyph(&key(Some("🦊"), "x")), Glyph::Emoji("🦊".to_owned()));
+}
+
+/// A decryption goes through the screens of a signature, with its own words.
+#[test]
+fn a_decryption_is_decrypted_not_signed() {
+    let identity = || Key {
+        emoji: None,
+        label: "age identity".to_owned(),
+        fingerprint: "age1pq1x34nzs…fzv49zc0k".to_owned(),
+    };
+    let request = || Request::Decrypt {
+        by: Requester::Program {
+            name: Some("agenix".to_owned()),
+        },
+    };
+    let done = Screen::of(&State::Signed {
+        key: identity(),
+        request: request(),
+    });
+    assert_eq!(done.title, "Decrypted");
+    assert_eq!(done.subtitle.text(), "Decrypt a file · agenix");
+    assert_eq!(done.announcement, "Decrypted, Decrypt a file · agenix");
+
+    let again = |security_key| {
+        Screen::of(&State::Touch {
+            key: identity(),
+            request: request(),
+            security_key,
+            timeout_ms: 15_000,
+            again: true,
+        })
+    };
+    assert_eq!(again(None).subtitle.text(), "now to decrypt");
+    assert_eq!(
+        again(Some(SecurityKey {
+            name: "Desk 5C NFC".to_owned(),
+        }))
+        .subtitle
+        .text(),
+        "Desk 5C NFC · now to decrypt"
+    );
+    let pin = Screen::of(&State::Pin {
+        key: identity(),
+        request: request(),
+        security_key: None,
+        mistake: None,
+    });
+    assert_eq!(pin.title, "age identity");
+    assert_eq!(pin.subtitle.text(), "Decrypt a file · agenix");
 }
 
 /// Keys that aren't YubiKeys report no serial, so no name.

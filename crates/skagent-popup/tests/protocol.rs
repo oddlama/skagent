@@ -4,8 +4,9 @@
 
 use anyhow::{Result, bail, ensure};
 use skagent_popup::{
-    Failure, Host, Intent, Key, Message, Mistake, Queued, Request, SecurityKey, State, VERSION,
-    cancel_line, decode_message, encode_message, parse_intent, pin_line, ready_line, retry_line,
+    Failure, Host, Intent, Key, Message, Mistake, Queued, Request, Requester, SecurityKey, State,
+    VERSION, cancel_line, decode_message, encode_message, parse_intent, pin_line, ready_line,
+    retry_line,
 };
 
 fn key() -> Key {
@@ -295,5 +296,50 @@ fn an_unknown_failure_reason_is_shown_as_other() -> Result<()> {
         ),
         "{state:?}"
     );
+    Ok(())
+}
+
+#[test]
+fn a_decryption_says_who_asks() -> Result<()> {
+    let identity = Key {
+        emoji: None,
+        label: "age identity".to_owned(),
+        fingerprint: "age1pq1x34nzs…fzv49zc0k".to_owned(),
+    };
+    let requesters = [
+        (
+            Requester::Program {
+                name: Some("agenix".to_owned()),
+            },
+            r#""by":{"kind":"program","name":"agenix"}"#,
+        ),
+        (
+            Requester::Program { name: None },
+            r#""by":{"kind":"program","name":null}"#,
+        ),
+        (
+            Requester::Forwarded {
+                host: Host::Unverified,
+            },
+            r#""by":{"kind":"forwarded","host":{"kind":"unverified"}}"#,
+        ),
+    ];
+    for (by, expected) in requesters {
+        let message = Message::Show {
+            seq: 1,
+            waiting: Vec::new(),
+            state: Box::new(State::Touch {
+                key: identity.clone(),
+                request: Request::Decrypt { by },
+                security_key: None,
+                timeout_ms: 15_000,
+                again: false,
+            }),
+        };
+        let text = String::from_utf8(encode_message(&message)?)?;
+        ensure!(text.contains(r#""kind":"decrypt""#), "{text}");
+        ensure!(text.contains(expected), "{text}");
+        ensure!(decode_message(text.trim_end())? == message);
+    }
     Ok(())
 }

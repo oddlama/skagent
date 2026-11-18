@@ -251,7 +251,7 @@ pub struct Mistake {
     pub tries_left: u32,
 }
 
-/// What a signature is for.
+/// What a request is for: a signature, or a decryption.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Request {
@@ -269,8 +269,33 @@ pub enum Request {
         /// What kind of data, e.g. `git` or `file`.
         namespace: String,
     },
+    /// Decrypting an age file. The [`Key`] of the state is then an age
+    /// identity: its label, and its recipient cut short where an SSH key has
+    /// its fingerprint. Which file isn't known: what age sends says nothing
+    /// about the content.
+    Decrypt {
+        /// Who asks.
+        by: Requester,
+    },
     /// Data of no known kind.
     Unknown,
+}
+
+/// Who asks for a decryption.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Requester {
+    /// A program on this machine.
+    Program {
+        /// The program that started age, e.g. `agenix`, as the process list
+        /// names it. A hint, nothing the agent can verify.
+        name: Option<String>,
+    },
+    /// Another machine, through a forwarded agent.
+    Forwarded {
+        /// The host the agent was forwarded to.
+        host: Host,
+    },
 }
 
 /// A host as far as the agent can tell.

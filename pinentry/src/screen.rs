@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use skagent_popup::{Failure, Host, Key, Request, SecurityKey, State};
+use skagent_popup::{Failure, Host, Key, Request, Requester, SecurityKey, State};
 
 /// PIN tries a YubiKey starts with: the dots of the re-plug screen.
 pub const TOTAL_TRIES: u32 = 8;
@@ -379,6 +379,23 @@ pub fn request_subtitle(request: &Request) -> Subtitle {
         }
         Request::Sign { namespace } if namespace == "git" => Subtitle::muted("Git signature"),
         Request::Sign { namespace } => Subtitle::muted(format!("Signature for \"{namespace}\"")),
+        Request::Decrypt { by } => {
+            let mut spans = vec![Span::text("Decrypt a file")];
+            match by {
+                Requester::Program { name: None } => {}
+                Requester::Program { name: Some(name) } => {
+                    spans.push(Span::text(format!(" · {name}")));
+                }
+                Requester::Forwarded { host } => {
+                    spans.push(Span::text(" · for "));
+                    spans.extend(host_spans(host));
+                }
+            }
+            Subtitle {
+                spans,
+                tone: Tone::Muted,
+            }
+        }
         Request::Unknown => Subtitle {
             spans: vec![Span::text("Unknown request")],
             tone: Tone::Warning,
@@ -483,14 +500,19 @@ fn pair(security_key: Option<&SecurityKey>, timeout_ms: u64) -> Screen {
 }
 
 fn signed(key: &Key, request: &Request) -> Screen {
+    let title = if matches!(request, Request::Decrypt { .. }) {
+        "Decrypted"
+    } else {
+        "Signed"
+    };
     Screen {
         anchor: Anchor::key(key, Tint::Key),
         badge: Some(Badge::Done),
-        title: "Signed".to_owned(),
+        title: title.to_owned(),
         subtitle: request_subtitle(request),
         body: Body::Empty,
         close: Close::None,
-        announcement: format!("Signed, {}", request_subtitle(request).text()),
+        announcement: format!("{title}, {}", request_subtitle(request).text()),
         lingers: Some(SIGNED_FOR),
     }
 }
@@ -558,11 +580,14 @@ fn touch(
         (false, Some(_)) => "Touch your YubiKey",
         (false, None) => "Touch your security key",
     };
+    let now_to = if matches!(request, Request::Decrypt { .. }) {
+        "now to decrypt"
+    } else {
+        "now to sign"
+    };
     let subtitle = match (again, security_key) {
-        (true, Some(security_key)) => {
-            Subtitle::muted(format!("{} · now to sign", security_key.name))
-        }
-        (true, None) => Subtitle::muted("now to sign"),
+        (true, Some(security_key)) => Subtitle::muted(format!("{} · {now_to}", security_key.name)),
+        (true, None) => Subtitle::muted(now_to),
         (false, Some(security_key)) => Subtitle::muted(security_key.name.clone()),
         (false, None) => request_subtitle(request),
     };
