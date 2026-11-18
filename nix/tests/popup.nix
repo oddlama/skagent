@@ -13,12 +13,15 @@ let
   socket = "${dir}/agent.sock";
   touchFile = "/run/testkey-touch";
   otherTouchFile = "/run/testkey-other-touch";
+  # While these exist, the test keys are unplugged (skagent-testkey --unplugged-file).
+  unpluggedFile = "/run/testkey-unplugged";
+  otherUnpluggedFile = "/run/testkey-other-unplugged";
   popupLog = "${dir}/log";
   agent =
     unit: popup:
     "systemd-run --unit ${unit} --uid alice --setenv SKAGENT_TEST_POPUP_DIR=${dir}"
     + " ${package}/bin/skagent serve --log skagent=debug --socket ${socket}"
-    + " --config ${dir}/config.toml --popup ${popup}";
+    + " --config ${dir}/config.toml --plug-in-timeout 20s --popup ${popup}";
 in
 pkgs.testers.runNixOSTest {
   name = "skagent-popup";
@@ -40,6 +43,7 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     import json
     import shlex
+    import time
 
     def alice(command: str) -> tuple[int, str]:
         return machine.execute(f"su - alice -c {shlex.quote(command)} 2>&1")
@@ -100,6 +104,14 @@ pkgs.testers.runNixOSTest {
             f" ${pkgs.openssh}/bin/ssh-keygen -Y sign -f /home/alice/id_sk.pub -n test /home/alice/{unit}"
         )
 
+    def unplug(name: str, flag: str) -> None:
+        machine.succeed(f"touch {flag}")
+        machine.wait_until_fails(f"fido2-token -L | grep -F '{name}' >/dev/null", timeout=10)
+
+    def plug_in(name: str, flag: str) -> None:
+        machine.succeed(f"rm -f {flag}")
+        machine.wait_until_succeeds(f"fido2-token -L | grep -F '{name}' >/dev/null", timeout=10)
+
     def finished(unit: str, success: bool = True) -> None:
         machine.wait_until_succeeds(f"systemctl show {unit} -p ActiveState --value | grep -E '^(inactive|failed)$' >/dev/null")
         status = machine.succeed(f"systemctl show {unit} -p ExecMainStatus --value").strip()
@@ -109,7 +121,7 @@ pkgs.testers.runNixOSTest {
     machine.succeed(
         "systemd-run --unit testkey --setenv SKAGENT_TESTKEY_PIN=${pin}"
         " ${testkey}/bin/skagent-testkey --touch file --touch-file ${touchFile}"
-        " --name 'popup key' --serial 12345678"
+        " --name 'popup key' --serial 12345678 --unplugged-file ${unpluggedFile}"
     )
     machine.wait_until_succeeds("fido2-token -L | grep -F 'popup key' >/dev/null")
 
@@ -235,6 +247,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed(
             "systemd-run --unit other-key --setenv SKAGENT_TESTKEY_PIN=135790"
             " ${testkey}/bin/skagent-testkey --touch file --touch-file ${otherTouchFile} --name 'other key'"
+            " --unplugged-file ${otherUnpluggedFile}"
         )
         machine.wait_until_succeeds("fido2-token -L | grep -F 'other key' >/dev/null")
         # Removing the key drops its binding (and PIN): it must be selected.
@@ -253,6 +266,92 @@ pkgs.testers.runNixOSTest {
         assert select["devices"] == 2 and select["timeout_ms"] == 30000, select
         assert select["key"]["label"] == "github-work", select
         assert touch_state["again"] is True, touch_state
+
+    with subtest("a replugged YubiKey is recognized by its serial, without a selection touch"):
+        unplug("popup key", "${unpluggedFile}")
+        plug_in("popup key", "${unpluggedFile}")
+        mark = len(popup_log())
+        selections = touches("select")
+        touch()
+        sign_ok()
+        closed()
+        # A new plug-in: its PIN is asked for again, but no key is selected.
+        assert names(mark) == ["pin", "touch", "signed"], names(mark)
+        assert touches("select") == selections, "selected by touch"
+        assert shown(mark)[1]["again"] is False, shown(mark)
+
+    with subtest("a request waits for its YubiKey, asking for it by name"):
+        unplug("popup key", "${unpluggedFile}")
+        mark = len(popup_log())
+        start_sign("waiting")
+        retry(lambda _last_try: "wrong-key" in names(mark), timeout_seconds=10)
+        wrong = shown(mark)[0]
+        assert wrong["security_key"] == {"name": "Desk 5C NFC"} and wrong["other"] is None, wrong
+        assert wrong["key"]["label"] == "github-work", wrong
+        unplug("other key", "${otherUnpluggedFile}")
+        retry(lambda _last_try: "no-key" in names(mark), timeout_seconds=10)
+        assert shown(mark)[1]["security_key"] == {"name": "Desk 5C NFC"}, shown(mark)
+        touch()
+        plug_in("popup key", "${unpluggedFile}")
+        finished("waiting")
+        closed()
+        assert names(mark) == ["wrong-key", "no-key", "pin", "touch", "signed"], names(mark)
+        plug_in("other key", "${otherUnpluggedFile}")
+
+    with subtest("cancelling in the popup ends the wait"):
+        unplug("popup key", "${unpluggedFile}")
+        alice_ok("touch ${dir}/cancel-wait")
+        mark = len(popup_log())
+        status, out = sign()
+        assert status != 0, out
+        closed()
+        assert names(mark) == ["wrong-key"], names(mark)
+        alice_ok("rm ${dir}/cancel-wait")
+
+    with subtest("a request gives up when its YubiKey isn't plugged in in time"):
+        unplug("other key", "${otherUnpluggedFile}")
+        mark = len(popup_log())
+        started = time.monotonic()
+        status, out = sign()
+        waited = time.monotonic() - started
+        assert status != 0, out
+        assert 19 < waited < 30, f"waited {waited:.1f} s, not the 20 s plug-in timeout"
+        closed()
+        assert names(mark) == ["no-key", "failed"], names(mark)
+        failed = shown(mark)[-1]
+        assert failed["reason"] == "not-plugged-in", failed
+        assert failed["security_key"] == {"name": "Desk 5C NFC"}, failed
+        assert "the YubiKey with serial 12345678 wasn't plugged in" in journal("skagent")
+
+    with subtest("the client hanging up ends the wait"):
+        mark = len(popup_log())
+        start_sign("hung-up")
+        retry(lambda _last_try: "no-key" in names(mark), timeout_seconds=10)
+        started = time.monotonic()
+        machine.succeed("systemctl stop hung-up")
+        closed()
+        assert time.monotonic() - started < 10, "kept waiting after the client left"
+        assert names(mark) == ["no-key"], names(mark)
+
+    with subtest("which YubiKey holds a key is remembered across agent restarts"):
+        remembered = alice_ok("cat ~/.local/state/skagent/bindings.toml")
+        assert "serial = 12345678" in remembered, remembered
+        assert alice_ok("stat -c %a ~/.local/state/skagent/bindings.toml").strip() == "600"
+        machine.succeed("systemctl stop skagent")
+        machine.wait_until_fails("test -e ${socket}")
+        machine.succeed("${agent "skagent" "/run/current-system/sw/bin/fake-popup"}")
+        machine.wait_for_file("${socket}")
+        alice_ok("SSH_AUTH_SOCK=${socket} ssh-add ~/id_sk")
+        mark = len(popup_log())
+        start_sign("remembered")
+        retry(lambda _last_try: "no-key" in names(mark), timeout_seconds=10)
+        assert shown(mark)[0]["security_key"] == {"name": "Desk 5C NFC"}, shown(mark)
+        touch()
+        plug_in("popup key", "${unpluggedFile}")
+        finished("remembered")
+        closed()
+        assert names(mark) == ["no-key", "pin", "touch", "signed"], names(mark)
+        plug_in("other key", "${otherUnpluggedFile}")
 
     with subtest("a key the only security key doesn't hold fails, saying so"):
         # A key of the other security key's own; then only the popup key stays.

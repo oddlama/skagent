@@ -5,6 +5,7 @@ like a user would, as the files in $SKAGENT_TEST_POPUP_DIR say:
 - answers: PINs to enter, one line each, used up in order; then pin
 - cancel-pin: cancel PIN prompts
 - hold-pin: wait with the answer to a PIN prompt while this exists
+- cancel-wait: cancel while waiting for a security key to be plugged in
 - cancel-touch: cancel while the key waits for a touch
 - retry: try again after a touch timeout, else cancel
 """
@@ -68,6 +69,9 @@ for line in sys.stdin:
             say(f"PIN {seq} {escaped(next_pin())}")
     elif name == "touch" and os.path.exists(path("cancel-touch")):
         say(f"CANCEL {seq}")
+    elif name in ("no-key", "wrong-key"):
+        if os.path.exists(path("cancel-wait")):
+            say(f"CANCEL {seq}")
     elif name == "timeout":
         retry = os.path.exists(path("retry"))
         say(f"RETRY {seq}" if retry else f"CANCEL {seq}")

@@ -90,6 +90,10 @@ let
     cfg.secretMemory
   ]
   ++ lib.optional (!cfg.touchNotification) "--no-touch-notification"
+  ++ [
+    "--plug-in-timeout"
+    cfg.plugInTimeout
+  ]
   ++ cfg.extraArgs;
 in
 {
@@ -263,6 +267,17 @@ in
       type = types.bool;
       default = true;
       description = "Show a desktop notification while a security key waits for a touch.";
+    };
+
+    plugInTimeout = mkOption {
+      type = duration;
+      default = "15s";
+      example = "1m";
+      description = ''
+        How long a request waits for its security key to be plugged in,
+        asking for it by name once skagent knows which YubiKey holds the key.
+        `0` fails right away.
+      '';
     };
 
     loadAtLogin = lib.mkEnableOption ''

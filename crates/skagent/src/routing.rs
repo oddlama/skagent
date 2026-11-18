@@ -1,8 +1,9 @@
-//! Credential-to-device bindings and device-operation serialization.
+//! Finding the device for a request, and device-operation serialization.
 //!
 //! Bound devices can sign concurrently. Selecting an unbound credential takes
 //! exclusive access to all devices, so its touch probes cannot steal a touch
-//! from an assertion. No PIN is involved in selection.
+//! from an assertion. No PIN is involved in selection. A request whose
+//! security key isn't plugged in waits for it, up to the plug-in timeout.
 
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -13,6 +14,7 @@ use anyhow::{Context as _, Result, bail, ensure};
 use skagent_fido::{Device, hid_devices, yubikey_serial};
 use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard, OwnedRwLockReadGuard, RwLock};
 
+use crate::bindings::{Bindings, Missing, NotPluggedIn, Resolution};
 use crate::cancel::{Abandoned, AbandonedFlag};
 use crate::device::DeviceIdentity;
 use crate::notify::Notifier;
@@ -25,62 +27,23 @@ pub(crate) const SELECTION_TIMEOUT: Duration = Duration::from_secs(30);
 /// Called with the number of candidates when a touch selection starts.
 pub(crate) type OnSelect = Box<dyn FnOnce(usize) + Send>;
 
+/// Called when a request starts waiting for its security key, and whenever
+/// what it waits for changes (e.g. the wrong one was plugged in).
+pub(crate) type OnWait = Box<dyn FnMut(Missing) + Send>;
+
+/// How often a request waiting for its security key looks for it.
+const PLUG_IN_POLL: Duration = Duration::from_millis(250);
+
+/// How long reading a new plug-in's serial waits for the device. Devices
+/// busy with another request had their serial read when they were opened.
+const SERIAL_LOCK_WAIT: Duration = Duration::from_millis(100);
+
 /// Longest wait for a busy security key or credential. A request ahead can
 /// hold a key for a PIN prompt (60 s) plus a touch (35 s); this lets one such
 /// request finish, but stops requests from piling up behind an unresponsive
 /// key forever.
 pub const QUEUE_TIMEOUT: Duration = Duration::from_secs(120);
 const TOUCH_POLL: Duration = Duration::from_millis(50);
-
-/// A routing decision made without touching a device or reading a PIN.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Resolution {
-    /// An established binding, or the only device on first use.
-    Direct(DeviceIdentity),
-    /// Multiple candidates, or a binding was lost. Require explicit selection.
-    Touch,
-}
-
-/// Successful credential-to-device associations, independent of cached PINs.
-#[derive(Debug, Default)]
-pub struct Bindings(HashMap<CredentialKey, DeviceIdentity>);
-
-impl Bindings {
-    /// Binds a credential only after a successful assertion on this device.
-    pub fn bind(&mut self, key: CredentialKey, device: DeviceIdentity) {
-        self.0.insert(key, device);
-    }
-
-    /// Removes an identity's binding, not merely its PIN.
-    pub fn forget(&mut self, key: &CredentialKey) {
-        self.0.remove(key);
-    }
-
-    /// Removes all associations when the agent unloads all identities.
-    pub fn clear(&mut self) {
-        self.0.clear();
-    }
-
-    /// Chooses a known device, never another device in its place. A changed
-    /// or absent binding always requires touch, even with a single candidate.
-    ///
-    /// # Errors
-    /// Refuses when no FIDO devices are connected.
-    pub fn resolve(&self, key: &CredentialKey, devices: &[DeviceIdentity]) -> Result<Resolution> {
-        ensure!(!devices.is_empty(), "no FIDO security key is connected");
-        if let Some(bound) = self.0.get(key) {
-            return Ok(if devices.contains(bound) {
-                Resolution::Direct(bound.clone())
-            } else {
-                Resolution::Touch
-            });
-        }
-        Ok(match devices {
-            [only] => Resolution::Direct(only.clone()),
-            _ => Resolution::Touch,
-        })
-    }
-}
 
 /// Independent locks, reclaimed once nobody holds or waits for them.
 #[derive(Debug)]
@@ -151,6 +114,16 @@ impl Serials {
         }
     }
 
+    /// The serial of `identity` if it was read, without reading it.
+    fn cached(&self, identity: &DeviceIdentity) -> Option<u32> {
+        self.lock().get(identity).copied().flatten()
+    }
+
+    /// Whether the serial of `identity` was read (reporting one or none).
+    fn known(&self, identity: &DeviceIdentity) -> bool {
+        self.lock().contains_key(identity)
+    }
+
     /// Forgets plug-ins that aren't connected any more.
     fn retain(&self, connected: &[DeviceIdentity]) {
         self.lock()
@@ -172,6 +145,8 @@ pub(crate) struct Router {
     access: Arc<RwLock<()>>,
     /// Shows "touch the key to use" while selecting.
     pub notifier: Option<Arc<Notifier>>,
+    /// How long a request waits for its security key to be plugged in.
+    pub plug_in_timeout: Duration,
 }
 
 /// These locks travel with the open device into blocking workers. Dropping an
@@ -188,6 +163,13 @@ pub(crate) struct RoutedDevice {
 }
 
 impl Router {
+    /// The same router, starting from `bindings`.
+    #[must_use]
+    pub fn with_bindings(mut self, bindings: Bindings) -> Self {
+        self.bindings = Mutex::new(bindings);
+        self
+    }
+
     /// The bindings, locked. Callers that change them together with other
     /// state take every lock first and then change everything without
     /// awaiting, so a cancelled caller can't leave half of it done.
@@ -197,15 +179,18 @@ impl Router {
 
     /// The device for `key`, described as `label` should the user have to
     /// select it by touch. `on_select` is called with the number of
-    /// candidates right before a selection starts.
+    /// candidates right before a selection starts, `on_wait` when the
+    /// request waits for its security key to be plugged in.
     pub async fn route(
         &self,
         key: &CredentialKey,
         ticket: SigningTicket,
         label: &str,
         on_select: Option<OnSelect>,
+        on_wait: Option<OnWait>,
     ) -> Result<RoutedDevice> {
-        self.route_key(Some(key), ticket, label, on_select).await
+        self.route_key(Some(key), ticket, label, on_select, on_wait)
+            .await
     }
 
     /// The device to load resident keys from, see [`Router::route`].
@@ -213,24 +198,60 @@ impl Router {
         &self,
         ticket: SigningTicket,
         on_select: Option<OnSelect>,
+        on_wait: Option<OnWait>,
     ) -> Result<RoutedDevice> {
-        self.route_key(None, ticket, "", on_select).await
+        self.route_key(None, ticket, "", on_select, on_wait).await
+    }
+
+    /// The connected devices, with the serials resolving `key` needs.
+    async fn candidates(&self, key: Option<&CredentialKey>) -> Result<Vec<DeviceIdentity>> {
+        let candidates = connected().await?;
+        self.serials.retain(&candidates);
+        let needs_serials = self.bindings.lock().await.needs_serials(key, &candidates);
+        if needs_serials {
+            self.learn_serials(&candidates).await;
+        }
+        Ok(candidates)
+    }
+
+    /// Reads the serials of new plug-ins, each under its device lock.
+    async fn learn_serials(&self, candidates: &[DeviceIdentity]) {
+        for identity in candidates {
+            if self.serials.known(identity) {
+                continue;
+            }
+            let Ok(operation) = self
+                .devices
+                .lock_within(identity.clone(), SERIAL_LOCK_WAIT)
+                .await
+            else {
+                continue;
+            };
+            let serials = Arc::clone(&self.serials);
+            let identity = identity.clone();
+            // The device lock goes along: dropping this request can't
+            // release it while the worker still talks to the device.
+            let read = tokio::task::spawn_blocking(move || {
+                let _operation = operation;
+                serials.of(&identity);
+            })
+            .await;
+            if let Err(error) = read {
+                tracing::debug!(%error, "the serial reading thread failed");
+            }
+        }
     }
 
     async fn resolve(
         &self,
         key: Option<&CredentialKey>,
         candidates: &[DeviceIdentity],
-    ) -> Result<Resolution> {
-        if let Some(key) = key {
-            self.bindings.lock().await.resolve(key, candidates)
-        } else {
-            ensure!(!candidates.is_empty(), "no FIDO security key is connected");
-            Ok(match candidates {
-                [only] => Resolution::Direct(only.clone()),
-                _ => Resolution::Touch,
-            })
-        }
+    ) -> Resolution {
+        let serials = &self.serials;
+        self.bindings
+            .lock()
+            .await
+            .resolve(key, candidates, |identity| serials.cached(identity))
     }
 
     async fn route_key(
@@ -239,25 +260,60 @@ impl Router {
         ticket: SigningTicket,
         label: &str,
         on_select: Option<OnSelect>,
+        mut on_wait: Option<OnWait>,
     ) -> Result<RoutedDevice> {
-        let read = within_queue_timeout(Arc::clone(&self.access).read_owned()).await?;
-        ticket.check()?;
-        let candidates = connected().await?;
-        self.serials.retain(&candidates);
-        let decision = self.resolve(key, &candidates).await?;
-        if let Resolution::Direct(identity) = decision {
-            return self.open_direct(identity, read).await;
+        let started = Instant::now();
+        let mut waiting_for = None;
+        loop {
+            let read = within_queue_timeout(Arc::clone(&self.access).read_owned()).await?;
+            ticket.check()?;
+            let candidates = self.candidates(key).await?;
+            match self.resolve(key, &candidates).await {
+                Resolution::Direct(identity) => return self.open_direct(identity, read).await,
+                Resolution::Touch => break,
+                Resolution::Wait(missing) => {
+                    drop(read);
+                    if started.elapsed() >= self.plug_in_timeout {
+                        return Err(NotPluggedIn {
+                            serial: missing.serial(),
+                        }
+                        .into());
+                    }
+                    if waiting_for != Some(missing) {
+                        tracing::info!(
+                            serial = missing.serial(),
+                            timeout_secs = self.plug_in_timeout.as_secs(),
+                            "waiting for the security key to be plugged in"
+                        );
+                        if let Some(on_wait) = on_wait.as_mut() {
+                            on_wait(missing);
+                        }
+                        waiting_for = Some(missing);
+                    }
+                    tokio::time::sleep(PLUG_IN_POLL).await;
+                }
+            }
         }
-        drop(read);
+        // Closes a notification asking to plug the key in.
+        drop(on_wait);
 
         // Re-enumerate after obtaining exclusive access: another request may
         // have waited for a touch or changed a binding in the meantime.
         let exclusive = within_queue_timeout(Arc::clone(&self.access).write_owned()).await?;
         ticket.check()?;
-        let candidates = connected().await?;
-        let decision = self.resolve(key, &candidates).await?;
-        if let Resolution::Direct(identity) = decision {
-            return self.open_direct(identity, exclusive.downgrade()).await;
+        let candidates = self.candidates(key).await?;
+        match self.resolve(key, &candidates).await {
+            Resolution::Direct(identity) => {
+                return self.open_direct(identity, exclusive.downgrade()).await;
+            }
+            // Unplugged since: no more waiting.
+            Resolution::Wait(missing) => {
+                return Err(NotPluggedIn {
+                    serial: missing.serial(),
+                }
+                .into());
+            }
+            Resolution::Touch => {}
         }
         let body = if key.is_some() {
             tracing::info!(

@@ -9,6 +9,7 @@ use anyhow::{Context as _, Result};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
 use crate::agent::SkAgent;
+use crate::bindings::{Bindings, default_bindings_path};
 use crate::cli::{SecretMemory, ServeArgs, SocketArgs};
 use crate::config::{self, Config};
 use crate::logind;
@@ -165,7 +166,18 @@ pub async fn run(
     }
     let mut signer = Signer::new(popup.is_none().then_some(prompt), policy)
         .with_pin_policies(args.pin_policies)
-        .with_config(Arc::new(config));
+        .with_config(Arc::new(config))
+        .with_plug_in_timeout(args.plug_in_timeout);
+    match default_bindings_path(
+        std::env::var_os("XDG_STATE_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    ) {
+        Ok(file) => signer = signer.with_bindings(Bindings::remembered_in(file)),
+        Err(error) => tracing::warn!(
+            error = %format!("{error:#}"),
+            "not remembering which YubiKey holds which key across restarts"
+        ),
+    }
     if let Some(popup) = popup {
         // The popup shows the touch itself.
         signer = signer.with_popup(popup);

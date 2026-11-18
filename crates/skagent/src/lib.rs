@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+pub mod bindings;
 pub mod cancel;
 pub mod cli;
 pub mod client;

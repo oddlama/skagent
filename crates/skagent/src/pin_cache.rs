@@ -16,6 +16,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
+use sha2::{Digest as _, Sha256};
 use skagent_secret::SecretBuffer;
 
 use crate::device::DeviceIdentity;
@@ -35,6 +36,21 @@ impl CredentialKey {
             rp_id: rp_id.to_owned(),
             key_handle: key_handle.to_vec(),
         }
+    }
+
+    /// A SHA-256 digest of the credential, to remember it by without
+    /// writing down its key handle (for non-resident keys, the wrapped
+    /// private key).
+    #[must_use]
+    pub fn digest(&self) -> [u8; 32] {
+        let rp_id_len = u64::try_from(self.rp_id.len()).unwrap_or(u64::MAX);
+        Sha256::new()
+            .chain_update(b"skagent credential v1\0")
+            .chain_update(rp_id_len.to_be_bytes())
+            .chain_update(self.rp_id.as_bytes())
+            .chain_update(&self.key_handle)
+            .finalize()
+            .into()
     }
 }
 

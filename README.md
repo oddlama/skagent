@@ -9,7 +9,7 @@ needs your PIN and a touch. skagent caches the PIN securely and can handle multi
 - 🛡️ **Hardened** with PINs in locked, guarded and zeroized memory, no core dumps and no ptrace
 - ⏱️ **Bounded PIN cache** with a hard lifetime, an optional idle timeout and per-key policies
 - 🔒 **Forgets your PIN** when the screen locks, the machine sleeps or the key is unplugged
-- 🗝️ **Multiple security keys** with separate PIN caches, pick the right one by touch
+- 🗝️ **Multiple security keys** with separate PIN caches, recognized by their serial number
 - 📥 **Loads resident keys** straight from the security key, no stub files needed
 - 🌍 **Agent forwarding and `ssh-add -h`** destination constraints, checked like OpenSSH does
 - 💬 **Prompts that tell you what you sign**, plus a notification while the key waits for a touch
@@ -125,6 +125,7 @@ home-manager counterparts:
 | `--askpass PATH` | `askpass` | | Ask with an askpass program instead of pinentry. |
 | `--popup PATH` | `popup.enable` | | Use skagent's own popup instead of pinentry, see below. |
 | `--no-touch-notification` | `touchNotification` | | Don't show a notification while a key waits for a touch. |
+| `--plug-in-timeout 1m` | `plugInTimeout` | `15s` | How long a request waits for its security key to be plugged in. `0` fails right away. |
 | `--secret-memory memfd-secret` | `secretMemory` | `locked` | Keep PINs in `memfd_secret(2)` memory, which is also removed from the kernel's direct map. The system can't hibernate while skagent holds any. |
 
 A policy rule selects keys by `application` or by `fingerprint` (as
@@ -216,8 +217,15 @@ sign. From then on skagent remembers which security key holds which key, so
 signatures need just one touch. Keys on different security keys can even sign
 at the same time.
 
-If a security key is replugged, you'll pick it by touch again, even if it's the
-only one connected. skagent never silently switches to another security key.
+skagent recognizes a YubiKey by its serial number, so it still knows the key
+after you replug it or restart the agent. It writes this down in
+`~/.local/state/skagent/bindings.toml`. Other security keys have no serial, so
+after a replug you pick them by touch again, even if only one is plugged in.
+skagent never silently switches to another security key.
+
+If the security key isn't plugged in, skagent waits for it for 15 seconds and
+tells you which YubiKey to plug in, in the popup or in a notification. Pressing
+Ctrl-C on `ssh` stops the wait.
 
 ### Agent forwarding
 

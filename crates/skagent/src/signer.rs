@@ -17,6 +17,7 @@ use skagent_secret::SecretBuffer;
 use ssh_agent_lib::ssh_key::{Algorithm, Signature};
 use tokio::sync::{Mutex, watch};
 
+use crate::bindings::{Bindings, Missing, NotPluggedIn};
 use crate::cancel::{DeviceInterrupt, Ended};
 use crate::config::Config;
 use crate::destination::{Destination, Purpose};
@@ -30,7 +31,7 @@ use crate::pin_cache::{
 };
 use crate::popup::{CancelledInPopup, Popup, PopupSession, cancelled_in_popup};
 use crate::prompt::{PinPrompt, PinRequest};
-use crate::routing::{OnSelect, QUEUE_TIMEOUT, RoutedDevice, Router, SELECTION_TIMEOUT};
+use crate::routing::{OnSelect, OnWait, QUEUE_TIMEOUT, RoutedDevice, Router, SELECTION_TIMEOUT};
 
 /// Length of an Ed25519 signature.
 const ED25519_SIGNATURE_BYTES: usize = 64;
@@ -228,6 +229,49 @@ impl Signer {
         )
     }
 
+    /// Tells the user which security key to plug in while a request waits
+    /// for it: in the popup if there is one, else in a notification. `key`:
+    /// the SSH key and its label, unless loading.
+    fn on_wait(
+        &self,
+        session: Option<&PopupSession>,
+        key: Option<(Key, String)>,
+    ) -> Result<Option<OnWait>> {
+        if let Some(session) = session {
+            return Ok(Some(wait_in_popup(
+                session,
+                key.map(|(key, _)| key),
+                Arc::clone(&self.config),
+            )?));
+        }
+        Ok(self.notifier.as_ref().map(|notifier| {
+            wait_notified(
+                Arc::clone(notifier),
+                key.map(|(_, label)| label),
+                Arc::clone(&self.config),
+            )
+        }))
+    }
+
+    /// Passes routing's outcome on. If the security key wasn't plugged in,
+    /// the result names the YubiKey waited for.
+    fn waited_for(
+        &self,
+        routed: Result<RoutedDevice>,
+        security_key: &mut Option<SecurityKey>,
+    ) -> Result<RoutedDevice> {
+        routed.inspect_err(|error| {
+            let missing = error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<NotPluggedIn>());
+            if let Some(serial) = missing.and_then(|missing| missing.serial) {
+                *security_key = Some(SecurityKey {
+                    name: self.config.yubikey_name(serial),
+                });
+            }
+        })
+    }
+
     /// [`describe`] with the configured label.
     fn describe(&self, identity: &SkIdentity) -> String {
         describe(identity, self.label(identity))
@@ -252,8 +296,23 @@ impl Signer {
         )
     }
 
+    /// The same signer, starting from `bindings` (e.g. remembered in a file).
+    #[must_use]
+    pub fn with_bindings(mut self, bindings: Bindings) -> Self {
+        self.router = self.router.with_bindings(bindings);
+        self
+    }
+
+    /// The same signer, waiting up to `timeout` for a request's security key
+    /// to be plugged in. Zero fails such requests right away.
+    #[must_use]
+    pub fn with_plug_in_timeout(mut self, timeout: Duration) -> Self {
+        self.router.plug_in_timeout = timeout;
+        self
+    }
+
     /// The same signer, showing desktop notifications while a key waits for
-    /// a touch.
+    /// a touch, or to be plugged in.
     #[must_use]
     pub fn with_notifier(mut self, notifier: Arc<Notifier>) -> Self {
         self.router.notifier = Some(Arc::clone(&notifier));
@@ -415,11 +474,14 @@ impl Signer {
             Some(session) => Some(select_in_popup(session, None)?),
             None => None,
         };
+        let on_wait = self.on_wait(session.as_deref(), None)?;
         let mut routed = tokio::select! {
             biased;
             () = ticket.revoked() => bail!("resident loading cancelled by PIN eviction"),
             () = popup_cancelled(session.as_deref_mut()) => return Err(anyhow::Error::new(CancelledInPopup)),
-            routed = self.router.for_load(ticket.clone(), on_select) => routed?,
+            routed = self.router.for_load(ticket.clone(), on_select, on_wait) => {
+                self.waited_for(routed, security_key)?
+            }
         };
         *security_key = self.security_key(&routed);
         let mut wrong_pin = false;
@@ -562,7 +624,11 @@ impl Signer {
             }
         }
         for identity in identities {
-            bindings.bind(credential_key(identity), device.clone());
+            bindings.bind(
+                &credential_key(identity),
+                device.clone(),
+                loaded.routed.serial,
+            );
         }
         loaded.pin.clear();
         for (key, pin, policy) in pins {
@@ -672,11 +738,20 @@ impl Signer {
             Some(session) => Some(select_in_popup(session, Some(self.popup_key(identity)))?),
             None => None,
         };
+        let on_wait = self.on_wait(
+            session.as_deref(),
+            Some((
+                self.popup_key(identity),
+                shown_name(identity, self.label(identity)),
+            )),
+        )?;
         let mut routed = tokio::select! {
             biased;
             () = ticket.revoked() => bail!("device selection cancelled by PIN eviction or key removal"),
             () = popup_cancelled(session.as_deref_mut()) => return Err(anyhow::Error::new(CancelledInPopup)),
-            routed = self.router.route(&key, ticket.clone(), &label, on_select) => routed?,
+            routed = self.router.route(&key, ticket.clone(), &label, on_select, on_wait) => {
+                self.waited_for(routed, security_key)?
+            }
         };
         *security_key = self.security_key(&routed);
         tracing::info!(
@@ -691,6 +766,7 @@ impl Signer {
             ticket,
             purpose,
             device: routed.identity.clone(),
+            serial: routed.serial,
             key,
             security_key: security_key.clone(),
         };
@@ -834,15 +910,8 @@ impl Signer {
                     "the assertion lacks user verification"
                 );
                 let policy = self.policy_for(identity);
-                self.remember(
-                    &signing.key,
-                    source,
-                    &signing.device,
-                    retries_after,
-                    ticket,
-                    policy,
-                )
-                .await?;
+                self.remember(signing, source, retries_after, policy)
+                    .await?;
                 Ok(Attempt::Signed(signature))
             }
             Err(error) => {
@@ -986,21 +1055,20 @@ impl Signer {
     /// cached one. Only if the device node is still the one the PIN went to.
     async fn remember(
         &self,
-        key: &CredentialKey,
+        signing: &Signing<'_>,
         source: PinSource,
-        device: &DeviceIdentity,
         retries_after: Option<u32>,
-        ticket: &SigningTicket,
         policy: CachePolicy,
     ) -> Result<()> {
+        let (key, device) = (&signing.key, &signing.device);
         let mut state = self.state.lock().await;
         let mut bindings = self.router.bindings().await;
         // No awaits from here on: a cancelled caller can't stop halfway.
-        ticket.check()?;
+        signing.ticket.check()?;
         state.last_failure.remove(key);
         let still_same_device = DeviceIdentity::of(device.path()).is_ok_and(|now| now == *device);
         if still_same_device {
-            bindings.bind(key.clone(), device.clone());
+            bindings.bind(key, device.clone(), signing.serial);
         }
         if state.caching != Caching::Available {
             return Ok(());
@@ -1091,6 +1159,8 @@ struct Signing<'a> {
     key: CredentialKey,
     /// The routed device's plug-in.
     device: DeviceIdentity,
+    /// Its YubiKey serial, if it reports one.
+    serial: Option<u32>,
     security_key: Option<SecurityKey>,
 }
 
@@ -1234,6 +1304,58 @@ fn select_in_popup(session: &PopupSession, key: Option<Key>) -> Result<OnSelect>
     }))
 }
 
+/// Shows which security key to plug in, in the popup. `key`: the SSH key,
+/// unless loading.
+fn wait_in_popup(session: &PopupSession, key: Option<Key>, config: Arc<Config>) -> Result<OnWait> {
+    let shower = session.shower()?;
+    Ok(Box::new(move |missing| {
+        let name = |serial: u32| SecurityKey {
+            name: config.yubikey_name(serial),
+        };
+        let state = match (missing, key.clone()) {
+            (Missing::Elsewhere { serial, other }, Some(key)) => Shown::WrongKey {
+                key,
+                security_key: Some(name(serial)),
+                other: other.map(name),
+            },
+            (missing, key) => Shown::NoKey {
+                key,
+                security_key: missing.serial().map(name),
+            },
+        };
+        if let Err(error) = shower.show(state) {
+            tracing::debug!(error = %format!("{error:#}"), "showing the wait in the popup failed");
+        }
+    }))
+}
+
+/// Shows which security key to plug in, in a desktop notification that
+/// closes once the request stops waiting. `label`: the SSH key's, unless
+/// loading.
+fn wait_notified(notifier: Arc<Notifier>, label: Option<String>, config: Arc<Config>) -> OnWait {
+    let mut shown: Option<Notification> = None;
+    Box::new(move |missing| {
+        let summary = missing.serial().map_or_else(
+            || "Plug in your security key".to_owned(),
+            |serial| format!("Plug in {}", config.yubikey_name(serial)),
+        );
+        let body = match (missing, &label) {
+            (Missing::Elsewhere { other, .. }, Some(label)) => format!(
+                "{} doesn't hold {label}.",
+                other.map_or_else(
+                    || "The security key plugged in".to_owned(),
+                    |other| config.yubikey_name(other)
+                )
+            ),
+            (Missing::Nothing { serial: Some(_) }, Some(label)) => format!("It holds {label}."),
+            (_, Some(label)) => format!("The one holding {label}."),
+            (_, None) => "To load its SSH keys into skagent.".to_owned(),
+        };
+        // Replacing the guard closes the previous notification.
+        drop(shown.replace(notifier.show(&summary, &body)));
+    })
+}
+
 /// Shows a final state; the request's outcome doesn't depend on it.
 fn show_best_effort(session: &mut PopupSession, state: Shown) {
     if let Err(error) = session.show(state) {
@@ -1280,6 +1402,12 @@ fn failure(error: &anyhow::Error, kind: Option<ErrorKind>) -> Failure {
         .find_map(|cause| cause.downcast_ref::<DeviceGone>());
     if gone.is_some() {
         return Failure::Unplugged;
+    }
+    let missing = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<NotPluggedIn>());
+    if missing.is_some() {
+        return Failure::NotPluggedIn;
     }
     match kind {
         Some(ErrorKind::Transport) => Failure::Unplugged,

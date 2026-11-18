@@ -56,6 +56,12 @@ let
       });
     "the popup defaults to this flake's skagent-pinentry" =
       lib.hasSuffix "/bin/skagent-pinentry" popupExe;
+    "requests wait 15 s for their security key by default" =
+      lib.hasInfix ''"--plug-in-timeout" "15s"''
+        (execStart { });
+    "the plug-in timeout reaches the agent" = lib.hasInfix ''"--plug-in-timeout" "0"'' (execStart {
+      plugInTimeout = "0";
+    });
     "askpass replaces pinentry" = lib.hasInfix ''"--askpass" "/bin/askpass"'' (execStart {
       askpass = "/bin/askpass";
     });

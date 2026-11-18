@@ -327,8 +327,10 @@ pkgs.testers.runNixOSTest {
         expect_prompt()
         machine.succeed("systemctl unmask --runtime systemd-logind.service && systemctl start systemd-logind.service")
         retry(lambda _last_try: journal("skagent").count("machine sleeps (logind)") == 2, timeout_seconds=40)
-        # logind reapplies hidraw ACLs on restart, changing ctime. That is
-        # conservatively a new device identity and requires selection again.
+        # logind reapplies hidraw ACLs on restart, changing ctime: a new
+        # device identity, so no cached PIN carries over. The key reports a
+        # serial, so it's recognized without a selection touch; keys without
+        # one would be selected again.
         recovery_touches = touches()
         alice_ok("rm -f ~/msg.sig")
         machine.succeed(
@@ -337,9 +339,8 @@ pkgs.testers.runNixOSTest {
         )
         retry(lambda _last_try: touches() == recovery_touches + 1, timeout_seconds=10)
         touch()
-        retry(lambda _last_try: touches() == recovery_touches + 2, timeout_seconds=10)
-        touch()
         machine.wait_for_file("/home/alice/msg.sig")
+        assert touches() == recovery_touches + 1, "selected by touch"
         expect_cached()
 
     with subtest("a wrong PIN is refused, not retried, and mentioned in the next prompt"):
@@ -472,7 +473,9 @@ pkgs.testers.runNixOSTest {
             lambda _last_try: "dropped the cached PINs of unplugged security keys" in journal("skagent-pinentry"),
             timeout_seconds=25,
         )
-        machine.succeed("${startTestkey "testkey-replugged" "test key one"}")
+        # Same serial, like a real replug: recognized without selection, but
+        # the cached PIN stays behind with the old plug-in.
+        machine.succeed("${startTestkey "testkey-replugged" "test key one"} --serial 12345678")
         machine.wait_until_succeeds("fido2-token -L | grep -F 'test key one' >/dev/null")
         # The virtual key lost its credentials with the restart, so the
         # signature fails either way; what matters is that the PIN was asked

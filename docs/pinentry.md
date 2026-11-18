@@ -134,6 +134,7 @@ points to the log. Signing and loading differ only in the verb.
 | `refused` | `FIDO_ERR_OPERATION_DENIED` | `Desk 5C NFC refused to sign` |
 | `not-on-key` | `FIDO_ERR_NO_CREDENTIALS`: another key was touched, or it was reset | `Desk 5C NFC doesn't hold github-work` |
 | `no-pin` | `FIDO_ERR_PIN_NOT_SET` | `Desk 5C NFC has no PIN set` |
+| `not-plugged-in` | the wait for the security key (`no-key`, `wrong-key`) ran out | `Desk 5C NFC wasn't plugged in`, without a known YubiKey `No security key was plugged in` |
 | `other` | anything else, and reasons the popup doesn't know yet | `Something went wrong · see skagent's log` |
 
 ### subtitle per request kind
@@ -167,6 +168,10 @@ points to the log. Signing and loading differ only in the verb.
    `checks.vm-pinentry` with the agent on a headless sway. CI builds it in
    its own workflow.
 5. **Bindings by serial,** persistence, the waiting states (`wrong-key`,
-   `no-key`, waiting for the re-plug in `replug`).
+   `no-key`, waiting for the re-plug in `replug`). Done but the last:
+   bindings carry the YubiKey's serial and are remembered in
+   `$XDG_STATE_HOME/skagent/bindings.toml`; a request waits for its key
+   (`--plug-in-timeout`, 15 s) and fails with `not-plugged-in`. Still to
+   do: `replug` waiting for the re-plug instead of ending.
 6. **Host names** from `known_hosts`, the touch timeout measured on a
    YubiKey.

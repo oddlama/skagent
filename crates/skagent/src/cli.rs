@@ -115,6 +115,13 @@ pub struct ServeArgs {
     /// touch (`org.freedesktop.Notifications` on the session bus).
     #[arg(long)]
     pub no_touch_notification: bool,
+
+    /// How long a request waits for its security key to be plugged in, e.g.
+    /// `15s` or `1m`, asking for it by name once skagent knows which YubiKey
+    /// holds the key. The client hanging up (Ctrl-C) ends the wait too. `0`
+    /// fails right away.
+    #[arg(long, value_parser = parse_duration, default_value = "15s")]
+    pub plug_in_timeout: Duration,
 }
 
 /// Where secrets live (`--secret-memory`).
