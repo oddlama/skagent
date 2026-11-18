@@ -300,13 +300,10 @@ impl Render for Popup {
             .border_color(theme.border)
             .rounded(px(24.))
             .opacity(fraction(elapsed, CROSSFADE))
-            .map(|content| {
-                if screen.top_aligned() {
-                    content.pt(px(36.)).px(px(24.)).pb(px(24.))
-                } else {
-                    content.justify_center().p(px(24.))
-                }
-            })
+            // Every screen is one block, centred: anchor, title, subtitle and
+            // whatever comes below them.
+            .justify_center()
+            .p(px(24.))
             .child(anchor(screen, &theme, elapsed))
             .child(
                 div()
@@ -377,7 +374,6 @@ fn title_gap(screen: &Screen) -> f32 {
     match screen.anchor {
         Anchor::Countdown { pulse: true, .. } if screen.badge.is_none() => 22.,
         Anchor::Countdown { .. } => 18.,
-        _ if screen.top_aligned() => 10.,
         _ => 12.,
     }
 }
@@ -740,7 +736,7 @@ fn try_again(theme: &Theme, cx: &mut Context<Popup>) -> impl IntoElement {
 
 fn command_box(theme: &Theme, command: &'static str) -> impl IntoElement {
     div()
-        .mt_auto()
+        .mt(px(28.))
         .w_full()
         .h(px(52.))
         .rounded(px(14.))
@@ -924,7 +920,7 @@ fn shake_offset(t: f32) -> f32 {
 /// The 52 px field shape with its 2 px ring.
 fn field_shell(theme: &Theme, error: bool) -> gpui::Div {
     div()
-        .mt_auto()
+        .mt(px(28.))
         .w_full()
         .h(px(52.))
         .rounded(px(14.))

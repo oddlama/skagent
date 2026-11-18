@@ -92,24 +92,23 @@ fn every_screen_says_what_the_design_says() -> Result<()> {
 }
 
 #[test]
-fn badges_layout_and_buttons_follow_the_design() -> Result<()> {
+fn badges_and_buttons_follow_the_design() -> Result<()> {
     let expected = [
-        ("pin", None, true, Close::Cancel),
-        ("touch-again", Some(Badge::Again), false, Close::Cancel),
-        ("done", Some(Badge::Done), false, Close::None),
-        ("load-done", Some(Badge::Done), false, Close::None),
-        ("wrong-key", Some(Badge::Swap), false, Close::Cancel),
-        ("nokey-known", Some(Badge::Plug), false, Close::Cancel),
-        ("replug", Some(Badge::Replug), false, Close::Cancel),
-        ("locked", Some(Badge::Lock), false, Close::Close),
-        ("new-pin", Some(Badge::Pencil), true, Close::Close),
-        ("timeout", Some(Badge::Clock), true, Close::Cancel),
-        ("failed", Some(Badge::Failed), false, Close::Close),
+        ("pin", None, Close::Cancel),
+        ("touch-again", Some(Badge::Again), Close::Cancel),
+        ("done", Some(Badge::Done), Close::None),
+        ("load-done", Some(Badge::Done), Close::None),
+        ("wrong-key", Some(Badge::Swap), Close::Cancel),
+        ("nokey-known", Some(Badge::Plug), Close::Cancel),
+        ("replug", Some(Badge::Replug), Close::Cancel),
+        ("locked", Some(Badge::Lock), Close::Close),
+        ("new-pin", Some(Badge::Pencil), Close::Close),
+        ("timeout", Some(Badge::Clock), Close::Cancel),
+        ("failed", Some(Badge::Failed), Close::Close),
     ];
-    for (name, badge, top, close) in expected {
+    for (name, badge, close) in expected {
         let screen = screen(name)?;
         ensure!(screen.badge == badge, "{name}: badge {:?}", screen.badge);
-        ensure!(screen.top_aligned() == top, "{name}: layout");
         ensure!(screen.close == close, "{name}: close {:?}", screen.close);
     }
     ensure!(matches!(

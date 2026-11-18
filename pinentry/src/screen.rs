@@ -310,16 +310,6 @@ impl Screen {
             } => failed(key.as_ref(), security_key.as_ref(), *reason),
         }
     }
-
-    /// Whether the screen is top-aligned with something in the bottom slot,
-    /// rather than centred.
-    #[must_use]
-    pub fn top_aligned(&self) -> bool {
-        matches!(
-            self.body,
-            Body::Pin { .. } | Body::TryAgain | Body::Command(_)
-        )
-    }
 }
 
 impl Anchor {
