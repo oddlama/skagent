@@ -367,6 +367,21 @@ impl Device {
             .map_err(|_| FidoError::new("fido_dev_get_retry_count", sys::FIDO_ERR_INTERNAL))
     }
 
+    /// Creates `credential` on the device. `pin` must be NUL-terminated if
+    /// given.
+    pub(crate) fn make_cred(
+        &mut self,
+        credential: &mut Credential,
+        pin: Option<&CStr>,
+    ) -> Result<(), FidoError> {
+        let pin = pin.map_or(std::ptr::null(), CStr::as_ptr);
+        // SAFETY: device and credential are valid objects owned by their
+        // wrappers; `pin` is null or NUL-terminated and outlives the call.
+        check("fido_dev_make_cred", unsafe {
+            sys::fido_dev_make_cred(self.raw.as_ptr(), credential.raw.as_ptr(), pin)
+        })
+    }
+
     /// Runs `assertion` on the device. `pin` must be NUL-terminated if given.
     pub(crate) fn get_assert(
         &mut self,
@@ -562,5 +577,108 @@ impl Drop for Assertion {
         let mut raw = self.raw.as_ptr();
         // SAFETY: `raw` is owned by `self` and freed exactly once.
         unsafe { sys::fido_assert_free(&raw mut raw) };
+    }
+}
+
+/// A credential to create and, after `make_cred`, the created one.
+pub(crate) struct Credential {
+    raw: NonNull<sys::fido_cred_t>,
+}
+
+// SAFETY: like `Assertion`: only usable through `&mut self` or `&self`
+// reads, never shared between threads (not `Sync`).
+unsafe impl Send for Credential {}
+
+impl Credential {
+    pub(crate) fn new() -> Result<Self, FidoError> {
+        init();
+        // SAFETY: allocates an empty credential, or returns null.
+        let raw = NonNull::new(unsafe { sys::fido_cred_new() })
+            .ok_or_else(|| FidoError::new("fido_cred_new", sys::FIDO_ERR_INTERNAL))?;
+        Ok(Self { raw })
+    }
+
+    /// An Ed25519 credential.
+    pub(crate) fn set_type_eddsa(&mut self) -> Result<(), FidoError> {
+        // SAFETY: valid credential, a COSE algorithm libfido2 knows.
+        check("fido_cred_set_type", unsafe {
+            sys::fido_cred_set_type(self.raw.as_ptr(), sys::COSE_EDDSA)
+        })
+    }
+
+    pub(crate) fn set_rp(&mut self, id: &CStr, name: &CStr) -> Result<(), FidoError> {
+        // SAFETY: valid credential; libfido2 copies both NUL-terminated strings.
+        check("fido_cred_set_rp", unsafe {
+            sys::fido_cred_set_rp(self.raw.as_ptr(), id.as_ptr(), name.as_ptr())
+        })
+    }
+
+    pub(crate) fn set_user(&mut self, id: &[u8], name: &CStr) -> Result<(), FidoError> {
+        // SAFETY: valid credential; libfido2 copies `id.len()` bytes and the
+        // NUL-terminated name; display name and icon are left out (null).
+        check("fido_cred_set_user", unsafe {
+            sys::fido_cred_set_user(
+                self.raw.as_ptr(),
+                id.as_ptr(),
+                id.len(),
+                name.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        })
+    }
+
+    pub(crate) fn set_clientdata_hash(&mut self, hash: &[u8; 32]) -> Result<(), FidoError> {
+        // SAFETY: valid credential; libfido2 copies `hash.len()` bytes.
+        check("fido_cred_set_clientdata_hash", unsafe {
+            sys::fido_cred_set_clientdata_hash(self.raw.as_ptr(), hash.as_ptr(), hash.len())
+        })
+    }
+
+    /// Whether the credential is discoverable (resident).
+    pub(crate) fn set_resident(&mut self, option: Opt) -> Result<(), FidoError> {
+        // SAFETY: valid credential, valid enum value.
+        check("fido_cred_set_rk", unsafe {
+            sys::fido_cred_set_rk(self.raw.as_ptr(), option.raw())
+        })
+    }
+
+    /// credProtect level 2: usable without user verification only by its id.
+    pub(crate) fn set_protection_uv_optional_with_id(&mut self) -> Result<(), FidoError> {
+        // SAFETY: valid credential, a protection level libfido2 knows.
+        check("fido_cred_set_prot", unsafe {
+            sys::fido_cred_set_prot(self.raw.as_ptr(), sys::FIDO_CRED_PROT_UV_OPTIONAL_WITH_ID)
+        })
+    }
+
+    /// The created credential's id.
+    pub(crate) fn id(&self) -> Result<Vec<u8>, FidoError> {
+        let raw = self.raw.as_ptr();
+        // SAFETY: valid credential; returns a pointer into it, or null.
+        let pointer = unsafe { sys::fido_cred_id_ptr(raw) };
+        // SAFETY: as above; only reads.
+        let length = unsafe { sys::fido_cred_id_len(raw) };
+        // SAFETY: libfido2's pointer and length, valid while the credential
+        // is (it isn't changed meanwhile); copied out.
+        unsafe { copy_credential_blob(pointer, length) }
+    }
+
+    /// The created credential's public key: 32 bytes for Ed25519.
+    pub(crate) fn public_key(&self) -> Result<Vec<u8>, FidoError> {
+        let raw = self.raw.as_ptr();
+        // SAFETY: valid credential; returns a pointer into it, or null.
+        let pointer = unsafe { sys::fido_cred_pubkey_ptr(raw) };
+        // SAFETY: as above; only reads.
+        let length = unsafe { sys::fido_cred_pubkey_len(raw) };
+        // SAFETY: as for `id`.
+        unsafe { copy_credential_blob(pointer, length) }
+    }
+}
+
+impl Drop for Credential {
+    fn drop(&mut self) {
+        let mut raw = self.raw.as_ptr();
+        // SAFETY: `raw` is owned by `self` and freed exactly once.
+        unsafe { sys::fido_cred_free(&raw mut raw) };
     }
 }

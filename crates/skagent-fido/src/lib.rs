@@ -1,5 +1,6 @@
 //! Safe wrapper over the parts of libfido2 skagent needs: list devices, read
-//! the PIN retry counter, and get one assertion.
+//! the PIN retry counter, get one assertion, list resident credentials, and
+//! create and use skagent's pairing credential.
 //!
 //! All calls block. Run them off the async runtime (`spawn_blocking`).
 //!
@@ -11,10 +12,12 @@
 // SAFETY comment (clippy enforces both).
 
 mod error;
+mod pairing;
 #[allow(unsafe_code)]
 mod raw;
 mod resident;
 pub mod yubikey;
+pub use pairing::{PAIRING_RP_ID, PairingCredential};
 pub use resident::ResidentCredential;
 
 use std::ffi::{CStr, CString};
