@@ -49,8 +49,61 @@ runs rage or age with the plugins' directories appended to `PATH`:
   once `hostPubkey` is an `age1pq1…` key.
 
 `vm-age` runs these calls with rage and with age: `-e -i` next to an
-`age1pq1…` key, and `-d -i`. agenix-rekey itself wasn't run here: that takes
-a repository of secrets encrypted to a key on a security key.
+`age1pq1…` key, and `-d -i`.
+
+### tried with agenix-rekey
+
+agenix-rekey itself (`87e5d5f`, rage 0.12.1, age 1.3.2 for `age-plugin-pq`)
+was run on a scratch repository with three secrets and two hosts, one with an
+SSH host key and one with an `age1pq1…` key. No security key was at hand
+there, so a plugin identity stood in for skagent's: an `age-keygen -pq` key
+converted with `age-plugin-pq -identity` (`AGE-PLUGIN-PQ-1…`). Like
+`AGE-PLUGIN-SKAGENT-1…` it is passed with `-i` and answered by a plugin from
+`agePlugins`.
+
+- **`agenix edit` and `agenix rekey` work** with the settings above. The
+  secrets get one `mlkem768x25519` stanza per master identity and backup key,
+  the hosts' copies an `ssh-ed25519` or a `mlkem768x25519` one.
+- **A classic backup key is refused,** by rage: "Cannot encrypt to a recipient
+  with labels 'postquantum' alongside a recipient with no labels".
+  agenix-rekey then leaves the secret as it was.
+- **Every plugin process descends from the shell that ran `agenix`:** plugin,
+  rage, agenix-rekey's `ageWrapper`, the script of the command
+  (`agenix-rekey`, `agenix-edit-view`), which is what `nix run` became. So
+  they are members of `skagent batch -- agenix rekey`.
+- **Who asks** would have been `ageWrapper` in the prompts, the script that
+  starts rage. skagent passes over it and names what started it:
+  `agenix-edit-view`, `agenix-rekey` (`peer.rs`, `WRAPPERS`).
+- **rage can't read an `age-keygen -pq` identity file**
+  (`AGE-SECRET-KEY-PQ-1…`: "identity file contains non-identity data"). The
+  backup key's holder decrypts with age 1.3 or newer, or converts it for rage
+  with `age-plugin-pq -identity`.
+
+What is left is the same with the identity on a security key.
+
+### moving a repository to it
+
+A repository whose secrets are encrypted to classic keys (age-plugin-yubikey,
+an `age-keygen` backup key) can't take the new identity next to them: one
+file has one recipient type. agenix-rekey moves all of it in one go, tried
+on the scratch repository with a classic key for the old master:
+
+1. Create the identity (`skagent age new`, `skagent age identity >
+   skagent-identity.pub`) and a backup key (`age-keygen -pq`).
+2. Set `masterIdentities` and `extraEncryptionPubkeys` to the new ones, add
+   the plugins, and give agenix-rekey the old identity for decrypting only:
+   `extraDecryptionArgs = [ "-i" "${./old-identity.pub}" ]` (an argument of
+   `agenix-rekey.configure`, with flake-parts the option
+   `perSystem.agenix-rekey.extraDecryptionArgs`). The old identity's plugin
+   stays in `agePlugins` for this step.
+3. `agenix update-masterkeys` decrypts every secret with the old identity and
+   encrypts it to the new recipients. skagent isn't asked for anything:
+   encrypting takes the identity file alone, and stanzas of other types never
+   reach the agent.
+4. Remove `extraDecryptionArgs` and the old plugin, then
+   `skagent batch -- agenix rekey`: one touch for all hosts' copies.
+
+Hosts keep their keys through all of this.
 
 ## decisions
 
@@ -485,9 +538,9 @@ break it, watch the test fail, restore.
 6. ~~**home-manager and docs.**~~ Done, but for one thing. The module's
    `age.enable`, `age.batchLifetime` and `age.forwarding`; README,
    `design.md` and `AGENTS.md`. The agenix-rekey setup is read against its
-   source and its calls are run in `vm-age` (see the top); running
-   agenix-rekey itself on a repository of secrets with a real security key
-   is still to do.
+   source, its calls are run in `vm-age`, and agenix-rekey itself was run
+   with a plugin identity standing in (see the top); running it with the
+   identity on a real security key is still to do.
 
 ## checking with a real key
 
