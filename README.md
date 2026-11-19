@@ -427,7 +427,8 @@ more than it does anywhere else, so a batch is bounded:
   unplug the security key, press Stop or run `skagent forget`. Whatever the
   command decrypts after that takes a touch per file again.
 
-Batches need Linux 6.5 or newer.
+Batches need Linux 6.5 or newer. [`docs/age.md`](docs/age.md) shows the
+settings for agenix-rekey.
 
 #### On other machines
 

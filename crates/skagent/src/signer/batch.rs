@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use skagent_age::{Recipient, Seed, Stanza};
+use tokio::sync::watch;
 
 use super::{Caching, Signer, SigningTicket, still_plugged_in};
 use crate::ancestry::Pinned;
@@ -265,12 +266,43 @@ impl Signer {
         let Opened {
             id,
             deadline,
-            mut progress,
+            progress,
             command,
             ..
         } = opened;
-        let time_up = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
-        tokio::pin!(time_up);
+        // Side by side: the time limit doesn't wait for a notification
+        // service that is slow to answer.
+        tokio::join!(
+            self.limit_batch(id, deadline, progress.clone()),
+            self.show_batch(id, deadline, command, progress),
+        );
+    }
+
+    /// Ends the batch `id` at `deadline`, unless its tool closes it before.
+    async fn limit_batch(
+        &self,
+        id: BatchId,
+        deadline: Instant,
+        mut progress: watch::Receiver<Progress>,
+    ) {
+        let closed = async { while progress.changed().await.is_ok() {} };
+        tokio::select! {
+            () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                self.end_batch(id, Ended::TimeUp).await;
+            }
+            () = closed => {}
+        }
+    }
+
+    /// Logs how the batch `id` ends and keeps its notification, until its
+    /// tool closes it.
+    async fn show_batch(
+        &self,
+        id: BatchId,
+        deadline: Instant,
+        command: String,
+        mut progress: watch::Receiver<Progress>,
+    ) {
         let mut indicator = Indicator::new(self.batch_notifier.clone(), command.clone(), deadline);
         let mut running = true;
         loop {
@@ -290,9 +322,6 @@ impl Signer {
             indicator.update(now).await;
             let (held_back, refresh_at) = (indicator.held_back(now), indicator.refresh_at);
             tokio::select! {
-                () = &mut time_up, if running => {
-                    self.end_batch(id, Ended::TimeUp).await;
-                }
                 changed = progress.changed() => {
                     if changed.is_err() {
                         // Closed: the tool is gone.
