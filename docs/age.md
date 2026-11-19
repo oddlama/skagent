@@ -7,8 +7,9 @@ stock age. Decrypting takes the PIN, cached as for SSH, and one touch per file,
 or one touch for all the files one command decrypts.
 
 Findings this is based on: [`research/hmac-secret.md`](research/hmac-secret.md)
-and [`research/age.md`](research/age.md). Steps 1 and 2 below are done;
-nothing a user can call exists yet.
+and [`research/age.md`](research/age.md). Steps 1 to 3 below are done:
+identities can be created and files decrypted, one touch each. Batches,
+forwarding and the home-manager module are still plan.
 
 ## what it is for
 
@@ -166,9 +167,9 @@ one request still yield one key.
 ## identities
 
 - **State:** `$XDG_STATE_HOME/skagent/age.toml` (private, atomic, like the
-  other state files): per identity the digest of its credential and its
-  recipient once known. Nothing secret. An unreadable file is ignored and
-  rebuilt.
+  other state files): per identity its credential's id and its recipient once
+  known. Nothing secret: with the id alone the security key still denies that
+  the credential exists. An unreadable file is ignored and rebuilt.
 - **Found by `skagent load`:** the credential management listing that finds
   SSH keys also lists `skagent:age`, with the same PIN and no touch. PIN cache
   and binding are primed as for SSH keys. The recipient is known after the
@@ -178,16 +179,19 @@ one request still yield one key.
   retry guards, pairing challenge before a typed PIN, and waiting for a
   plug-in. Nothing new here.
 - **Created by `skagent age new`,** inside the agent like a load: pick the
-  device, PIN, a touch to create, a touch to derive. It prints the recipient
-  and the identity. It refuses if the key holds an identity already, unless
-  asked for another.
+  device, PIN (asked for afresh, like a load's), a touch to create, a touch
+  to derive. It prints the recipient. It refuses if the key holds an identity
+  already (looking takes the PIN and no touch), unless `--another` asks for
+  one more.
 - **Identity strings:** `AGE-PLUGIN-SKAGENT-1…`. Without data it means "the
   identity on the security key at hand", which is what `age -d -j skagent`
   sends. With data (a version byte and the recipient's 1216 bytes) it names
   one, and is all that encrypting to it needs. After a derivation the agent
   compares the public key it derived with the one named, before it tries a
-  stanza. With several identities at hand, an unnamed request fails and says
-  so, without a touch.
+  stanza. A request that names none gets the only identity, or the only one
+  whose security key is plugged in; with several at hand it fails and says
+  so, without a touch. An identity whose recipient isn't known yet could be
+  the one a request names: the derivation tells, and is remembered.
 - **`skagent age identity`** prints an identity file: the string, and the
   recipient in a `# Recipient:` comment for people and for tools that read it.
   `skagent age list` prints the known identities.
@@ -207,10 +211,18 @@ one request still yield one key.
 - It finds the agent at `$SKAGENT_AGE_SOCKET`, else
   `$XDG_RUNTIME_DIR/skagent-age.sock`, else `$SSH_AUTH_SOCK`. The last is the
   forwarded case, on a remote host.
-- While it waits it sends age a `msg`, so someone at a terminal sees why age
-  hangs. PIN and touch are asked for by the agent.
-- It reports why a request failed: not for this key, cancelled, timed out,
-  forwarding switched off, agent locked.
+- If the agent takes more than a moment, it sends age a `msg`, once, so
+  someone at a terminal sees why age hangs. PIN and touch are asked for by
+  the agent. A cached PIN with the touch at hand, and later a batch, say
+  nothing.
+- It reports why a request failed, from the agent's reason code: cancelled,
+  timed out, agent locked, no identity, another identity, several
+  identities, not allowed on this connection.
+- When the age client goes away (its end of standard input closes), it stops
+  waiting, which the agent takes as a cancel.
+- It switches core dumps off but stays dumpable: the agent recognizes it by
+  `/proc/<pid>/exe`, which the kernel hides otherwise. `skagent age` does the
+  same. The file key it passes on is in the age client's memory just the same.
 - A binary of its own, built from the same Cargo package as the agent and so
   always installed next to it. It doesn't link libfido2, and a check keeps it
   that way.
@@ -226,8 +238,13 @@ Extension messages of the ssh-agent protocol, so forwarding carries them:
 | `age-new@skagent` | creates an identity | local socket |
 | `age-list@skagent` | lists identities and recipients | local socket |
 
-- Decoded strictly, like `session-bind`: exact lengths, nothing trailing, a
-  bounded number of stanzas.
+- Decoded strictly, like `session-bind`: a version, exact lengths, nothing
+  trailing, 1 to 64 stanzas (`skagent_age::wire`).
+- `age-unwrap` answers with the file key, "no stanza is for this identity",
+  or a reason code. Codes, not text: through a forwarded agent, what the
+  agent knows about this machine stays on it.
+- `skagent load` notes the security key's age identities too, and its reply
+  counts them next to the SSH keys.
 - A locked agent (`ssh-add -x`) refuses all of them.
 - Every decryption is logged like a signature: which identity, who asked,
   batch or not. Never key material.
@@ -237,7 +254,12 @@ Extension messages of the ssh-agent protocol, so forwarding carries them:
 ## sockets and forwarding
 
 - **A second socket,** `$XDG_RUNTIME_DIR/skagent-age.sock` (`0600`, peer uid
-  checked, bound like the first). systemd passes both by name.
+  checked, bound like the first). By default it is named after the ssh-agent
+  socket (`name.sock` gives `name-age.sock`); `--age-socket` and
+  `SKAGENT_AGE_SOCKET` say otherwise. systemd passes both, the one for age
+  requests with `FileDescriptorName=age`.
+- **It answers nothing of the ssh-agent protocol,** and the ssh-agent socket
+  answers no age request.
 - **Local means proven local.** On it, the peer's executable has to be one of
   skagent's own: the plugin next to the agent's binary for decryptions, the
   agent's binary for `skagent batch` and `skagent age`. Any `session-bind`
@@ -300,9 +322,13 @@ get inside: change a script the batch runs, or (with yama's `ptrace_scope` at
   file", the identity, and who asks: for a local request the program that
   started age (from the peer's parents, shown through `display::shown`), for a
   forwarded one the host.
-- **Popup:** a request kind `decrypt`; the states `pin`, `touch` and the
-  failures as they are; a state for a running batch with its count and Stop.
-  They need designing with the popup's other screens.
+- **Popup:** the request kinds `decrypt` (with who asks) and `create`, shown
+  in the states of a signature: "Decrypt a file · agenix", "Decrypted",
+  "Create an age identity", "Created". Done as far as words go; the failure
+  screens still say "sign". A state for a running batch with its count and
+  Stop comes with step 4, and all of it needs a look from the popup's design.
+- **Labels:** an identity is shown as "age identity" and its recipient cut
+  short. Names of the user's own, like SSH keys have, are open.
 - **Stock pinentry and askpass** work with the texts alone. A batch is stopped
   with `skagent forget` there.
 
@@ -343,14 +369,23 @@ break it, watch the test fail, restore.
    a seed derived outside this crate (`tests/data/README.md`). In the license
    boundary's shipped crates. What stock age does with a stanza of ours is
    checked in step 3, where the plugin can be run.
-3. **One file at a time.** The second socket, `age.toml`, `age-unwrap`,
-   `skagent age new|list|identity`, the plugin, the texts. A VM test
-   (`vm-age`): files from stock age and from rage with `age-plugin-pq`,
+3. ~~**One file at a time.**~~ Done. The second socket, `age.toml`,
+   `age-unwrap`, `skagent age new|list|identity`, the plugin
+   (`skagent-age-plugin`, the binary in the `skagent` package), the texts. The
+   way to the security key is the signer's, which now takes a job
+   (`Signer::run`): signing is one, deriving an identity's secret the other.
+   `vm-age` covers: creating (PIN, two touches) and a second identity only on
+   request; files from stock age and from rage with `age-plugin-pq`,
    decrypted through the plugin by both; a file encrypted with `-e -i`, next
    to a native recipient and refused next to a classic one; one touch per
-   file; the cached PIN; a file for another key; stanzas of two files yielding
-   one key; an eviction during the touch; a client that hangs up; a locked
-   agent.
+   file and the cached PIN; no touch, no file key; a file for another key; an
+   identity file naming another key's recipient; stanzas of two files
+   yielding one key; forgetting PINs during the touch; a client that goes
+   away; a locked agent; each socket answering only its own requests; a copy
+   of the plugin refused; `skagent load` on a fresh machine; two identities.
+   The Rust tests cover the messages, the plugin protocol against scripted
+   clients and agents, which identity a request gets, and who is answered
+   what on the socket.
 4. **Batches.** The backend per buffer, the peer's pidfd and ancestry,
    `skagent batch`, every way a batch ends, the popup's count and Stop. In the
    VM: many files and one touch; a program outside the batch gets a touch; an

@@ -11,6 +11,8 @@ Target design; the milestones below distinguish implemented and pending pieces. 
 
 Non-goals: OpenPGP/PIV, non-Linux, and non-sk keys. Those are **refused** (decided). To mix agents, point ssh at skagent per host with `IdentityAgent` (e.g. only for `github.com`) and keep a normal agent for the rest.
 
+Beside SSH, skagent decrypts [age](https://age-encryption.org) files with a key derived from a security key. That has a design document of its own, [`age.md`](age.md); what it adds to the points below is noted there and under "age" here.
+
 ## threat model
 
 Protected:
@@ -44,7 +46,8 @@ Crates:
 - `skagent`: CLI, socket and process hardening, protocol handling via `ssh-agent-lib`, identity store, cache policy. `unsafe` is forbidden.
 - `skagent-fido`: safe wrapper over `libfido2-sys`, the same libfido2 OpenSSH uses. Enumerates devices, reads the PIN retry counter, selects devices by touch and asserts with up/uv/pin. Enumerates resident SSH credentials through PIN-authenticated credential management. Unsafe code is confined to `raw.rs`.
 - `skagent-secret`: guarded, locked, zeroizing memory. Unsafe code is confined to `mapping.rs`.
-- `skagent-fds`: descriptors crossing `exec`. Adopts the socket systemd passes (`LISTEN_PID` must name the agent, exactly one listening unix stream socket, made close-on-exec, taken before the runtime opens descriptors). Spawned prompts get stdio only: before exec the child marks everything above stderr close-on-exec (`close_range`, `CLOSE_RANGE_CLOEXEC`), because libfido2 opens hidraw without `O_CLOEXEC` and pinentry would otherwise inherit an open security key.
+- `skagent-age`, `skagent-age-plugin`: age's post-quantum recipient for a derived key, and age's plugin protocol in front of the agent; see [`age.md`](age.md). No unsafe code.
+- `skagent-fds`: descriptors crossing `exec`. Adopts the sockets systemd passes (`LISTEN_PID` must name the agent, at most two listening unix stream sockets told apart by their names, made close-on-exec, taken before the runtime opens descriptors), and gets a pidfd of a connection's peer (`SO_PEERPIDFD`). Spawned prompts get stdio only: before exec the child marks everything above stderr close-on-exec (`close_range`, `CLOSE_RANGE_CLOEXEC`), because libfido2 opens hidraw without `O_CLOEXEC` and pinentry would otherwise inherit an open security key.
 
 Why libfido2 and not a pure Rust CTAP stack: OpenSSH signs with exactly the libfido2 assertion semantics (raw client data, `ssh:` rp ids, credProtect), and libfido2 handles hidraw, pcsc and all PIN protocol versions. Matching OpenSSH byte for byte is the point.
 
@@ -144,6 +147,16 @@ Following OpenSSH's ssh-agent (`destination.rs`, ported from `identity_permitted
 - Decoding is strict: reserved fields must be empty (ssh-agent-lib's own types silently drop them, so skagent decodes these messages itself), names contain no NUL, nothing may trail.
 - Limits: host certificates and host key types newer than the `ssh-key` crate (e.g. OpenSSH 10's `ssh-mldsa44-ed25519`) can't be decoded. Binding a session to such a key fails, which keeps constrained keys off that connection. In constraints, keys of unknown types are skipped (`ssh-add -h` sends every key `known_hosts` has, including ones `UpdateHostKeys` learned), CA entries never match: both only narrow. ssh prefers Ed25519, ECDSA and RSA host keys over `ssh-mldsa44-ed25519`, so normal hosts bind fine.
 
+## age
+
+[`age.md`](age.md) has the design: a credential of its own per identity (relying party `skagent:age`, credProtect 3, hmac-secret), a key pair derived from its secret at decryption time, files in age's native post-quantum format. What that means for the points above:
+
+- **Threat model.** Unlike an SSH key, the private key of an age identity exists in the agent's memory while a file is decrypted: derived, used and wiped within milliseconds. Whoever reads the agent's memory at that moment (root, the kernel) has it for good, and so has whoever gets one derivation out of the security key with a stolen PIN and a hijacked touch. Everything else carries over: without the PIN the security key denies that the credential exists, and it wants a touch for every derivation.
+- **Protocol surface.** A second socket (`skagent-age.sock`) answers `age-unwrap@skagent`, `age-new@skagent` and `age-list@skagent` and nothing of the ssh-agent protocol; the ssh-agent socket answers none of them. It takes requests from skagent's plugin and command line only, recognized by their executable (`peer.rs`). One request gets at most one file key.
+- **The way to the security key** is the signer's (`Signer::run`): routing by binding, pairing and serial, the PIN cache with its rules, the check of a typed PIN, cancellation, tickets. A PIN that a derivation accepted is cached like one a signature accepted.
+- **State.** `$XDG_STATE_HOME/skagent/age.toml` remembers the identities found: credential ids and recipients, nothing secret.
+- **Secret memory.** The security key's answer and the seed derived from it are `SecretBuffer`s. Not covered, and short-lived: libfido2's copy of the answer, what `libcrux-ml-kem` and `x25519-dalek` keep on the stack while they run, and the file key in the reply buffers of ssh-agent-lib.
+
 ## open questions
 
 - `skagent load` through a forwarded agent stays refused. An opt-in (e.g. `--allow-forwarded-load`, with prompt and notification naming the forwarded host by its verified host key) is postponed until a workflow needs it: without it, a remote host can only cause a PIN prompt through a signature request while no PIN is cached (it can't evict PINs either), and that prompt says what is signed.
@@ -161,4 +174,4 @@ Following OpenSSH's ssh-agent (`destination.rs`, ported from `identity_permitted
 9. ~~Running as a service.~~ Done: systemd socket activation and a home-manager module (socket-activated user service, part of the graphical session, optional load at login), tested in `checks.vm-home-manager`. A NixOS module isn't planned: the agent runs per user, which is home-manager's job.
 10. macOS (aarch64-darwin): planned, see [`macos.md`](macos.md).
 11. skagent-pinentry, a popup of our own for PIN, touch and errors: planned, see [`pinentry.md`](pinentry.md).
-12. Decrypting age files with a key derived from the security key: planned, see [`age.md`](age.md).
+12. Decrypting age files with a key derived from the security key: in progress, see [`age.md`](age.md). Done: identities, decrypting one file per touch, the plugin (`checks.vm-age`). Pending: batches, forwarding, the home-manager module.
