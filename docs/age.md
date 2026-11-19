@@ -514,7 +514,10 @@ What to look out for, beyond its own verdicts:
 - **The lock:** whether locking your screen reaches the agent at all (it
   listens to logind).
 - **Times:** how long the key waits for a touch (the popup's ring assumes
-  15 s), and how long 40 files take.
+  28 s, what a YubiKey 5.8 took), and how long 40 files take.
+
+What it showed on a YubiKey 5.8 is in
+[`research/hmac-secret.md`](research/hmac-secret.md).
 
 ## later
 

@@ -59,6 +59,19 @@ Run on 2026-11-18 against two YubiKeys:
 
 Both refuse with `CTAP2_ERR_UP_REQUIRED`, the 5.8 too, although CTAP 2.1 names `CTAP2_ERR_UNSUPPORTED_OPTION` for it.
 
+## the whole of it on a YubiKey 5.8
+
+`nix run .#age-check` (see [`age.md`](../age.md)) on the 5.8 above, with skagent's popup, kernel 6.18.58, age 1.3.2:
+
+- **A touch that never comes** ends after 28.6 s with `FIDO_ERR_OPERATION_DENIED`. That is what CTAP says ("If the user declines permission, or the operation times out, then end the operation by returning CTAP2_ERR_OPERATION_DENIED", 2.1 §6.2.2, and the same in 2.0), so the code doesn't tell a timeout from a refusal. A YubiKey has no way to refuse: skagent takes it for the timeout (`ErrorKind::TouchTimeout`), like `ACTION_TIMEOUT` and `USER_ACTION_TIMEOUT`, which other firmware may send.
+- **Creating** took the PIN and two touches, 18.9 s with the typing. `hmac-secret-mc` is listed and not used yet.
+- **A batch of 40 files** was 0.41 s after its touch: about 10 ms a file, most of it age starting. The seed was in `memfd_secret` memory.
+- **Replugged,** the key was recognized by its serial without a touch of its own, and its PIN was asked for again.
+- **Locking the screen** reached the agent as logind's `LockedHint`, and ended the batch.
+- **The PIN retry counter** stayed at 8, and the slot the test identity took was free again after deleting it.
+
+Not looked at: the older key, in particular how long it waits for a touch and what it answers then.
+
 ## the virtual test key (soft-fido2 0.17)
 
 The same script, run in a VM against `skagent-testkey` (which lists only `credProtect` as an extension):
