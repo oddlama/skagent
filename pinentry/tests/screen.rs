@@ -5,8 +5,8 @@
 use anyhow::{Context as _, Result, ensure};
 use skagent_pinentry::fixtures::{NAMES, fixture};
 use skagent_pinentry::screen::{
-    Anchor, Badge, Body, Close, Glyph, Screen, Tone, glyph, request_subtitle, short_fingerprint,
-    tries_left,
+    Anchor, Badge, Body, Close, Glyph, Screen, Tone, about, glyph, request_subtitle,
+    short_fingerprint, tries_left,
 };
 use skagent_popup::{Failure, Host, Key, Request, Requester, SecurityKey, State};
 
@@ -28,6 +28,16 @@ fn every_screen_says_what_the_design_says() -> Result<()> {
             "Desk 5C NFC · now to sign",
         ),
         ("done", "Signed", "github.com"),
+        (
+            "batch-touch",
+            "Touch your YubiKey",
+            "Decrypt files for 10 min · agenix rekey",
+        ),
+        (
+            "batch-done",
+            "Batch started",
+            "Decrypt files for 10 min · agenix rekey",
+        ),
         (
             "select",
             "Touch the right YubiKey",
@@ -284,6 +294,73 @@ fn a_decryption_is_decrypted_not_signed() {
     });
     assert_eq!(pin.title, "age identity");
     assert_eq!(pin.subtitle.text(), "Decrypt a file · agenix");
+}
+
+/// A batch is what the user agrees to with the PIN and with the touch, so
+/// both say it, whatever else the touch screen would show.
+#[test]
+fn a_batch_is_named_wherever_the_user_agrees_to_it() {
+    let identity = || Key {
+        emoji: None,
+        label: "age identity".to_owned(),
+        fingerprint: "age1pq1x34nzs…fzv49zc0k".to_owned(),
+    };
+    let request = || Request::Batch {
+        command: "agenix rekey".to_owned(),
+        seconds: 600,
+    };
+    let said = "Decrypt files for 10 min · agenix rekey";
+    assert_eq!(request_subtitle(&request()).text(), said);
+    let pin = Screen::of(&State::Pin {
+        key: identity(),
+        request: request(),
+        security_key: None,
+        mistake: None,
+    });
+    assert_eq!(pin.subtitle.text(), said);
+    let yubikey = || {
+        Some(SecurityKey {
+            name: "Desk 5C NFC".to_owned(),
+        })
+    };
+    for (again, security_key) in [
+        (false, None),
+        (false, yubikey()),
+        (true, None),
+        (true, yubikey()),
+    ] {
+        let touch = Screen::of(&State::Touch {
+            key: identity(),
+            request: request(),
+            security_key,
+            timeout_ms: 15_000,
+            again,
+        });
+        assert_eq!(touch.subtitle.text(), said, "again: {again}");
+        assert!(touch.announcement.contains(said), "{}", touch.announcement);
+    }
+    let done = Screen::of(&State::Signed {
+        key: identity(),
+        request: request(),
+    });
+    assert_eq!(done.title, "Batch started");
+    assert_eq!(done.subtitle.text(), said);
+}
+
+#[test]
+fn how_long_a_batch_lasts_is_never_understated() {
+    for (seconds, expected) in [
+        (1, "1 s"),
+        (119, "119 s"),
+        (120, "2 min"),
+        (121, "3 min"),
+        (600, "10 min"),
+        (7199, "120 min"),
+        (7200, "2 h"),
+        (7201, "3 h"),
+    ] {
+        assert_eq!(about(seconds), expected);
+    }
 }
 
 /// Creating an age identity: the PIN, then two touches.

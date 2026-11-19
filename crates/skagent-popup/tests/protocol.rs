@@ -359,3 +359,34 @@ fn creating_an_identity_is_a_request_kind_of_its_own() -> Result<()> {
     ensure!(decode_message(text.trim_end())? == message);
     Ok(())
 }
+
+#[test]
+fn a_batch_is_a_request_kind_of_its_own() -> Result<()> {
+    let message = Message::Show {
+        seq: 1,
+        waiting: Vec::new(),
+        state: Box::new(State::Touch {
+            key: key(),
+            request: Request::Batch {
+                command: "agenix rekey".to_owned(),
+                seconds: 600,
+            },
+            security_key: None,
+            timeout_ms: 15_000,
+            again: false,
+        }),
+    };
+    let text = String::from_utf8(encode_message(&message)?)?;
+    ensure!(
+        text.contains(r#""request":{"kind":"batch","command":"agenix rekey","seconds":600}"#),
+        "{text}"
+    );
+    ensure!(decode_message(text.trim_end())? == message);
+    // A popup that doesn't know batches can't take one for a single file.
+    let older = text.replace(r#""kind":"batch""#, r#""kind":"decrypt""#);
+    ensure!(
+        decode_message(older.trim_end()).is_err(),
+        "decoded as a decryption"
+    );
+    Ok(())
+}

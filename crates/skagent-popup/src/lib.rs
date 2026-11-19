@@ -277,6 +277,18 @@ pub enum Request {
         /// Who asks.
         by: Requester,
     },
+    /// Decrypting the age files a command asks for, as a batch: this one
+    /// with the PIN and a touch, the following ones with neither, until the
+    /// command ends or the time is up. The [`Key`] of the state is an age
+    /// identity, like for [`Request::Decrypt`]. A popup has to say this
+    /// wherever it asks for the PIN or the touch: it is what the user
+    /// agrees to.
+    Batch {
+        /// The command `skagent batch` runs.
+        command: String,
+        /// How long the batch lasts at most.
+        seconds: u64,
+    },
     /// Creating an age identity on a security key: the PIN, a touch for the
     /// credential and one more to read its recipient. The [`Key`] of the
     /// state stands for the identity to be.

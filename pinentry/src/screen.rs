@@ -380,6 +380,13 @@ pub fn request_subtitle(request: &Request) -> Subtitle {
         Request::Sign { namespace } if namespace == "git" => Subtitle::muted("Git signature"),
         Request::Sign { namespace } => Subtitle::muted(format!("Signature for \"{namespace}\"")),
         Request::Create => Subtitle::muted("Create an age identity"),
+        Request::Batch { command, seconds } => Subtitle {
+            spans: vec![
+                Span::text(format!("Decrypt files for {}", about(*seconds))),
+                Span::text(format!(" · {command}")),
+            ],
+            tone: Tone::Muted,
+        },
         Request::Decrypt { by } => {
             let mut spans = vec![Span::text("Decrypt a file")];
             match by {
@@ -432,6 +439,18 @@ pub fn short_fingerprint(fingerprint: &str) -> String {
         format!("{head}{cut}")
     } else {
         format!("{algorithm}:{head}{cut}")
+    }
+}
+
+/// About how long `seconds` are, never less: "45 s", "10 min", "2 h".
+#[must_use]
+pub fn about(seconds: u64) -> String {
+    if seconds < 120 {
+        format!("{seconds} s")
+    } else if seconds < 7200 {
+        format!("{} min", seconds.div_ceil(60))
+    } else {
+        format!("{} h", seconds.div_ceil(3600))
     }
 }
 
@@ -503,6 +522,7 @@ fn pair(security_key: Option<&SecurityKey>, timeout_ms: u64) -> Screen {
 fn signed(key: &Key, request: &Request) -> Screen {
     let title = match request {
         Request::Decrypt { .. } => "Decrypted",
+        Request::Batch { .. } => "Batch started",
         Request::Create => "Created",
         Request::Login { .. } | Request::Sign { .. } | Request::Unknown => "Signed",
     };
@@ -582,11 +602,14 @@ fn touch(
         (false, None) => "Touch your security key",
     };
     let now_to = match request {
-        Request::Decrypt { .. } => "now to decrypt",
+        Request::Decrypt { .. } | Request::Batch { .. } => "now to decrypt",
         Request::Create => "now to read its recipient",
         Request::Login { .. } | Request::Sign { .. } | Request::Unknown => "now to sign",
     };
     let subtitle = match (again, security_key) {
+        // What this touch allows beyond itself is said with every touch,
+        // also the one that follows a cached PIN.
+        _ if matches!(request, Request::Batch { .. }) => request_subtitle(request),
         (true, Some(security_key)) => Subtitle::muted(format!("{} · {now_to}", security_key.name)),
         (true, None) => Subtitle::muted(now_to),
         (false, Some(security_key)) => Subtitle::muted(security_key.name.clone()),

@@ -118,6 +118,7 @@ one maps to a protocol state; the popup derives the copy from the data.
 | `touch`, `touch-again` | `touch` | key, request, YubiKey, `timeout_ms`, `again` | touch-again right after `select` |
 | (none in B+) | `pair` | YubiKey, `timeout_ms` | right after the first signature or load on a key: one more touch to pair skagent with it; `CANCEL` declines |
 | `done` | `signed` | key, request | final |
+| `batch-touch`, `batch-done` (not in B+) | `touch`, `signed` with the request kind `batch` | age identity, command, `seconds` | the touch that starts a batch of decryptions (`docs/age.md`): the subtitle always says so, in place of the YubiKey's name |
 | `select` | `select` | key, `devices`, `timeout_ms` | every plugged-in key blinks |
 | `select-load` | `select` without key | `devices`, `timeout_ms` | |
 | `load-pin` | `load-pin` | YubiKey, `mistake` | YubiKey glyph as the anchor, no touch |

@@ -3,12 +3,14 @@
 use skagent_popup::{Failure, Key, Mistake, Queued, Request, SecurityKey, State};
 
 /// The screens of design B+, by name.
-pub const NAMES: [&str; 18] = [
+pub const NAMES: [&str; 20] = [
     "pin",
     "wrong-pin",
     "touch",
     "touch-again",
     "done",
+    "batch-touch",
+    "batch-done",
     "select",
     "select-load",
     "load-pin",
@@ -43,6 +45,22 @@ fn desk() -> SecurityKey {
 fn named(name: &str) -> SecurityKey {
     SecurityKey {
         name: name.to_owned(),
+    }
+}
+
+/// An age identity, as the agent names it.
+fn identity() -> Key {
+    Key {
+        emoji: None,
+        label: "age identity".to_owned(),
+        fingerprint: "age1pq1x34nzs…fzv49zc0k".to_owned(),
+    }
+}
+
+fn batch() -> Request {
+    Request::Batch {
+        command: "agenix rekey".to_owned(),
+        seconds: 600,
     }
 }
 
@@ -86,6 +104,17 @@ fn signing(name: &str) -> Option<State> {
         "done" => State::Signed {
             key: fox(),
             request: github(),
+        },
+        "batch-touch" => State::Touch {
+            key: identity(),
+            request: batch(),
+            security_key: Some(desk()),
+            timeout_ms: 15_000,
+            again: false,
+        },
+        "batch-done" => State::Signed {
+            key: identity(),
+            request: batch(),
         },
         "select" => State::Select {
             key: Some(fox()),
