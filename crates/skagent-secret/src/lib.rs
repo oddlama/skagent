@@ -27,6 +27,10 @@
 //! don't get the pages at all (`MADV_DONTFORK`; `MADV_WIPEONFORK` needs
 //! private memory). The catch: the kernel refuses to hibernate while any
 //! such memory exists, hence opt-in.
+//!
+//! A single secret that is worth it, and that is gone before the machine
+//! sleeps, can live there whatever the process chose:
+//! [`SecretBuffer::from_slice_in`] with [`strongest_backend`].
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 // Raw memory mappings need `unsafe`. Only `mapping.rs` may use it (the
 // workspace denies it everywhere else), every block holds one operation and
@@ -84,6 +88,24 @@ pub fn use_secretmem() -> Result<()> {
     Ok(())
 }
 
+/// Whether the kernel provides `memfd_secret(2)` memory, probed once.
+#[must_use]
+pub fn secretmem_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| LockedPages::allocate(1, Backend::Secretmem).is_ok())
+}
+
+/// The backend that hides a secret best on this system: `memfd_secret(2)`
+/// memory if the kernel provides it, else locked memory.
+#[must_use]
+pub fn strongest_backend() -> Backend {
+    if secretmem_available() {
+        Backend::Secretmem
+    } else {
+        Backend::Locked
+    }
+}
+
 /// Fixed-capacity byte buffer for a secret, backed by locked, guarded pages.
 ///
 /// The content is only reachable through [`SecretBuffer::expose`].
@@ -103,11 +125,22 @@ impl SecretBuffer {
     /// Returns an error if `capacity` is zero, or if mapping, protecting,
     /// locking or advising the memory fails.
     pub fn with_capacity(capacity: usize) -> Result<Self> {
+        Self::with_capacity_in(capacity, backend())
+    }
+
+    /// [`SecretBuffer::with_capacity`] in memory of `backend`, whatever the
+    /// process keeps its other secrets in. Doesn't fix the process's backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `capacity` is zero, or the memory can't be had,
+    /// e.g. because the kernel has no `memfd_secret(2)`.
+    pub fn with_capacity_in(capacity: usize, backend: Backend) -> Result<Self> {
         if capacity == 0 {
             bail!("a secret buffer needs a capacity of at least one byte");
         }
         Ok(Self {
-            pages: LockedPages::allocate(capacity, backend())?,
+            pages: LockedPages::allocate(capacity, backend)?,
             capacity,
             len: 0,
         })
@@ -122,6 +155,18 @@ impl SecretBuffer {
     /// Returns an error if `bytes` is empty or the allocation fails.
     pub fn from_slice(bytes: &[u8]) -> Result<Self> {
         let mut buffer = Self::with_capacity(bytes.len())?;
+        buffer.extend_from_slice(bytes)?;
+        Ok(buffer)
+    }
+
+    /// [`SecretBuffer::from_slice`] in memory of `backend`, see
+    /// [`SecretBuffer::with_capacity_in`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `bytes` is empty or the allocation fails.
+    pub fn from_slice_in(bytes: &[u8], backend: Backend) -> Result<Self> {
+        let mut buffer = Self::with_capacity_in(bytes.len(), backend)?;
         buffer.extend_from_slice(bytes)?;
         Ok(buffer)
     }
