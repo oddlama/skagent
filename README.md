@@ -1,3 +1,7 @@
+<p align="center">
+  <img alt="skagent's popup, eight times. Four light ones: in its light preset asking for the PIN of Desk 5C NFC to load its keys and waiting for a touch for github-work, in Catppuccin Latte asking for a PIN with requests waiting, and in Solarized Light after signing. Four dark ones: in its dark preset asking to plug in Desk 5C NFC because the plugged-in key doesn't hold github-work and listing 3 loaded keys, in Catppuccin Mocha waiting for the touch that starts a batch of decryptions, and green on black in a monospaced font after a wrong PIN" width="880" src="https://github.com/user-attachments/assets/3574ae98-1579-47c9-b9b2-a51e37da79e5">
+</p>
+
 [📦 Installation](#-installation) | [🧭 Usage](#-usage) | [🔐 Security](#-security) | [📐 Design](docs/design.md)
 
 ## 🔑 skagent
@@ -15,10 +19,6 @@ needs your PIN and a touch. skagent caches the PIN securely and can handle multi
 - 🌍 **Agent forwarding and `ssh-add -h`** destination constraints, checked like OpenSSH does
 - 🗄️ **Decrypts age files** with a post-quantum key derived from your security key, one touch per file or one for a whole command
 - 💬 **Prompts that tell you what you sign**, plus a notification while the key waits for a touch
-
-<p align="center">
-  <img alt="skagent's popup, eight times. Four light ones: in its light preset asking for the PIN of Desk 5C NFC to load its keys and waiting for a touch for github-work, in Catppuccin Latte asking for a PIN with requests waiting, and in Solarized Light after signing. Four dark ones: in its dark preset asking to plug in Desk 5C NFC because the plugged-in key doesn't hold github-work and listing 3 loaded keys, in Catppuccin Mocha waiting for the touch that starts a batch of decryptions, and green on black in a monospaced font after a wrong PIN" width="880" src="https://github.com/user-attachments/assets/REPLACE-skagent-popup">
-</p>
 
 ## 📦 Installation
 
