@@ -5,7 +5,9 @@ usage: fake-notifications LOG
 
 Owns org.freedesktop.Notifications on the session bus and appends one line
 per call to LOG: "notify ID SUMMARY | BODY", "actions ID KEY=LABEL ..." for
-a notification with buttons, and "close ID". A notification that replaces
+a notification with buttons, and "close ID". LOG.hints gets a line per
+notification shown: "ID transient" for one that asks not to be kept once
+its bubble is gone, else "ID kept". A notification that replaces
 one that is still there keeps its ID; replacing one that was closed makes a
 new one.
 
@@ -61,6 +63,9 @@ class Notifications(ServiceInterface):
         self.open.add(number)
         self.shown = number
         self.record(f"notify {number} {summary} | {body}")
+        transient = "transient" in hints and hints["transient"].value
+        with open(self.log + ".hints", "a") as file:
+            file.write(f"{number} {'transient' if transient else 'kept'}\n")
         if actions:
             pairs = zip(actions[::2], actions[1::2])
             buttons = " ".join(f"{key}={label}" for key, label in pairs)

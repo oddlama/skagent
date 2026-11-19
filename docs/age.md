@@ -443,6 +443,14 @@ the threat model already has.
   done, the notification says why; else it goes with the batch. With any
   prompt, also with `--no-touch-notification`. Without a notification
   service, `skagent forget` stops a batch.
+- **The button has to outlast the bubble.** A desktop may take a
+  notification's bubble off the screen after a while, whatever expiry it
+  asked for, and keep the notification in a list (noctalia's menu, for one).
+  A `transient` notification bypasses that list, as the specification has it,
+  and noctalia 5.3.0 does (`shouldTrackHistory`). The running batch's
+  notification asks for no expiry and isn't transient, so Stop stays within
+  reach for as long as the batch runs. What says why a batch ended is a
+  passing word, and transient.
 - **A pressed button is the end of its notification.** A notification
   service closes a notification whose button was pressed, and says both:
   `ActionInvoked`, and `NotificationClosed` right after it (some may say it

@@ -166,6 +166,11 @@ pkgs.testers.runNixOSTest {
     def notified() -> list[str]:
         return machine.succeed("cat ${notificationLog} 2>/dev/null || true").splitlines()
 
+    def kept(number: str) -> list[str]:
+        """Whether the notification `number` asked to be kept in the desktop's list or not, each time it was shown."""
+        hints = machine.succeed("cat ${notificationLog}.hints").splitlines()
+        return [line.split()[1] for line in hints if line.split()[0] == number]
+
     def notification_of(command: str) -> str:
         """The number of the notification that shows the batch for `command` last."""
         shown = [line.split()[1] for line in notified() if line.startswith("notify ") and f" skagent batch: {command} | " in line]
@@ -290,6 +295,9 @@ pkgs.testers.runNixOSTest {
             first,
         ), first
         assert f"actions {number} stop=Stop" in shown, shown
+        # It stays in the desktop's list of notifications when its bubble
+        # goes: the button has to be there for as long as the batch is.
+        assert set(kept(number)) == {"kept"}, kept(number)
         # Not before the touch: until then the prompt says what is asked for.
         assert not [line for line in shown if "No file decrypted" in line], shown
         retry(lambda _last_try: f"close {number}" in notified(), timeout_seconds=5)
@@ -379,6 +387,8 @@ pkgs.testers.runNixOSTest {
         last = [line for line in notified() if line.startswith(f"notify {number} ")][-1]
         assert "| Ended: PINs were dropped (lock, sleep or a request to forget them). 1 file decrypted;" in last, last
         assert f"close {number}" not in notified(), notified()
+        # Why it ended is a passing word, in place of what had the button.
+        assert kept(number)[0] == "kept" and kept(number)[-1] == "transient", kept(number)
 
     with subtest("the button in the notification stops a batch"):
         def press_stop() -> None:

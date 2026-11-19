@@ -226,18 +226,23 @@ pub struct Standing {
 
 impl Standing {
     /// Shows `summary` and `body` in place of what this notification showed
-    /// before. `lasting`: with its buttons, until it is closed or replaced;
-    /// else without buttons, for as long as the service keeps
-    /// notifications. Returns whether the service took it.
+    /// before. `lasting`: with its buttons, until it is closed or replaced,
+    /// and kept where the desktop keeps notifications; else without
+    /// buttons, for as long as the service shows a passing one. Returns
+    /// whether the service took it.
     pub async fn show(&mut self, summary: &str, body: &str, lasting: bool) -> bool {
         if let Some(pressed) = self.pressed.take() {
             // A service that keeps a notification after a button was
             // pressed would show it next to this one.
             self.close_id(pressed).await;
         }
+        // A desktop may take a bubble off the screen after a while,
+        // whatever it asked for, and keep the notification in a list. A
+        // transient one isn't kept: its buttons would go with the bubble,
+        // and nothing could be stopped.
         let hints: HashMap<&str, Variant<'_>> = HashMap::from([
             ("urgency", Variant::from(1_u8)),
-            ("transient", Variant::from(true)),
+            ("transient", Variant::from(!lasting)),
             ("category", Variant::from("device")),
         ]);
         let actions: Vec<&str> = if lasting {
