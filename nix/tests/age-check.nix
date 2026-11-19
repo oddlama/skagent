@@ -91,6 +91,7 @@ pkgs.testers.runNixOSTest {
             "ok    [3] a file for another recipient costs a touch and opens nothing",
             "ok    [4] without a touch nothing is decrypted (",
             "nobody answered in time",
+            "ok    [4] and the agent takes the key's answer for a touch that never came",
             "time  [4] the key waits",
             "ok    [5] all 8 files are decrypted",
             "ok    [5] all but the first without the key",
@@ -106,6 +107,7 @@ pkgs.testers.runNixOSTest {
             "ok    [9] skagent forget ended the batch",
             "ok    [10] for an unverified host, as the log has it",
             "ok    [11] the identity's recipient is the one from the start",
+            "note  [11] finding the identity among 1 took 1 touch(es)",
             "ok    [12] the PIN retry counter is where it was (8)",
             "ok    [12] the test credential is deleted",
         ]:

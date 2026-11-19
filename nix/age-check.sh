@@ -353,7 +353,12 @@ before=$(said 'nobody touched the security key in time')
 (decrypt f1.age >"$work/untouched.out" 2>"$work/untouched.err") &
 untouched=$!
 if [ "$popup" = yes ]; then
-  if wait_said 'nobody touched the security key in time' $((before + 1)) 90; then
+  # Once the key gave up, the popup offers to try again and waits for that.
+  while kill -0 "$untouched" 2>/dev/null &&
+    [ "$(said 'nobody touched the security key in time')" -le "$before" ]; do
+    sleep 0.5
+  done
+  if kill -0 "$untouched" 2>/dev/null; then
     todo "The popup says \"Timed out\". Press Esc in it."
   fi
 fi
@@ -364,6 +369,13 @@ else
   why=$(grep -m 1 -F 'error:' "$work/untouched.err" || tail -n 1 "$work/untouched.err")
   ok "without a touch nothing is decrypted (${why#age: error: })"
 fi
+# The popup says "Timed out" and logs it; without one the plugin is told.
+if [ "$(said 'nobody touched the security key in time')" -gt "$before" ] ||
+  grep -q 'nobody answered in time' "$work/untouched.err"; then
+  ok "and the agent takes the key's answer for a touch that never came"
+else
+  bad "the agent doesn't take the key's answer for a touch that never came"
+fi
 if waited=$(seconds_between 'decrypting on the security key' 'nobody touched the security key in time'); then
   result "time  [$step_number] the key waits $waited s for a touch"
 elif waited=$(seconds_between 'decrypting on the security key' 'refused to decrypt'); then
@@ -372,8 +384,8 @@ fi
 
 step "A batch: $files files for one touch"
 say "The prompt should say that this starts a batch: \"Decrypt files for 10 min ·"
-say "./decrypt-all …\" in the popup, \"(a batch)\" in pinentry. Once you touched,"
-say "a notification should count the files and offer to stop."
+say "./decrypt-all …\" in the popup, \"(a batch)\" in pinentry. Look at it before"
+say "you touch."
 todo "Touch the key once when it blinks."
 in_batch=$(said 'decrypted in a batch, without a touch')
 list=$(for number in $(seq 1 "$files"); do printf 'f%s.age ' "$number"; done)
@@ -387,7 +399,6 @@ check "all but the first without the key" \
 result "time  [$step_number] the batch took $elapsed s, the touch included"
 result "seed  [$step_number] kept in $(grep -F 'the batch started' "$log" | tail -n 1 | sed -n 's/.*memory=\([A-Za-z]*\).*/\1/p') memory"
 ask "batch" "Was it exactly one touch, and did the prompt name the batch and its command?"
-ask "notification" "Did a notification count the files, with a Stop button? Which notification program do you use?"
 
 step "After the batch, and next to one"
 todo "Touch the key when it blinks: the batch is over, a file takes a touch again."
@@ -411,7 +422,9 @@ if [ "$skip_stop" = yes ]; then
   skipped "stopping a batch from its notification"
 elif start_gated f1.age f2.age f3.age; then
   stopped=$(said 'reason=stopped by the user')
-  todo "Press Stop in the notification \"skagent batch: ./gated …\"."
+  say "A notification \"skagent batch: ./gated …\" should be up by now, saying"
+  say "\"1 file decrypted without a touch\", with a Stop button."
+  todo "Press Stop in the notification."
   todo "If there is no such button, press Enter here to go on without."
   while [ "$(said 'reason=stopped by the user')" = "$stopped" ]; do
     if read -r -t 1 _ </dev/tty; then break; fi
@@ -426,6 +439,7 @@ elif start_gated f1.age f2.age f3.age; then
     skipped "stopping a batch from its notification (no button, or not pressed)"
     finish_gated 3 || true
   fi
+  ask "notification" "What did the notification look like, and which notification program do you use?"
 else
   bad "the waiting batch didn't start"
 fi
@@ -480,8 +494,9 @@ else
 fi
 
 step "Asked through the ssh-agent socket"
-say "What comes in there counts as another machine. The prompt should say"
-say "that an unknown (unverified) host wants a file decrypted."
+say "What comes in there counts as another machine. The touch prompt should say"
+say "so: \"Decrypt a file · for Unknown host\" in the popup. Look at it before"
+say "you touch."
 todo "Touch the key when it blinks."
 out=$(cd "$work" && SKAGENT_AGE_SOCKET=$sock age -d -i id.txt f3.age 2>"$work/err")
 check "a file is decrypted" test "$out" = file-3
@@ -500,15 +515,18 @@ say "  $loaded" | tr '\n' ' '
 say ""
 found=$(sed -n 's/^Found \([0-9]*\) age identity.*/\1/p' <<<"$loaded")
 check "skagent load finds the age identity" test "${found:-0}" -ge 1
-if [ "${found:-0}" = 1 ]; then
+if [ "${found:-0}" -le 1 ]; then
   todo "Touch the key when it blinks."
-  check "a file is decrypted" test "$(decrypt f5.age 2>"$work/err")" = file-5
-  check "the identity's recipient is the one from the start" grep -qxF "$recipient" <<<"$(skagent age list 2>/dev/null)"
 else
-  # By design: which of several identities a file is for shows only once
-  # each was used on this machine, and the agent doesn't guess with touches.
-  skipped "decrypting with a fresh agent: the key holds ${found:-0} identities, which it can't tell apart yet"
+  # Which of them the file names, only the key's answers tell: the agent
+  # tries them in turn, and knows each from then on.
+  say "The key holds $found identities, and this agent has used none of them yet."
+  todo "Touch the key each time it blinks: up to $found times, until it found the one."
 fi
+ordinary=$(said 'decrypting on the security key')
+check "a file is decrypted" test "$(decrypt f5.age 2>"$work/err")" = file-5
+check "the identity's recipient is the one from the start" grep -qxF "$recipient" <<<"$(skagent age list 2>/dev/null)"
+result "note  [$step_number] finding the identity among ${found:-0} took $(($(said 'decrypting on the security key') - ordinary)) touch(es)"
 
 step "The key afterwards"
 stop_agent
