@@ -394,9 +394,13 @@ pub fn request_subtitle(request: &Request) -> Subtitle {
                 Requester::Program { name: Some(name) } => {
                     spans.push(Span::text(format!(" · {name}")));
                 }
-                Requester::Forwarded { host } => {
+                Requester::Forwarded { host, via } => {
                     spans.push(Span::text(" · for "));
                     spans.extend(host_spans(host));
+                    if let Some(via) = via {
+                        spans.push(Span::text(" · via "));
+                        spans.extend(host_spans(via));
+                    }
                 }
             }
             Subtitle {
@@ -607,9 +611,19 @@ fn touch(
         Request::Login { .. } | Request::Sign { .. } | Request::Unknown => "now to sign",
     };
     let subtitle = match (again, security_key) {
-        // What this touch allows beyond itself is said with every touch,
-        // also the one that follows a cached PIN.
-        _ if matches!(request, Request::Batch { .. }) => request_subtitle(request),
+        // What this touch allows beyond itself, and that another machine
+        // asks for it, is said with every touch, also the one that follows
+        // a cached PIN.
+        _ if matches!(
+            request,
+            Request::Batch { .. }
+                | Request::Decrypt {
+                    by: Requester::Forwarded { .. }
+                }
+        ) =>
+        {
+            request_subtitle(request)
+        }
         (true, Some(security_key)) => Subtitle::muted(format!("{} · {now_to}", security_key.name)),
         (true, None) => Subtitle::muted(now_to),
         (false, Some(security_key)) => Subtitle::muted(security_key.name.clone()),

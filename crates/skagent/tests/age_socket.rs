@@ -415,6 +415,65 @@ async fn the_ssh_agent_socket_answers_no_age_request() -> Result<()> {
     agent.stop().await
 }
 
+#[tokio::test]
+async fn with_age_forwarding_the_ssh_agent_socket_decrypts_and_nothing_more() -> Result<()> {
+    let agent = Running::start(TakenFor::Stranger, &[]).await?;
+    let query = || async {
+        let details = Running::ask(&agent.ssh, "query", Vec::new())
+            .await?
+            .context("the query was refused")?;
+        let response: QueryResponse = Unparsed::from(details)
+            .parse()
+            .map_err(|error| anyhow!("decoding the query's answer: {error}"))?;
+        Ok::<_, anyhow::Error>(response.extensions)
+    };
+    ensure!(!query().await?.contains(&UNWRAP_EXTENSION.to_owned()));
+    ensure!(
+        agent.unwrap(&agent.ssh, Identity::AtHand).await?.is_none(),
+        "unwrapped without being allowed to"
+    );
+
+    agent.agent.allow_age_forwarding(true);
+    ensure!(query().await?.contains(&UNWRAP_EXTENSION.to_owned()));
+    // Taken, whoever asks: here, answered that there is no identity.
+    ensure!(refused(agent.unwrap(&agent.ssh, Identity::AtHand).await?)? == Refusal::NoIdentity);
+    // A malformed request is a failure.
+    ensure!(
+        Running::ask(&agent.ssh, UNWRAP_EXTENSION, vec![1, 0, 0])
+            .await?
+            .is_none()
+    );
+    // Identities stay this machine's business, and so do batches.
+    for (name, details) in [
+        (LIST_EXTENSION, wire::simple_request()),
+        (NEW_EXTENSION, wire::new_request(false)),
+        (BATCH_EXTENSION, batch_request(0)?),
+    ] {
+        ensure!(
+            Running::ask(&agent.ssh, name, details).await?.is_none(),
+            "{name} was answered on the ssh-agent socket"
+        );
+    }
+    ensure!(agent.agent.signer().running_batches().await == 0);
+    // The socket for age requests is as it was: no stranger there.
+    ensure!(refused(agent.unwrap(&agent.age, Identity::AtHand).await?)? == Refusal::NotAllowed);
+
+    agent.agent.allow_age_forwarding(false);
+    ensure!(agent.unwrap(&agent.ssh, Identity::AtHand).await?.is_none());
+    agent.stop().await?;
+
+    // A locked agent decrypts for nobody.
+    let agent = Running::start(TakenFor::Stranger, &[(1, true)]).await?;
+    agent.agent.allow_age_forwarding(true);
+    Running::client(&agent.ssh)
+        .await?
+        .lock("passphrase".to_owned())
+        .await
+        .map_err(|error| anyhow!("locking: {error}"))?;
+    ensure!(refused(agent.unwrap(&agent.ssh, Identity::AtHand).await?)? == Refusal::Locked);
+    agent.stop().await
+}
+
 /// The details of a request for a batch of `seconds` (zero: as long as
 /// allowed) for the command `agenix rekey`.
 fn batch_request(seconds: u32) -> Result<Vec<u8>> {

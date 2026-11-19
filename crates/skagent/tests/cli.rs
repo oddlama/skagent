@@ -321,3 +321,10 @@ fn the_batch_tool_exits_like_its_command() -> Result<()> {
     ensure!(exit_code(None, None) == 1);
     Ok(())
 }
+
+#[test]
+fn age_files_are_decrypted_for_forwarded_agents_only_on_request() -> Result<()> {
+    ensure!(!serve(&[])?.age_forwarding);
+    ensure!(serve(&["--age-forwarding"])?.age_forwarding);
+    Ok(())
+}

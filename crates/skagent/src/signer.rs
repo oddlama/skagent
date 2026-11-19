@@ -13,6 +13,7 @@ mod age;
 mod batch;
 
 pub(crate) use age::Offer;
+pub use age::purpose as decryption_purpose;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;

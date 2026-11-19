@@ -320,8 +320,20 @@ fn a_decryption_says_who_asks() -> Result<()> {
         (
             Requester::Forwarded {
                 host: Host::Unverified,
+                via: None,
             },
-            r#""by":{"kind":"forwarded","host":{"kind":"unverified"}}"#,
+            r#""by":{"kind":"forwarded","host":{"kind":"unverified"},"via":null}"#,
+        ),
+        (
+            Requester::Forwarded {
+                host: Host::HostKey {
+                    fingerprint: "SHA256:target".to_owned(),
+                },
+                via: Some(Host::HostKey {
+                    fingerprint: "SHA256:jump".to_owned(),
+                }),
+            },
+            r#""via":{"kind":"host-key","fingerprint":"SHA256:jump"}"#,
         ),
     ];
     for (by, expected) in requesters {

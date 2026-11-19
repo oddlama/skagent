@@ -198,6 +198,7 @@ fn subtitles_name_what_is_signed() {
             Request::Decrypt {
                 by: Requester::Forwarded {
                     host: named("build-host"),
+                    via: None,
                 },
             },
             "Decrypt a file · for build-host",
@@ -206,9 +207,19 @@ fn subtitles_name_what_is_signed() {
             Request::Decrypt {
                 by: Requester::Forwarded {
                     host: Host::Unverified,
+                    via: None,
                 },
             },
             "Decrypt a file · for Unknown host",
+        ),
+        (
+            Request::Decrypt {
+                by: Requester::Forwarded {
+                    host: named("build-host"),
+                    via: Some(named("jump")),
+                },
+            },
+            "Decrypt a file · for build-host · via jump",
         ),
     ];
     for (request, expected) in cases {
@@ -294,6 +305,43 @@ fn a_decryption_is_decrypted_not_signed() {
     });
     assert_eq!(pin.title, "age identity");
     assert_eq!(pin.subtitle.text(), "Decrypt a file · agenix");
+}
+
+/// Another machine asking to decrypt is said with the touch as well: after
+/// a cached PIN the touch screen is all the user sees before agreeing.
+#[test]
+fn a_forwarded_decryption_is_named_with_the_touch() {
+    let identity = || Key {
+        emoji: None,
+        label: "age identity".to_owned(),
+        fingerprint: "age1pq1x34nzs…fzv49zc0k".to_owned(),
+    };
+    let touch = |by, again| {
+        Screen::of(&State::Touch {
+            key: identity(),
+            request: Request::Decrypt { by },
+            security_key: Some(SecurityKey {
+                name: "Desk 5C NFC".to_owned(),
+            }),
+            timeout_ms: 15_000,
+            again,
+        })
+    };
+    let forwarded = || Requester::Forwarded {
+        host: Host::Unverified,
+        via: None,
+    };
+    for again in [false, true] {
+        assert_eq!(
+            touch(forwarded(), again).subtitle.text(),
+            "Decrypt a file · for Unknown host"
+        );
+    }
+    // A program on this machine: the touch screen names the key to touch.
+    let local = Requester::Program {
+        name: Some("agenix".to_owned()),
+    };
+    assert_eq!(touch(local, false).subtitle.text(), "Desk 5C NFC");
 }
 
 /// A batch is what the user agrees to with the PIN and with the touch, so

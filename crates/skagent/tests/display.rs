@@ -106,3 +106,45 @@ fn how_long_something_lasts_is_said_in_words_and_never_understated() {
         assert_eq!(skagent::display::about(seconds), words);
     }
 }
+
+#[test]
+fn a_decryption_says_who_asks_and_through_what() {
+    use skagent::signer::decryption_purpose;
+    use skagent_popup::{Host, Requester};
+    let key = |name: &str| Host::HostKey {
+        fingerprint: format!("SHA256:{name}"),
+    };
+    for (by, said) in [
+        (
+            Requester::Program {
+                name: Some("agenix".to_owned()),
+            },
+            "decrypt a file for agenix",
+        ),
+        (Requester::Program { name: None }, "decrypt a file"),
+        (
+            Requester::Forwarded {
+                host: key("jump"),
+                via: None,
+            },
+            "decrypt a file for the host with key SHA256:jump (through your forwarded agent)",
+        ),
+        (
+            Requester::Forwarded {
+                host: key("target"),
+                via: Some(key("jump")),
+            },
+            "decrypt a file for the host with key SHA256:target (through your agent forwarded to \
+             the host with key SHA256:jump)",
+        ),
+        (
+            Requester::Forwarded {
+                host: Host::Unverified,
+                via: None,
+            },
+            "decrypt a file for an unverified host (through your forwarded agent)",
+        ),
+    ] {
+        assert_eq!(decryption_purpose(&by), said);
+    }
+}

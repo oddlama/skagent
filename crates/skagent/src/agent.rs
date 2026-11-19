@@ -16,9 +16,12 @@
 //! Requests about age identities (`docs/age.md`) come in on a socket of
 //! their own, from skagent's plugin and its command line only
 //! ([`crate::peer`]). That socket answers nothing else, and the ssh-agent
-//! socket answers none of them.
+//! socket answers none of them, unless `--age-forwarding` lets it decrypt:
+//! then whatever asks there counts as another machine, gets one file key
+//! per touch, and nothing from a batch.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
@@ -29,7 +32,7 @@ use skagent_age::wire::{
 };
 use skagent_age::{Recipient, Seed};
 use skagent_fido::{AGE_USER_ID_BYTES, ErrorKind, error_kind};
-use skagent_popup::Requester;
+use skagent_popup::{Host, Requester};
 use skagent_secret::SecretBuffer;
 use ssh_agent_lib::agent::{Agent, Session};
 use ssh_agent_lib::error::AgentError;
@@ -47,7 +50,7 @@ use crate::age::{AgeIdentities, AgeIdentity, NotChosen};
 use crate::batch::{BatchId, Member, Served};
 use crate::bindings::{NotPluggedIn, Presence};
 use crate::cancel::Hangup;
-use crate::destination::{self, Bound, SESSION_BIND_EXTENSION, SessionBindings};
+use crate::destination::{self, Bound, Destination, SESSION_BIND_EXTENSION, SessionBindings};
 use crate::display::{self, MAX_COMMAND_CHARS};
 use crate::frames::BoundedStream;
 use crate::identities::{
@@ -55,7 +58,7 @@ use crate::identities::{
 };
 use crate::peer::{OwnPrograms, Peer, Program};
 use crate::popup::cancelled_in_popup;
-use crate::signer::{Offer, Signer, SigningTicket};
+use crate::signer::{Offer, Signer, SigningTicket, decryption_purpose};
 use crate::socket::PeerCheckedListener;
 
 /// Agent protocol extension that drops all cached PINs and keeps the keys.
@@ -149,6 +152,12 @@ impl SkAgent {
         &self.shared.signer
     }
 
+    /// Whether the ssh-agent socket decrypts age files (`--age-forwarding`):
+    /// for other machines, through a forwarded agent. Off unless allowed.
+    pub fn allow_age_forwarding(&self, allowed: bool) {
+        self.shared.age_forwarding.store(allowed, Ordering::SeqCst);
+    }
+
     /// Drops all cached PINs, e.g. when the screen locks. Returns how many there were.
     pub async fn forget_pins(&self, reason: &str) -> usize {
         let forgotten = self.shared.signer.forget_all().await;
@@ -194,6 +203,8 @@ struct Shared {
     /// The agent's own executables, to recognize its plugin and its command
     /// line on the socket for age requests.
     own: Option<OwnPrograms>,
+    /// Whether the ssh-agent socket decrypts age files (`--age-forwarding`).
+    age_forwarding: AtomicBool,
 }
 
 impl Shared {
@@ -618,6 +629,28 @@ impl AgentSession {
         })
     }
 
+    /// Answers `age-unwrap@skagent` on the ssh-agent socket: for another
+    /// machine, as far as anyone can tell. One file key for a touch, never
+    /// from a batch.
+    async fn forwarded_unwrap(&self, details: &[u8]) -> Result<Extension> {
+        let request = UnwrapRequest::decode(details).context("decoding the request to unwrap")?;
+        let host = |destination: Destination| match destination {
+            Destination::Named(name) => Host::Named { name },
+            Destination::HostKey(fingerprint) => Host::HostKey { fingerprint },
+            Destination::Unverified => Host::Unverified,
+        };
+        let (from, via) = self.bindings.forwarded_to();
+        let by = Requester::Forwarded {
+            host: host(from),
+            via: via.map(host),
+        };
+        let reply = self.unwrap(&request, by, None).await;
+        Ok(Extension {
+            name: UNWRAP_EXTENSION.to_owned(),
+            details: Unparsed::from(reply.encode()),
+        })
+    }
+
     /// Decrypts for `request`: chooses the identity, has its security key
     /// derive the secret, and unwraps. For a `member` of a batch, the seed
     /// the batch keeps does it, once the first request derived it. What
@@ -801,8 +834,12 @@ impl AgentSession {
         member: Option<&Member>,
     ) -> Result<UnwrapReply> {
         let purpose = match member {
-            Some(member) => format!("the batch {} for {:?}", member.id, member.command),
-            None => format!("{by:?}"),
+            Some(member) => format!(
+                "start the batch {} for \"{}\"",
+                member.id,
+                display::shown(&member.command, MAX_COMMAND_CHARS)
+            ),
+            None => decryption_purpose(&by),
         };
         // Only the device work is cut short when the client leaves.
         let derived = Hangup::unless_closed(
@@ -1198,15 +1235,26 @@ impl Session for AgentSession {
                 }
             };
         }
+        let age_forwarding = self.shared.age_forwarding.load(Ordering::SeqCst);
         if extension.name == QUERY_EXTENSION {
             return Extension::new_message(QueryResponse {
                 extensions: SUPPORTED_EXTENSIONS
                     .iter()
-                    .map(|&name| name.to_owned())
+                    .copied()
+                    .chain(age_forwarding.then_some(UNWRAP_EXTENSION))
+                    .map(str::to_owned)
                     .collect(),
             })
             .map(Some)
             .map_err(|error| refuse("answering a query", &anyhow!("{error}")));
+        }
+        // The one age request this socket takes, and only if told to.
+        if extension.name == UNWRAP_EXTENSION && age_forwarding {
+            return self
+                .forwarded_unwrap(extension.details.as_ref())
+                .await
+                .map(Some)
+                .map_err(|reason| refuse("a forwarded age request", &reason));
         }
         if extension.name == FORGET_PINS_EXTENSION {
             // Through a forwarded agent, another machine could evict the

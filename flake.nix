@@ -153,6 +153,11 @@
                 package = config.packages.default;
                 testkey = config.packages.testkey;
               };
+              vm-age-forwarding = import ./nix/tests/age-forwarding.nix {
+                inherit pkgs;
+                package = config.packages.default;
+                testkey = config.packages.testkey;
+              };
               vm-agent = import ./nix/tests/agent.nix {
                 inherit pkgs;
                 package = config.packages.default;

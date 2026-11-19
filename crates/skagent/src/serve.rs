@@ -214,6 +214,38 @@ fn remembered() -> (IdentityStore, AgeIdentities) {
     (identities, age)
 }
 
+/// Says in the log how the agent asks and what it keeps for how long.
+fn announce(popup: Option<&Popup>, prompt: &PinPrompt, policy: CachePolicy, batches: Duration) {
+    match (popup, prompt) {
+        (Some(popup), _) => {
+            tracing::info!(popup = %popup.program().display(), "showing prompts in the popup");
+        }
+        (None, PinPrompt::Pinentry(pinentry)) => {
+            tracing::info!(pinentry = %pinentry.program().display(), "asking for PINs with pinentry");
+        }
+        (None, PinPrompt::Askpass(askpass)) => {
+            tracing::info!(askpass = %askpass.program().display(), "asking for PINs with askpass");
+        }
+    }
+    if policy.caches() {
+        tracing::info!(
+            lifetime_seconds = policy.lifetime.as_secs(),
+            idle_seconds = policy.idle().map(|idle| idle.as_secs()),
+            "caching PINs"
+        );
+    } else {
+        tracing::info!("PIN caching disabled, asking for every signature");
+    }
+    if batches.is_zero() {
+        tracing::info!("batches of decryptions are turned off");
+    } else {
+        tracing::info!(
+            seconds = batches.as_secs(),
+            "batches of decryptions (skagent batch) last this long at most"
+        );
+    }
+}
+
 /// Runs `skagent serve` until SIGINT or SIGTERM, on `activated` if systemd
 /// passed sockets, else on ones it binds.
 ///
@@ -242,26 +274,7 @@ pub async fn run(args: ServeArgs, activated: Activated) -> Result<()> {
         .popup
         .as_ref()
         .map(|program| Arc::new(Popup::new(program.clone(), config.style().clone())));
-    match (&popup, &prompt) {
-        (Some(popup), _) => {
-            tracing::info!(popup = %popup.program().display(), "showing prompts in the popup");
-        }
-        (None, PinPrompt::Pinentry(pinentry)) => {
-            tracing::info!(pinentry = %pinentry.program().display(), "asking for PINs with pinentry");
-        }
-        (None, PinPrompt::Askpass(askpass)) => {
-            tracing::info!(askpass = %askpass.program().display(), "asking for PINs with askpass");
-        }
-    }
-    if policy.caches() {
-        tracing::info!(
-            lifetime_seconds = policy.lifetime.as_secs(),
-            idle_seconds = policy.idle().map(|idle| idle.as_secs()),
-            "caching PINs"
-        );
-    } else {
-        tracing::info!("PIN caching disabled, asking for every signature");
-    }
+    announce(popup.as_deref(), &prompt, policy, args.batch_lifetime);
     let (listening, age_listening) = sockets(activated, args.socket, args.age_socket)?;
     for rule in &args.pin_policies {
         tracing::info!(?rule, "caching the PINs of matching keys differently");
@@ -272,14 +285,6 @@ pub async fn run(args: ServeArgs, activated: Activated) -> Result<()> {
         .with_plug_in_timeout(args.plug_in_timeout)
         .with_batch_lifetime(args.batch_lifetime)
         .with_pairing(!args.no_pairing);
-    if args.batch_lifetime.is_zero() {
-        tracing::info!("batches of decryptions are turned off");
-    } else {
-        tracing::info!(
-            seconds = args.batch_lifetime.as_secs(),
-            "batches of decryptions (skagent batch) last this long at most"
-        );
-    }
     match default_bindings_path(
         std::env::var_os("XDG_STATE_HOME").as_deref(),
         std::env::var_os("HOME").as_deref(),
@@ -323,6 +328,12 @@ pub async fn run(args: ServeArgs, activated: Activated) -> Result<()> {
         }
     };
     let agent = SkAgent::with_stores(signer, identities, age, own);
+    if args.age_forwarding {
+        agent.allow_age_forwarding(true);
+        tracing::info!(
+            "decrypting age files for forwarded agents too (--age-forwarding), a touch per file"
+        );
+    }
     // Installed before the socket exists, so a signal can't kill the process
     // between binding and serving and leave a stale socket behind.
     let signals = ShutdownSignals::install()?;

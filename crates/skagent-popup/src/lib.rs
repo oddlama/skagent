@@ -307,10 +307,17 @@ pub enum Requester {
         /// names it. A hint, nothing the agent can verify.
         name: Option<String>,
     },
-    /// Another machine, through a forwarded agent.
+    /// Another machine, through a forwarded agent. A popup has to say so
+    /// with the PIN and with the touch: which file that machine wants
+    /// opened, nobody here can see.
     Forwarded {
-        /// The host the agent was forwarded to.
+        /// The host the request comes from: the last one the agent was
+        /// forwarded to.
         host: Host,
+        /// The first host the agent was forwarded to, if `host` is a
+        /// further one. Only that first host is one this machine's ssh
+        /// connected to; `host` is its word.
+        via: Option<Host>,
     },
 }
 

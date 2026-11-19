@@ -30,19 +30,30 @@ use crate::routing::RoutedDevice;
 /// How an age identity is called where it has no name of its own.
 const IDENTITY_NAME: &str = "age identity";
 
-/// Who asks for a decryption, in a sentence: "decrypt a file for agenix".
-fn purpose(by: &Requester) -> String {
+/// Who asks for a decryption, in a sentence: "decrypt a file for agenix",
+/// "decrypt a file for the host with key … (through your forwarded
+/// agent)".
+#[must_use]
+pub fn purpose(by: &Requester) -> String {
+    let host = |host: &Host| match host {
+        Host::Named { name } => name.clone(),
+        Host::HostKey { fingerprint } => format!("the host with key {fingerprint}"),
+        Host::Unverified => "an unverified host".to_owned(),
+    };
     match by {
         Requester::Program { name: Some(name) } => format!("decrypt a file for {name}"),
         Requester::Program { name: None } => "decrypt a file".to_owned(),
-        Requester::Forwarded { host } => {
-            let host = match host {
-                Host::Named { name } => name.clone(),
-                Host::HostKey { fingerprint } => format!("the host with key {fingerprint}"),
-                Host::Unverified => "an unverified host".to_owned(),
-            };
-            format!("decrypt a file for {host} (through your forwarded agent)")
-        }
+        Requester::Forwarded { host: from, via } => match via {
+            Some(via) => format!(
+                "decrypt a file for {} (through your agent forwarded to {})",
+                host(from),
+                host(via)
+            ),
+            None => format!(
+                "decrypt a file for {} (through your forwarded agent)",
+                host(from)
+            ),
+        },
     }
 }
 

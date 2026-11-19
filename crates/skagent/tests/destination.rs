@@ -643,3 +643,35 @@ fn host_keys_of_unknown_types_are_skipped_malformed_ones_refused() -> Result<()>
     );
     Ok(())
 }
+
+#[test]
+fn a_request_comes_from_the_last_host_the_agent_was_forwarded_to() -> Result<()> {
+    let jump = Host::new("jump", 1);
+    let target = Host::new("target", 2);
+    let host = |host: &Host| Destination::HostKey(host.fingerprint());
+
+    // Not bound: a program on this machine, or a forwarder that says nothing.
+    let mut bindings = SessionBindings::default();
+    ensure!(bindings.forwarded_to() == (Destination::Unverified, None));
+    // A binding that failed vouches for nothing.
+    ensure!(bindings.bind(b"garbage").is_err());
+    ensure!(bindings.is_remote() && bindings.forwarded_to() == (Destination::Unverified, None));
+
+    let mut bindings = SessionBindings::default();
+    bindings.bind(&jump.bind(b"session-1", true)?)?;
+    ensure!(bindings.forwarded_to() == (host(&jump), None));
+    // A further hop is named with the first one: only that one is what this
+    // machine's ssh connected to.
+    bindings.bind(&target.bind(b"session-2", true)?)?;
+    ensure!(bindings.forwarded_to() == (host(&target), Some(host(&jump))));
+
+    // Bound to authenticate: ssh's own connection, no remote program's.
+    let mut bindings = SessionBindings::default();
+    bindings.bind(&jump.bind(b"session-1", false)?)?;
+    ensure!(bindings.forwarded_to() == (Destination::Unverified, None));
+    let mut bindings = SessionBindings::default();
+    bindings.bind(&jump.bind(b"session-1", true)?)?;
+    bindings.bind(&target.bind(b"session-2", false)?)?;
+    ensure!(bindings.forwarded_to() == (Destination::Unverified, None));
+    Ok(())
+}

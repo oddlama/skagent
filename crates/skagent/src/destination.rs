@@ -144,6 +144,24 @@ impl SessionBindings {
         self.attempted
     }
 
+    /// Where a request on this connection comes from, as far as ssh vouches
+    /// for it: the host the agent was forwarded to last, and the first one
+    /// if that is another. This machine's ssh connected to the first; every
+    /// further hop is the word of the one before it. Unverified on a
+    /// connection that isn't bound, whose binding failed, or that is bound
+    /// to authenticate: that one is ssh's own, not a remote program's.
+    #[must_use]
+    pub fn forwarded_to(&self) -> (Destination, Option<Destination>) {
+        let hop = |binding: &Binding| Destination::HostKey(fingerprint(&binding.host_key));
+        match (self.bindings.first(), self.bindings.last()) {
+            (Some(first), Some(last)) if last.forwarding => {
+                let via = (self.bindings.len() > 1).then(|| hop(first));
+                (hop(last), via)
+            }
+            _ => (Destination::Unverified, None),
+        }
+    }
+
     /// Number of recorded hops.
     #[must_use]
     pub fn len(&self) -> usize {

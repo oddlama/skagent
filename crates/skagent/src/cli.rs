@@ -230,6 +230,13 @@ pub struct ServeArgs {
     #[arg(long, value_parser = parse_duration, default_value = "10m")]
     pub batch_lifetime: Duration,
 
+    /// Decrypt age files for other machines too: for whatever asks through
+    /// the ssh-agent socket, i.e. through a forwarded agent (`ssh -A`).
+    /// Each file takes a touch here, the prompt names the host by its host
+    /// key, and nothing says which file it is.
+    #[arg(long)]
+    pub age_forwarding: bool,
+
     /// Don't pair with security keys on first use. Pairing takes one more
     /// touch, once per security key, and lets skagent tell the key from a
     /// device claiming to be it before a PIN goes there. Pairings made
