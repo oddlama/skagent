@@ -174,7 +174,10 @@ let
   ++ [
     "--plug-in-timeout"
     cfg.plugInTimeout
+    "--batch-lifetime"
+    cfg.age.batchLifetime
   ]
+  ++ lib.optional cfg.age.forwarding "--age-forwarding"
   ++ cfg.extraArgs;
 in
 {
@@ -443,6 +446,29 @@ in
       '';
     };
 
+    age.batchLifetime = mkOption {
+      type = duration;
+      default = "10m";
+      example = "2m";
+      description = ''
+        The longest a batch of decryptions lasts (`skagent batch -- command`).
+        After one PIN and one touch, the key of an age identity stays in the
+        agent's memory for the command's further files, until the command is
+        done or this time is up. `0` turns batches off.
+      '';
+    };
+
+    age.forwarding = mkOption {
+      type = types.bool;
+      default = false;
+      description = ''
+        Decrypt age files for other machines too, through a forwarded agent
+        (`ssh -A`). Each file takes a touch on this machine, and the prompt
+        names the host by its host key. What it can't say is which file the
+        host wants opened.
+      '';
+    };
+
     setSshAuthSock = mkOption {
       type = types.bool;
       default = true;
@@ -471,6 +497,10 @@ in
       {
         assertion = !(cfg.popup.enable && cfg.askpass != null);
         message = "services.skagent: popup.enable and askpass exclude each other.";
+      }
+      {
+        assertion = cfg.age.enable || !cfg.age.forwarding;
+        message = "services.skagent: age.forwarding needs age.enable.";
       }
     ]
     ++ lib.concatMap (policy: [

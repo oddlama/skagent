@@ -137,6 +137,22 @@ let
         units = (home { age.enable = false; }).systemd.user;
       in
       !(units.sockets ? skagent-age) && units.services.skagent.Unit.Requires == [ "skagent.socket" ];
+    "batches last ten minutes unless told otherwise, and nothing is decrypted for forwarded agents" =
+      lib.hasInfix ''"--batch-lifetime" "10m"'' (execStart { })
+      && !lib.hasInfix "--age-forwarding" (execStart { });
+    "the batch lifetime and age forwarding reach the agent" =
+      let
+        command = execStart {
+          age.batchLifetime = "0";
+          age.forwarding = true;
+        };
+      in
+      lib.hasInfix ''"--batch-lifetime" "0"'' command && lib.hasInfix ''"--age-forwarding"'' command;
+    "age forwarding is refused without the age socket" =
+      !evaluates {
+        age.enable = false;
+        age.forwarding = true;
+      };
     # Each works alone (above), so it's the combination that is refused.
     "the popup and askpass are refused together" =
       !evaluates {
