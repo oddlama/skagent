@@ -688,3 +688,15 @@ fn pairing_asks_for_one_more_touch() {
         "to pair your security key with skagent"
     );
 }
+
+/// The agent kills a popup that outstays `LONGEST_LINGER` by much.
+#[test]
+fn no_final_screen_stays_longer_than_the_agent_waits() -> Result<()> {
+    for name in NAMES {
+        if let Some(lingers) = screen(name)?.lingers {
+            ensure!(lingers <= skagent_popup::LONGEST_LINGER, "{name}");
+        }
+    }
+    ensure!(screen("failed")?.lingers == Some(skagent_popup::LONGEST_LINGER));
+    Ok(())
+}

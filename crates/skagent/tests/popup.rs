@@ -290,3 +290,13 @@ async fn a_busy_popup_makes_others_give_up_in_time() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn a_closed_popup_gets_longer_to_leave_than_it_may_keep_a_final_state_up() {
+    // A failure stays for `LONGEST_LINGER`. A popup killed at that very
+    // moment would be cut off mid-sentence, and logged as stuck.
+    assert!(
+        skagent::popup::CLOSE_TIMEOUT
+            >= skagent_popup::LONGEST_LINGER.saturating_add(Duration::from_secs(2))
+    );
+}

@@ -24,7 +24,8 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use skagent_popup::style::Style;
 use skagent_popup::{
-    Intent, MAX_INTENT_LINE, Message, Queued, State, VERSION, encode_message, parse_intent,
+    Intent, LONGEST_LINGER, MAX_INTENT_LINE, Message, Queued, State, VERSION, encode_message,
+    parse_intent,
 };
 use skagent_secret::SecretBuffer;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -39,9 +40,9 @@ use crate::prompt::{PROMPT_TIMEOUT, checked_pin, prompt_command};
 /// popup initializes its renderer first.
 pub const START_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long a closed popup may take to exit before it is killed. Covers
-/// showing a final state for a moment.
-const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a closed popup may take to exit before it is killed: as long
+/// as it may keep a final state up, and some more to get out.
+pub const CLOSE_TIMEOUT: Duration = LONGEST_LINGER.saturating_add(Duration::from_secs(3));
 
 /// Intents buffered between the reader and the session.
 const INTENT_QUEUE: usize = 16;

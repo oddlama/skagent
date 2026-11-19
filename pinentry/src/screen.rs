@@ -13,7 +13,8 @@ const SELECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Final screens stay this long before the next request or the end.
 const SIGNED_FOR: Duration = Duration::from_millis(900);
-const FAILED_FOR: Duration = Duration::from_secs(5);
+/// As long as the agent gives a popup at all once it closed its input.
+const FAILED_FOR: Duration = skagent_popup::LONGEST_LINGER;
 
 /// Loaded keys shown as tiles; more become `+N`.
 const MAX_TILES: usize = 5;

@@ -31,6 +31,7 @@ pkgs.testers.runNixOSTest {
     environment.systemPackages = [
       package
       testkey
+      common.makeSkStub
       common.testAskpass
       pkgs.grim
       pkgs.imagemagick
@@ -95,7 +96,8 @@ pkgs.testers.runNixOSTest {
         wait_for(lambda: states(since).count(name) >= count)
 
     def popup_running() -> bool:
-        return machine.execute("pgrep -u alice -x skagent-pinentry")[0] == 0
+        # By the name the process list has: its first 15 bytes.
+        return machine.execute("pgrep -u alice -x skagent-pinentr")[0] == 0
 
     def closed() -> None:
         retry(lambda _last_try: not popup_running(), timeout_seconds=15)
@@ -107,11 +109,11 @@ pkgs.testers.runNixOSTest {
         device = machine.succeed("fido2-token -L | grep -F 'pinentry key' | cut -d: -f1").strip()
         return machine.succeed(f"fido2-token -I {device}")
 
-    def start_sign(unit: str) -> None:
+    def start_sign(unit: str, key: str = "id_sk.pub") -> None:
         alice_ok(f"echo {unit} > ~/{unit}")
         machine.succeed(
             f"systemd-run --unit {unit} --uid alice --setenv SSH_AUTH_SOCK=${socket}"
-            f" ${pkgs.openssh}/bin/ssh-keygen -Y sign -f /home/alice/id_sk.pub -n git /home/alice/{unit}"
+            f" ${pkgs.openssh}/bin/ssh-keygen -Y sign -f /home/alice/{key} -n git /home/alice/{unit}"
         )
 
     def finished(unit: str, success: bool = True) -> None:
@@ -242,6 +244,29 @@ pkgs.testers.runNixOSTest {
         assert not logged(mark, "sent the PIN"), popup_lines()
         assert "cancelled in the popup" in journal("skagent")
         assert "pin retries: 8" in tries()
+
+    with subtest("a failure stays to be read, and the popup leaves by itself"):
+        # A key the security key doesn't hold: the PIN is right, and the key
+        # says that it has no such credential.
+        alice_ok("make-sk-stub ~/missing 9 'not on the key'")
+        alice_ok("SSH_AUTH_SOCK=${socket} ssh-add ~/missing")
+        alice_ok("SSH_AUTH_SOCK=${socket} ssh-add -L | grep -F 'not on the key' > ~/missing.pub")
+        mark = len(popup_lines())
+        start_sign("missing", "missing.pub")
+        wait_for_state(mark, "pin")
+        settle()
+        type_keys("${pin} -k Return")
+        wait_for_state(mark, "failed")
+        # The agent closed its input when it showed the failure, which stays
+        # for five seconds. The popup goes then; the agent doesn't kill it.
+        assert popup_running(), "the failure was gone before it could be read"
+        settle()
+        assert screenshot("failed") > 0.8, "the popup isn't showing"
+        finished("missing", success=False)
+        closed()
+        assert (states(mark)[0], states(mark)[-1]) == ("pin", "failed"), states(mark)
+        assert "the popup didn't exit after its last request" not in journal("skagent")
+        alice_ok("SSH_AUTH_SOCK=${socket} ssh-add -d ~/missing.pub")
 
     with subtest("the popup takes colours, size and fonts from [popup]"):
         machine.succeed("systemctl stop skagent")

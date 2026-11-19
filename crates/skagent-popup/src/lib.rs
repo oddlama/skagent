@@ -34,6 +34,11 @@ pub mod style;
 /// message bump it; new optional fields don't.
 pub const VERSION: u32 = 1;
 
+/// The longest a popup keeps a final state up after the agent closed its
+/// input: a failure stays that long, to be read. The agent waits this long
+/// and a little more before it takes a popup for stuck.
+pub const LONGEST_LINGER: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Longest line the popup may send, without the newline.
 pub const MAX_INTENT_LINE: usize = 1000;
 
