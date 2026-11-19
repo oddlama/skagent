@@ -288,33 +288,47 @@ Extension messages of the ssh-agent protocol, so forwarding carries them:
    agent's executable.
 2. The tool marks itself as child subreaper, so orphaned descendants are
    re-parented to it and not to the service manager. It runs the command as a
-   child, with the terminal, and waits.
+   child, with the terminal, waits, and exits like the command. It sets no
+   limits and isn't hardened, because the command would inherit that; it
+   holds nothing secret.
 3. The first decryption a member asks for is an ordinary one: PIN, touch. The
-   prompt says that it starts a batch, for which command and for how long.
-   The seed stays, in `memfd_secret` memory where the kernel has it, else in
-   locked memory.
+   prompt says that it starts a batch, for which command and for how long
+   (what is left of the batch's time). The seed stays, in `memfd_secret`
+   memory where the kernel has it, else in locked memory.
 4. Further requests of members need no PIN and no touch: expand the seed,
-   decapsulate, wipe the expanded keys. The popup counts.
-5. The batch ends, the seed is wiped and its tickets are revoked when
+   decapsulate, wipe the expanded keys. Members that ask while another one
+   is at the security key wait for it, and find its seed. A notification
+   counts (see prompts).
+5. The batch ends, and its seed is wiped, when
    - the tool exits (its connection closes),
-   - the time is up (`--batch-lifetime`, default 10 minutes; a batch can ask
-     for less),
+   - the time is up (`--batch-lifetime`, default 10 minutes, `0` for no
+     batches; a batch can ask for less with `--for`),
    - the security key is unplugged (checked before every file, and by the
      sweep),
    - anything evicts PINs: lock, sleep, logind outage, `skagent forget`,
      `ssh-add -D`, `ssh-add -x`,
-   - the user presses Stop in the popup.
+   - the user presses Stop in the batch's notification.
+
+   It ends for good: the command's further files take a touch each, and the
+   PIN where it was evicted. A new `skagent batch` starts a new one.
+6. Nothing is kept while PINs can't be cached (no logind to watch lock and
+   sleep): a batch's requests are ordinary ones then, and say so.
 
 **Who is a member:** a request on the local socket whose peer runs skagent's
-plugin and descends from the batch's tool. The agent walks from the peer's
-pid up its parents, pinned with pidfds and with start times (a parent is older
-than its child), so a reused pid can't stand in. Whatever it can't prove is
-not a member and gets an ordinary request with a touch. A process can't choose
-its parent, so another program of the user can't join from outside.
+plugin and descends from the batch's tool, the innermost one if batches are
+nested. The agent walks from the peer's pid up its parents and pins every
+process on the way with a pidfd: it reads the parent's pid, takes a pidfd of
+it, and reads the parent's pid again; at the end the peer, every parent and
+the tool have to exist still. Then no pid changed hands while it looked
+(`ancestry.rs`). Whatever it can't prove is not a member and gets an ordinary
+request with a touch. A process can't choose its parent, so another program
+of the user can't join from outside.
 
 **What it doesn't stop:** malware running as the user can't join, but it can
 get inside: change a script the batch runs, or (with yama's `ptrace_scope` at
-0) attach to a member. That is the limit the threat model already has.
+0) attach to a member. It can also start a batch of its own: the prompt then
+names its command, and the user's touch is what decides. That is the limit
+the threat model already has.
 
 ## prompts
 
@@ -322,22 +336,37 @@ get inside: change a script the batch runs, or (with yama's `ptrace_scope` at
   file", the identity, and who asks: for a local request the program that
   started age (from the peer's parents, shown through `display::shown`), for a
   forwarded one the host.
-- **Popup:** the request kinds `decrypt` (with who asks) and `create`, shown
-  in the states of a signature: "Decrypt a file · agenix", "Decrypted",
-  "Create an age identity", "Created". Done as far as words go; the failure
-  screens still say "sign". A state for a running batch with its count and
-  Stop comes with step 4, and all of it needs a look from the popup's design.
+- **Popup:** the request kinds `decrypt` (with who asks), `batch` (with the
+  command and the time) and `create`, shown in the states of a signature:
+  "Decrypt a file · agenix", "Decrypted", "Decrypt files for 10 min · agenix
+  rekey", "Batch started", "Create an age identity", "Created". A batch is
+  named with the PIN and with every touch, also where the touch screen would
+  show the YubiKey's name: after a cached PIN the touch is all the user
+  agrees with. Done as far as words go; the failure screens still say
+  "sign", and all of it needs a look from the popup's design.
+- **A running batch** is shown by a desktop notification, not by the popup:
+  the popup is an overlay that takes the keyboard, and a batch runs for
+  minutes. The notification appears once the batch keeps a seed, names the
+  command, counts the files in place and says how long the batch lasts at
+  most. Its button stops the batch. If the batch ends before its command is
+  done, the notification says why; else it goes with the batch. With any
+  prompt, also with `--no-touch-notification`. Without a notification
+  service, `skagent forget` stops a batch.
 - **Labels:** an identity is shown as "age identity" and its recipient cut
   short. Names of the user's own, like SSH keys have, are open.
-- **Stock pinentry and askpass** work with the texts alone. A batch is stopped
-  with `skagent forget` there.
+- **Stock pinentry and askpass** work with the texts alone: "decrypt the
+  files "agenix rekey" asks for, without another touch, for up to 10 minutes
+  (a batch)".
 
 ## secret memory
 
-- `out`, the seed and a batch's seed are `SecretBuffer`s. The backend becomes
-  a choice per buffer, so a batch's seed can use `memfd_secret` while PINs
-  stay in locked memory. It is dropped before sleep, so hibernation isn't
-  blocked.
+- `out`, the seed and a batch's seed are `SecretBuffer`s. The backend is a
+  choice per buffer (`from_slice_in`, `strongest_backend`), so a batch's seed
+  uses `memfd_secret` where the kernel has it while PINs stay in locked
+  memory. It is dropped before sleep, so hibernation isn't blocked.
+- A batch's seed is read where it lies, under the lock that also guards the
+  PIN cache: an eviction comes either before a file key or after it, never
+  in between, and no copy of the seed leaves the batch.
 - Not covered, and short-lived: libfido2's copy of `out` (wiped when the
   assertion is freed), what `libcrux-ml-kem` and the X25519 code keep on the
   stack and heap while they run, and the file key in the reply buffers of
@@ -386,12 +415,21 @@ break it, watch the test fail, restore.
    The Rust tests cover the messages, the plugin protocol against scripted
    clients and agents, which identity a request gets, and who is answered
    what on the socket.
-4. **Batches.** The backend per buffer, the peer's pidfd and ancestry,
-   `skagent batch`, every way a batch ends, the popup's count and Stop. In the
-   VM: many files and one touch; a program outside the batch gets a touch; an
-   orphaned grandchild stays a member; `ssh -A` inside a batch isn't served
-   from it; after the command, the time limit, a lock and an unplug the next
-   file needs a touch.
+4. ~~**Batches.**~~ Done. The backend per buffer
+   (`SecretBuffer::from_slice_in`), the proof of ancestry (`ancestry.rs`),
+   batches as a state machine over explicit time and processes (`batch.rs`),
+   kept by the signer next to the PINs so every eviction ends them under the
+   same lock, `skagent batch` (`batch_tool.rs`), the notification with its
+   count and Stop. `vm-batch` covers: five files for one PIN and one touch,
+   and the prompt; the seed's `memfd_secret` mapping coming and going; a
+   program outside the batch gets a touch; an orphaned process stays a
+   member; three decryptions at once take one touch; after the command, the
+   time limit, a lock, `skagent forget`, Stop and an unplug (noticed by the
+   sweep, and by a request) the command's further files take a touch each;
+   without logind nothing is kept; the popup's states. The Rust tests cover
+   the proof against a process table in which pids change hands at every
+   step, the state machine, and who gets a batch on the socket. `ssh -A`
+   inside a batch comes with step 5, where forwarded requests exist.
 5. **Forwarding.** `--age-forwarding`. With the three machines of
    `vm-destinations`: refused by default; with it, the prompt names the host,
    every file takes a touch, a batch doesn't help; a client without a session
@@ -418,10 +456,8 @@ break it, watch the test fail, restore.
 
 ## open questions
 
-1. **Ancestry without races.** `PIDFD_GET_INFO` (Linux 6.13) or
-   `/proc/<pid>/stat` with start times. rustix 1.1 has no `SO_PEERPIDFD`, so
-   the socket option needs a wrapper where `unsafe` is allowed
-   (`skagent-fds`).
-2. **`libcrux-ml-kem`.** Key generation straight from the 64-byte seed,
+1. **`libcrux-ml-kem`.** Key generation straight from the 64-byte seed,
    wiping of its key types, and its MSRV against the workspace's.
-3. **Popup.** The design of the decrypt and batch screens.
+2. **Popup.** The design of the decrypt and batch screens, and whether a
+   running batch should have a place of its own on screen instead of a
+   notification.

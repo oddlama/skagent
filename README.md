@@ -13,7 +13,7 @@ needs your PIN and a touch. skagent caches the PIN securely and can handle multi
 - 🤝 **Pairs with your security keys**, so a fake key that pretends to be yours never gets your PIN
 - 📥 **Loads resident keys** straight from the security key, no stub files needed
 - 🌍 **Agent forwarding and `ssh-add -h`** destination constraints, checked like OpenSSH does
-- 🗄️ **Decrypts age files** with a post-quantum key derived from your security key, one touch per file
+- 🗄️ **Decrypts age files** with a post-quantum key derived from your security key, one touch per file or one for a whole command
 - 💬 **Prompts that tell you what you sign**, plus a notification while the key waits for a touch
 
 <p align="center">
@@ -401,8 +401,34 @@ On another machine, `skagent load` finds the identity on the key.
   that one file and wipes it. [`docs/age.md`](docs/age.md) has the details and
   what this can't protect.
 
-Decrypting many files with one touch (`skagent batch`) and decrypting through
-a forwarded agent aren't built yet.
+#### Many files with one touch
+
+A touch per file gets old when a tool decrypts hundreds of them. Run it in a
+batch:
+
+```console
+$ skagent batch -- agenix rekey
+```
+
+The first file takes your PIN and a touch, and the prompt tells you that it
+starts a batch and for which command. After that, the files this command
+decrypts need neither. A notification counts them and has a Stop button.
+
+For this, skagent keeps the age key in its memory while the batch runs. That's
+more than it does anywhere else, so a batch is bounded:
+
+- **Only the command you ran** uses it: its processes and what they start.
+  Other programs still get a touch prompt for every file.
+- **It ends with the command,** or after 10 minutes if that comes first.
+  `skagent batch --for 2m` asks for less, `skagent serve --batch-lifetime`
+  changes the limit, and `--batch-lifetime 0` turns batches off.
+- **It ends early** when you lock the screen, the machine goes to sleep, you
+  unplug the security key, press Stop or run `skagent forget`. Whatever the
+  command decrypts after that takes a touch per file again.
+
+Batches need Linux 6.5 or newer.
+
+Decrypting through a forwarded agent isn't built yet.
 
 ### Prompts and notifications
 
@@ -434,7 +460,8 @@ Protected:
 Not protected:
 
 - **Malware running as you** in an unlocked session can get signatures whenever you touch the key, like with any agent. It could also log your PIN while you type it.
-- **root** can do anything anyway. That includes reading an age key from skagent's memory during the moment it decrypts a file, which opens every file for that key, old and new.
+- **root** can do anything anyway. That includes reading an age key from skagent's memory during the moment it decrypts a file, or while a batch runs, which opens every file for that key, old and new.
+- **A program you run in a batch** decrypts what it likes while the batch lasts, and so does anything that can change what the batch runs.
 - **A malicious USB device** you use before skagent paired with your real key, or one that sits between your key and the computer and passes its messages on, receives the PIN, same as with OpenSSH.
 
 Have a look at [`docs/design.md`](docs/design.md) for the details, and at
