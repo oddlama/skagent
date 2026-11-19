@@ -12,7 +12,8 @@ use skagent_age::wire::{
 use skagent_age::{Identity, Recipient};
 use ssh_agent_lib::agent::Session as _;
 use ssh_agent_lib::client::Client;
-use ssh_agent_lib::proto::{Extension, Unparsed};
+use ssh_agent_lib::error::AgentError;
+use ssh_agent_lib::proto::{Extension, ProtoError, Unparsed};
 use tokio::net::UnixStream;
 
 use crate::agent::{FORGET_PINS_EXTENSION, LOAD_KEYS_EXTENSION};
@@ -143,19 +144,24 @@ async fn age_request_on(
     name: &str,
     details: Vec<u8>,
 ) -> Result<Vec<u8>> {
-    let reply = connection
+    let answered = connection
         .extension(Extension {
             name: name.to_owned(),
             details: Unparsed::from(details),
         })
-        .await
-        .with_context(|| {
-            format!(
-                "the agent at {} refused; its log says why",
-                socket.display()
-            )
-        })?
-        .context("the agent answered without data")?;
+        .await;
+    let reply = match answered {
+        Ok(reply) => reply,
+        // A refusal says no more than that it is one.
+        Err(AgentError::Proto(ProtoError::UnexpectedResponse)) => bail!(
+            "the agent at {} refused; its log says why",
+            socket.display()
+        ),
+        Err(error) => {
+            return Err(error).with_context(|| format!("asking the agent at {}", socket.display()));
+        }
+    }
+    .context("the agent answered without data")?;
     ensure!(reply.name == name, "the agent answered another request");
     Ok(reply.details.into_bytes())
 }

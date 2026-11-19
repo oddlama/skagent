@@ -208,6 +208,8 @@ pkgs.testers.runNixOSTest {
         status, out = alice("skagent age new")
         assert status != 0, out
         assert "holds an age identity already" in journal("skagent")
+        # The command says where to look, and nothing about the protocol.
+        assert out.strip().endswith("agent-age.sock refused; its log says why"), out
         # Like a load, creating asks for the PIN afresh; looking takes no touch.
         expect(before, 1, 0, "refusing a second identity")
 
