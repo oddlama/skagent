@@ -12,6 +12,12 @@
 //! - **A batch** ([`Notifier::standing`]): a [`Standing`] notification
 //!   stays, is replaced in place as files are decrypted, and has a button
 //!   to stop the batch.
+//!
+//! A service closes a notification whose button was pressed (unless it is
+//! `resident`): `ActionInvoked`, and `NotificationClosed` right after it.
+//! The two are read from one stream, in the order the service sent them. Read
+//! from a stream each, whichever was looked at first won, and a pressed
+//! button was taken for a notification the user had closed.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -115,43 +121,31 @@ impl Notifier {
     /// bus or a notification service; why is logged at debug level.
     pub async fn standing(self: &Arc<Self>, actions: &[(&str, &str)]) -> Option<Standing> {
         let proxy = self.proxy().await?;
-        // Before anything is shown, so that no answer is missed.
-        let subscribe = |member: &'static str| {
-            let connection = proxy.connection().clone();
-            async move {
-                let rule = MatchRule::builder()
-                    .msg_type(MessageType::Signal)
-                    .interface(SERVICE)
-                    .member(member)
-                    .path(PATH)
-                    .build();
-                let rule = match rule {
-                    Ok(rule) => rule,
-                    Err(error) => {
-                        tracing::debug!(%error, member, "building a match rule failed");
-                        return None;
-                    }
-                };
-                let subscribed = tokio::time::timeout(
-                    CALL_TIMEOUT,
-                    MessageStream::for_match_rule(rule, &connection, None),
-                )
-                .await;
-                match subscribed {
-                    Ok(Ok(stream)) => Some(stream),
-                    Ok(Err(error)) => {
-                        tracing::debug!(%error, member, "subscribing to notification signals failed");
-                        None
-                    }
-                    Err(_elapsed) => {
-                        tracing::debug!(member, "subscribing to notification signals timed out");
-                        None
-                    }
-                }
+        // Before anything is shown, so that no answer is missed. All of the
+        // service's signals in one stream: see the module's documentation.
+        let rule = MatchRule::builder()
+            .msg_type(MessageType::Signal)
+            .interface(SERVICE)
+            .path(PATH)
+            .build()
+            .map_err(|error| tracing::debug!(%error, "building a match rule failed"))
+            .ok()?;
+        let subscribed = tokio::time::timeout(
+            CALL_TIMEOUT,
+            MessageStream::for_match_rule(rule, proxy.connection(), None),
+        )
+        .await;
+        let signals = match subscribed {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "subscribing to notification signals failed");
+                return None;
+            }
+            Err(_elapsed) => {
+                tracing::debug!("subscribing to notification signals timed out");
+                return None;
             }
         };
-        let invoked = subscribe("ActionInvoked").await?;
-        let closed = subscribe("NotificationClosed").await?;
         Some(Standing {
             notifier: Arc::clone(self),
             proxy,
@@ -160,8 +154,8 @@ impl Notifier {
                 .flat_map(|(key, label)| [(*key).to_owned(), (*label).to_owned()])
                 .collect(),
             id: 0,
-            invoked,
-            closed,
+            pressed: None,
+            signals,
         })
     }
 
@@ -219,10 +213,15 @@ pub struct Standing {
     proxy: Proxy<'static>,
     /// Keys and labels, alternating, as `Notify` takes them.
     actions: Vec<String>,
-    /// What the service calls it; zero until it was shown.
+    /// What the service calls it; zero until it was shown, and again once
+    /// one of its buttons was pressed.
     id: u32,
-    invoked: MessageStream,
-    closed: MessageStream,
+    /// What the service called it when one of its buttons was pressed. The
+    /// press is the end of that notification; what is shown next is a new
+    /// one.
+    pressed: Option<u32>,
+    /// The service's signals, in the order it sent them.
+    signals: MessageStream,
 }
 
 impl Standing {
@@ -231,6 +230,11 @@ impl Standing {
     /// else without buttons, for as long as the service keeps
     /// notifications. Returns whether the service took it.
     pub async fn show(&mut self, summary: &str, body: &str, lasting: bool) -> bool {
+        if let Some(pressed) = self.pressed.take() {
+            // A service that keeps a notification after a button was
+            // pressed would show it next to this one.
+            self.close_id(pressed).await;
+        }
         let hints: HashMap<&str, Variant<'_>> = HashMap::from([
             ("urgency", Variant::from(1_u8)),
             ("transient", Variant::from(true)),
@@ -263,6 +267,9 @@ impl Standing {
         .await;
         match shown {
             Ok(Ok(id)) => {
+                if id != self.id {
+                    tracing::debug!(id, lasting, "showing a notification that stays");
+                }
                 self.id = id;
                 true
             }
@@ -280,51 +287,67 @@ impl Standing {
 
     /// Waits for what the user does with the notification. Doesn't return
     /// if the service says nothing more. Cancel-safe.
+    ///
+    /// A pressed button counts for a notification the service called closed
+    /// just before, too: that is the other order to say the two things in.
+    /// So [`Answer::Gone`] can be followed by an [`Answer::Action`].
     pub async fn answer(&mut self) -> Answer {
         loop {
-            // Both are polled at all times: the connection stops reading
-            // once a subscription's queue is full.
-            tokio::select! {
-                message = self.invoked.next() => {
-                    let Some(Ok(message)) = message else {
-                        return std::future::pending().await;
-                    };
+            let Some(Ok(message)) = self.signals.next().await else {
+                return std::future::pending().await;
+            };
+            let header = message.header();
+            let member = header.member().map(zbus::names::MemberName::as_str);
+            match member {
+                Some("ActionInvoked") => {
                     if let Ok((id, key)) = message.body().deserialize::<(u32, String)>()
                         && id == self.id
                         && id != 0
                     {
+                        tracing::debug!(id, ?key, "a button of the notification was pressed");
+                        self.pressed = Some(id);
+                        self.id = 0;
                         return Answer::Action(key);
                     }
                 }
-                message = self.closed.next() => {
-                    let Some(Ok(message)) = message else {
-                        return std::future::pending().await;
-                    };
+                Some("NotificationClosed") => {
                     if let Ok((id, reason)) = message.body().deserialize::<(u32, u32)>()
                         && id == self.id
                         && id != 0
                         && reason != CLOSED_BY_CALL
                     {
+                        tracing::debug!(id, reason, "the notification was closed");
                         return Answer::Gone;
                     }
                 }
+                _ => {}
             }
         }
     }
 
-    /// Closes the notification, if it was shown.
-    pub async fn close(self) {
-        if self.id == 0 {
-            return;
+    /// Closes the notification, if it is shown.
+    pub async fn close(mut self) {
+        if let Some(pressed) = self.pressed.take() {
+            self.close_id(pressed).await;
         }
+        if self.id != 0 {
+            self.close_id(self.id).await;
+        }
+    }
+
+    /// Asks the service to close what it calls `id`. It may be gone: then
+    /// the service says so, which is as good.
+    async fn close_id(&self, id: u32) {
         let closing = tokio::time::timeout(
             CALL_TIMEOUT,
-            self.proxy
-                .call::<_, _, ()>("CloseNotification", &(self.id,)),
+            self.proxy.call::<_, _, ()>("CloseNotification", &(id,)),
         )
         .await;
         if !matches!(closing, Ok(Ok(()))) {
-            tracing::debug!(id = self.id, "closing a notification failed");
+            tracing::debug!(
+                id,
+                "closing a notification failed, or it was closed already"
+            );
         }
     }
 }

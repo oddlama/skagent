@@ -6,11 +6,14 @@ usage: fake-notifications LOG
 Owns org.freedesktop.Notifications on the session bus and appends one line
 per call to LOG: "notify ID SUMMARY | BODY", "actions ID KEY=LABEL ..." for
 a notification with buttons, and "close ID". A notification that replaces
-another one keeps its ID.
+one that is still there keeps its ID; replacing one that was closed makes a
+new one.
 
 A test presses a button of the notification shown last by writing its key
 to LOG.press, and closes that notification like a user by creating
-LOG.dismiss.
+LOG.dismiss. A pressed button closes its notification, as services do for
+one that isn't resident: ActionInvoked, and NotificationClosed right after
+it. While LOG.closes-first exists, the two come the other way around.
 """
 
 import asyncio
@@ -30,6 +33,8 @@ class Notifications(ServiceInterface):
         self.log = log
         self.last_id = 0
         self.shown = 0
+        # The notifications that are there: shown, and not closed.
+        self.open = set()
 
     def record(self, line):
         with open(self.log, "a") as log:
@@ -48,11 +53,12 @@ class Notifications(ServiceInterface):
         hints: "a{sv}",
         expire_timeout: "i",
     ) -> "u":
-        if replaces_id:
+        if replaces_id in self.open:
             number = replaces_id
         else:
             self.last_id += 1
             number = self.last_id
+        self.open.add(number)
         self.shown = number
         self.record(f"notify {number} {summary} | {body}")
         if actions:
@@ -64,7 +70,9 @@ class Notifications(ServiceInterface):
     @method()
     def CloseNotification(self, notification_id: "u"):
         self.record(f"close {notification_id}")
-        self.NotificationClosed(notification_id, CLOSED_BY_CALL)
+        if notification_id in self.open:
+            self.open.discard(notification_id)
+            self.NotificationClosed(notification_id, CLOSED_BY_CALL)
 
     @method()
     def GetCapabilities(self) -> "as":
@@ -87,18 +95,27 @@ async def user(notifications):
     """Does what the test's files say with the notification shown last."""
     press = notifications.log + ".press"
     dismiss = notifications.log + ".dismiss"
+    closes_first = notifications.log + ".closes-first"
     while True:
         await asyncio.sleep(0.05)
         if os.path.exists(press):
             with open(press) as file:
                 key = file.read().strip()
             os.remove(press)
-            notifications.record(f"pressed {notifications.shown} {key}")
-            notifications.ActionInvoked(notifications.shown, key)
+            number = notifications.shown
+            notifications.record(f"pressed {number} {key}")
+            notifications.open.discard(number)
+            if os.path.exists(closes_first):
+                notifications.NotificationClosed(number, DISMISSED_BY_USER)
+                notifications.ActionInvoked(number, key)
+            else:
+                notifications.ActionInvoked(number, key)
+                notifications.NotificationClosed(number, DISMISSED_BY_USER)
         if os.path.exists(dismiss):
             os.remove(dismiss)
             number = notifications.shown
             notifications.record(f"dismissed {number}")
+            notifications.open.discard(number)
             notifications.NotificationClosed(number, DISMISSED_BY_USER)
 
 

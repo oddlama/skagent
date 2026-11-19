@@ -384,12 +384,31 @@ pkgs.testers.runNixOSTest {
         def press_stop() -> None:
             retry(lambda _last_try: "| 1 file decrypted" in notified()[-2], timeout_seconds=5)
             machine.succeed("echo stop > ${notificationLog}.press")
-        # The PIN stays: stopping a batch evicts nothing else.
-        interrupted(press_stop, "stopped by the user", 0)
-        number = notification_of("./gated")
-        assert f"pressed {number} stop" in notified(), notified()
-        last = [line for line in notified() if line.startswith(f"notify {number} ")][-1]
-        assert "| Ended: stopped by the user. 1 file decrypted;" in last, last
+        def stopped() -> None:
+            """A batch is stopped by its button, and a notification says so."""
+            presses = len([line for line in notified() if line.startswith("pressed ")])
+            # The PIN stays: stopping a batch evicts nothing else.
+            interrupted(press_stop, "stopped by the user", 0)
+            pressed = [line for line in notified() if line.startswith("pressed ")]
+            assert len(pressed) == presses + 1 and pressed[-1].endswith(" stop"), notified()
+            # The press was the end of that notification. What says why the
+            # command asks for touches again is a new one, without a button.
+            number = notification_of("./gated")
+            assert number != pressed[-1].split()[1], notified()
+            said = [line for line in notified() if line.startswith(f"notify {number} ")]
+            assert len(said) == 1 and "| Ended: stopped by the user. 1 file decrypted;" in said[0], said
+            assert not any(line.startswith(f"actions {number} ") for line in notified()), notified()
+
+        # The service closes a notification whose button was pressed, like
+        # the ones on desktops do: pressed, then closed, one right after
+        # the other. Several times: which of the two the agent took first
+        # was a matter of luck once, and a batch went on after its Stop.
+        for _ in range(4):
+            stopped()
+        # Some say it the other way around.
+        machine.succeed("touch ${notificationLog}.closes-first")
+        stopped()
+        machine.succeed("rm ${notificationLog}.closes-first")
 
     with subtest("a notification the user closed isn't shown again, and the batch goes on"):
         closed = journal("skagent").count("closed the batch")

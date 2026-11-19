@@ -68,7 +68,9 @@ Both refuse with `CTAP2_ERR_UP_REQUIRED`, the 5.8 too, although CTAP 2.1 names `
 - **A batch of 40 files** was 0.41 s after its touch: about 10 ms a file, most of it age starting. The seed was in `memfd_secret` memory.
 - **Replugged,** the key was recognized by its serial without a touch of its own, and its PIN was asked for again.
 - **Locking the screen** reached the agent as logind's `LockedHint`, and ended the batch.
-- **The PIN retry counter** stayed at 8, and the slot the test identity took was free again after deleting it.
+- **The PIN retry counter** stayed at 8, and the slot the test identity took was free again after deleting it. A wrong PIN takes one try (7), and the next right one sets the counter back to 8.
+- **Two identities on the key, on an agent that used neither:** found by `skagent load` without their recipients, and told apart by the key's answers: the file's identity was the second one tried, two touches.
+- **Stop in the batch's notification** (noctalia 5.3.0) worked in one run and did nothing in the next. noctalia closes a notification whose button was pressed (`notification_toast.cpp`: `invokeAction(id, key, token, true)`, then `dismissAfterInvoke`), so `ActionInvoked` and `NotificationClosed` (reason 2, dismissed) arrive together. The agent read them from a stream each, and when it looked at the closed one first, it took the press for a notification the user had closed and stopped listening. `checks.vm-batch` showed the same once its notification service closed pressed notifications. They are read from one stream now (`notify.rs`).
 
 Not looked at: the older key, in particular how long it waits for a touch and what it answers then.
 

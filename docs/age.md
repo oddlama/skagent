@@ -389,6 +389,14 @@ the threat model already has.
   done, the notification says why; else it goes with the batch. With any
   prompt, also with `--no-touch-notification`. Without a notification
   service, `skagent forget` stops a batch.
+- **A pressed button is the end of its notification.** A notification
+  service closes a notification whose button was pressed, and says both:
+  `ActionInvoked`, and `NotificationClosed` right after it (some may say it
+  the other way around). The agent reads the service's signals from one
+  stream, in the order they were sent, and takes a press also for a
+  notification the service just called closed: a Stop that is taken for
+  "the user closed it" leaves a batch running that its user stopped. What
+  says "Ended: stopped by the user" afterwards is a new notification.
 - **Labels:** an identity is shown as "age identity" and its recipient cut
   short. Names of the user's own, like SSH keys have, are open.
 - **Stock pinentry and askpass** work with the texts alone: "decrypt the

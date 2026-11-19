@@ -109,10 +109,15 @@ impl Indicator {
     /// Waits for what the user does with the notification. Doesn't return
     /// while there is none.
     async fn answer(&mut self) -> Answer {
-        match &mut self.standing {
-            Some(standing) if !self.gone => standing.answer().await,
-            _ => std::future::pending().await,
-        }
+        // Also after it is gone: some services say that a notification is
+        // closed before they say which of its buttons was pressed.
+        let Some(standing) = &mut self.standing else {
+            return std::future::pending().await;
+        };
+        let answer = standing.answer().await;
+        // Whoever pressed a button gets to see what came of it.
+        self.gone = answer == Answer::Gone;
+        answer
     }
 
     /// The batch is closed: its command is done. A running batch's
@@ -333,8 +338,10 @@ impl Signer {
                     Answer::Action(key) if key == STOP => {
                         self.end_batch(id, Ended::Stopped).await;
                     }
-                    Answer::Action(_) => {}
-                    Answer::Gone => indicator.gone = true,
+                    // Not a button of this notification's. The press was
+                    // the end of it all the same: it is shown again.
+                    Answer::Action(_) => indicator.shows = None,
+                    Answer::Gone => {}
                 },
                 () = tokio::time::sleep_until(refresh_at), if held_back => {}
             }
