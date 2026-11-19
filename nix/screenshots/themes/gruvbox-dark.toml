@@ -1,0 +1,12 @@
+# Gruvbox Dark, with another font.
+[popup]
+appearance = "dark"
+font = "IBM Plex Sans"
+
+[popup.dark]
+surface = "#282828"
+text = "#ebdbb2"
+accent = "#fabd2f"
+success = "#b8bb26"
+warning = "#fe8019"
+error = "#fb4934"

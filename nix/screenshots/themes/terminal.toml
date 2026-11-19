@@ -1,0 +1,21 @@
+# Nobody's palette: a phosphor terminal. Everything in one monospaced font,
+# and single colours set where the mixed ones would be too tame.
+[popup]
+appearance = "dark"
+font = "IBM Plex Mono"
+monospace-font = "IBM Plex Mono"
+
+[popup.dark]
+surface = "#050805"
+text = "#7dff9b"
+accent = "#ffb000"
+success = "#7dff9b"
+warning = "#ffb000"
+error = "#ff5f56"
+muted-text = "#3fae5a"
+placeholder = "#2f7f43"
+border = "#1f5f2f"
+field = "#0b140c"
+avatar = "#0f2413"
+device = "#0f2413"
+ring-track = "#12301a"

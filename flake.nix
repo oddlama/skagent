@@ -136,6 +136,11 @@
                   rustc = toolchain;
                 };
               };
+            # Pictures of the popup's every state, drawn by the popup in a VM.
+            screenshots = import ./nix/screenshots {
+              inherit pkgs lib;
+              inherit (config.packages) pinentry;
+            };
           };
 
           # Every crate contributes its test suite and its clippy run. The VM

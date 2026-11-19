@@ -17,7 +17,10 @@ needs your PIN and a touch. skagent caches the PIN securely and can handle multi
 - 💬 **Prompts that tell you what you sign**, plus a notification while the key waits for a touch
 
 <p align="center">
-  <img alt="skagent's popup: the PIN for github-work, then touching the YubiKey, then Signed" src="https://github.com/user-attachments/assets/REPLACE-skagent-popup-flow-light">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/REPLACE-skagent-popup-flow-dark">
+    <img alt="skagent's popup: the PIN for github-work, then touching the YubiKey, then Signed" width="780" src="https://github.com/user-attachments/assets/REPLACE-skagent-popup-flow-light">
+  </picture>
 </p>
 
 ## 📦 Installation
@@ -198,7 +201,10 @@ from the PIN to the touch to the result, and tells you what went wrong if
 something does. It replaces the touch notification.
 
 <p align="center">
-  <img alt="skagent's popup in dark mode: asking to plug in Desk 5C NFC, saying the PIN was wrong with 6 tries left, and listing 3 keys it loaded" src="https://github.com/user-attachments/assets/REPLACE-skagent-popup-help-dark">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/REPLACE-skagent-popup-help-dark">
+    <img alt="skagent's popup asking to plug in Desk 5C NFC, saying the PIN was wrong with 6 tries left, and listing 3 keys it loaded" width="780" src="https://github.com/user-attachments/assets/REPLACE-skagent-popup-help-light">
+  </picture>
 </p>
 
 ```nix
@@ -214,6 +220,14 @@ and takes the keyboard. Elsewhere it's an ordinary window.
 
 The popup comes in light and dark, following your desktop. Both are presets
 you can adjust: colours, fonts and size.
+
+<p align="center">
+  <img alt="The popup in four styles: Catppuccin Mocha asking for a PIN, Solarized Light waiting for a touch, Gruvbox Dark in IBM Plex Sans listing loaded keys, and green on black in a monospaced font after a wrong PIN" width="880" src="https://github.com/user-attachments/assets/REPLACE-skagent-popup-styles">
+</p>
+
+Catppuccin Mocha and Solarized Light are six colours each, Gruvbox Dark adds a
+font, and the last one is nobody's palette. Their settings are in
+[`nix/screenshots/themes`](nix/screenshots/themes).
 
 ```nix
 services.skagent.popup = {
