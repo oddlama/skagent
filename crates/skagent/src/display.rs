@@ -15,6 +15,24 @@ pub const MAX_NAME_CHARS: usize = 64;
 /// Longest key comment shown.
 pub const MAX_COMMENT_CHARS: usize = 128;
 
+/// Longest command of a batch shown.
+pub const MAX_COMMAND_CHARS: usize = 64;
+
+/// About how long `seconds` are, in words, and never less: "45 seconds",
+/// "10 minutes" for anything from 9 minutes and a second on.
+#[must_use]
+pub fn about(seconds: u64) -> String {
+    let (count, unit) = if seconds < 120 {
+        (seconds, "second")
+    } else if seconds < 7200 {
+        (seconds.div_ceil(60), "minute")
+    } else {
+        (seconds.div_ceil(3600), "hour")
+    };
+    let plural = if count == 1 { "" } else { "s" };
+    format!("{count} {unit}{plural}")
+}
+
 /// `text` safe to show: see the module documentation. At most `max_chars`
 /// characters of `text` are kept, then `…` marks the cut.
 #[must_use]

@@ -87,3 +87,22 @@ fn a_configured_label_replaces_the_comment() -> Result<()> {
     ensure!(!describe(&identity, Some("a\nb")).contains('\n'));
     Ok(())
 }
+
+#[test]
+fn how_long_something_lasts_is_said_in_words_and_never_understated() {
+    for (seconds, words) in [
+        (0, "0 seconds"),
+        (1, "1 second"),
+        (119, "119 seconds"),
+        (120, "2 minutes"),
+        (121, "3 minutes"),
+        (599, "10 minutes"),
+        (600, "10 minutes"),
+        (601, "11 minutes"),
+        (7199, "120 minutes"),
+        (7200, "2 hours"),
+        (7201, "3 hours"),
+    ] {
+        assert_eq!(skagent::display::about(seconds), words);
+    }
+}

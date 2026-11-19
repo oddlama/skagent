@@ -18,8 +18,10 @@ use super::{
     read_retries, select_in_popup, show_best_effort, with_tries_left,
 };
 use crate::age::AgeIdentity;
+use crate::batch::Member;
 use crate::cancel::{DeviceInterrupt, Ended};
-use crate::display::{self, MAX_NAME_CHARS};
+use crate::device::DeviceIdentity;
+use crate::display::{self, MAX_COMMAND_CHARS, MAX_NAME_CHARS};
 use crate::pin_cache::{CachePolicy, CredentialKey, policy_for};
 use crate::popup::{CancelledInPopup, PopupSession};
 use crate::prompt::PinRequest;
@@ -42,6 +44,48 @@ fn purpose(by: &Requester) -> String {
             format!("decrypt a file for {host} (through your forwarded agent)")
         }
     }
+}
+
+/// What the first decryption of a batch asks the user for: the files the
+/// batch's command asks for from then on, for a limited time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Offer {
+    /// The command, as the popup shows it.
+    command: String,
+    /// How long the batch still lasts at most.
+    seconds: u64,
+}
+
+impl Offer {
+    /// What a decryption for `member`'s batch offers.
+    pub fn of(member: &Member) -> Self {
+        Self {
+            command: member.command.clone(),
+            // Never less than what is granted.
+            seconds: member
+                .remaining
+                .as_secs()
+                .saturating_add(u64::from(member.remaining.subsec_nanos() > 0)),
+        }
+    }
+
+    /// In a sentence: "decrypt the files … asks for …".
+    fn purpose(&self) -> String {
+        format!(
+            "decrypt the files \"{}\" asks for, without another touch, for up to {} (a batch)",
+            display::shown(&self.command, MAX_COMMAND_CHARS),
+            display::about(self.seconds)
+        )
+    }
+}
+
+/// What a security key answered for an age identity.
+pub(crate) struct Derived {
+    /// The answer for the batch salt: what the identity's seed is derived
+    /// from.
+    pub answer: SecretBuffer,
+    /// The plug-in of the security key that gave it.
+    pub device: DeviceIdentity,
 }
 
 /// `identity` as the popup shows it: its recipient cut short where an SSH
@@ -72,13 +116,16 @@ struct DeriveJob {
     credential: AgeCredential,
     popup_key: Key,
     by: Requester,
+    /// Set if the request starts a batch: then that is what the user is
+    /// asked for, not one file.
+    batch: Option<Offer>,
     described: String,
     policy: CachePolicy,
 }
 
 impl Job for DeriveJob {
     type Raw = SecretBuffer;
-    type Done = SecretBuffer;
+    type Done = Derived;
 
     fn credential(&self) -> &CredentialKey {
         &self.key
@@ -89,8 +136,14 @@ impl Job for DeriveJob {
     }
 
     fn popup_request(&self) -> Request {
-        Request::Decrypt {
-            by: self.by.clone(),
+        match &self.batch {
+            Some(offer) => Request::Batch {
+                command: offer.command.clone(),
+                seconds: offer.seconds,
+            },
+            None => Request::Decrypt {
+                by: self.by.clone(),
+            },
         }
     }
 
@@ -103,7 +156,10 @@ impl Job for DeriveJob {
     }
 
     fn purpose(&self) -> String {
-        purpose(&self.by)
+        match &self.batch {
+            Some(offer) => offer.purpose(),
+            None => purpose(&self.by),
+        }
     }
 
     fn needs_pin(&self) -> bool {
@@ -128,7 +184,12 @@ impl Job for DeriveJob {
         })
     }
 
-    fn accept(&self, answer: SecretBuffer, with_pin: bool) -> Result<SecretBuffer> {
+    fn accept(
+        &self,
+        answer: SecretBuffer,
+        with_pin: bool,
+        device: &DeviceIdentity,
+    ) -> Result<Derived> {
         // The fido layer refused an answer without a touch or without the
         // PIN verified; this is the same rule from this side.
         ensure!(with_pin, "an age identity was used without the PIN");
@@ -137,7 +198,10 @@ impl Job for DeriveJob {
             "the security key's answer has {} bytes, not {DERIVED_SECRET_BYTES}",
             answer.len()
         );
-        Ok(answer)
+        Ok(Derived {
+            answer,
+            device: device.clone(),
+        })
     }
 
     fn done(&self) -> Shown {
@@ -249,7 +313,8 @@ impl Signer {
     /// identity that may be used in batches: 32 bytes that never change, and
     /// from which the identity's private key is derived. Goes the way of a
     /// signature: the security key that holds the credential, the PIN from
-    /// the cache or the user, a touch.
+    /// the cache or the user, a touch. With `batch`, the request starts
+    /// one, and the user is asked for that.
     ///
     /// # Errors
     ///
@@ -258,13 +323,15 @@ impl Signer {
         &self,
         identity: &AgeIdentity,
         by: Requester,
+        batch: Option<Offer>,
         ticket: SigningTicket,
-    ) -> Result<SecretBuffer> {
+    ) -> Result<Derived> {
         let job = DeriveJob {
             key: identity.key(),
             credential: identity.credential().clone(),
             popup_key: popup_key(identity),
             by,
+            batch,
             described: describe(identity),
             policy: self.age_policy(),
         };

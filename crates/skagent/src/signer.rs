@@ -10,6 +10,9 @@
 //! an age identity in [`crate::age`].
 
 mod age;
+mod batch;
+
+pub(crate) use age::Offer;
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -28,6 +31,8 @@ use skagent_secret::SecretBuffer;
 use ssh_agent_lib::ssh_key::{Algorithm, Signature};
 use tokio::sync::{Mutex, watch};
 
+use crate::ancestry::Proc;
+use crate::batch::{Batches, Ended as BatchEnded};
 use crate::bindings::{
     Bindings, Missing, NotPluggedIn, Presence, SerialClaimedTwice, Unrecognized, present_first,
 };
@@ -48,6 +53,10 @@ use crate::routing::{OnSelect, OnWait, QUEUE_TIMEOUT, RoutedDevice, Router, SELE
 
 /// Length of an Ed25519 signature.
 const ED25519_SIGNATURE_BYTES: usize = 64;
+
+/// The longest a batch of decryptions lasts unless `--batch-lifetime` says
+/// otherwise.
+pub const DEFAULT_BATCH_LIFETIME: Duration = Duration::from_mins(10);
 
 /// Signs, asking for PINs and caching them.
 #[derive(Debug)]
@@ -134,6 +143,9 @@ struct State {
     caching: Caching,
     /// Per-credential revocation; dropping a sender revokes its tickets.
     revocations: HashMap<CredentialKey, watch::Sender<()>>,
+    /// The batches of decryptions, with the seeds they keep: here, so that
+    /// whatever evicts PINs ends them under the same lock.
+    batches: Batches<Proc>,
 }
 
 /// Whether PINs may be cached, which depends on watching logind.
@@ -196,10 +208,11 @@ pub(crate) trait Job: Sync {
     fn doing(&self) -> &'static str;
     /// The security key's part.
     fn work(&self) -> Work<Self::Raw>;
-    /// Checks what the security key returned. Nothing is returned to the
-    /// client or cached before this passed. `with_pin`: the request carried
-    /// a PIN.
-    fn accept(&self, raw: Self::Raw, with_pin: bool) -> Result<Self::Done>;
+    /// Checks what the security key `device` returned. Nothing is returned
+    /// to the client or cached before this passed. `with_pin`: the request
+    /// carried a PIN.
+    fn accept(&self, raw: Self::Raw, with_pin: bool, device: &DeviceIdentity)
+    -> Result<Self::Done>;
     /// What the popup shows last, after the request succeeded.
     fn done(&self) -> Shown;
 }
@@ -276,7 +289,12 @@ impl Job for SignJob<'_> {
         })
     }
 
-    fn accept(&self, statement: Statement, with_pin: bool) -> Result<Signature> {
+    fn accept(
+        &self,
+        statement: Statement,
+        with_pin: bool,
+        _device: &DeviceIdentity,
+    ) -> Result<Signature> {
         // Neither returned nor cached unless it is the identity's own
         // signature: the device may hold another credential under that
         // handle, or the identity's public key may not be the one the
@@ -323,6 +341,7 @@ impl Signer {
                 last_failure: HashMap::new(),
                 caching: Caching::Pending,
                 revocations: HashMap::new(),
+                batches: Batches::new(Proc, DEFAULT_BATCH_LIFETIME),
             }),
             router: Router::default(),
             invalidation: watch::channel(()).0,
@@ -533,11 +552,20 @@ impl Signer {
         }
     }
 
-    /// Drops all cached PINs and invalidates outstanding signatures.
+    /// What every eviction of all PINs does, under the state lock: revokes
+    /// every ticket, ends every batch (wiping its seeds) and drops every
+    /// PIN. Returns how many PINs there were.
+    fn evict(&self, state: &mut State) -> usize {
+        self.invalidation.send_replace(());
+        state.batches.end_all(BatchEnded::PinsEvicted);
+        state.cache.clear()
+    }
+
+    /// Drops all cached PINs, ends all batches and invalidates outstanding
+    /// requests.
     pub async fn forget_all(&self) -> usize {
         let mut state = self.state.lock().await;
-        self.invalidation.send_replace(());
-        state.cache.clear()
+        self.evict(&mut state)
     }
 
     /// Unloads all identity-specific state as well as the cached PINs.
@@ -545,11 +573,10 @@ impl Signer {
         let mut state = self.state.lock().await;
         let mut bindings = self.router.bindings().await;
         // No awaits from here on: a cancelled caller can't stop halfway.
-        self.invalidation.send_replace(());
         bindings.clear();
         state.last_failure.clear();
         state.revocations.clear();
-        state.cache.clear()
+        self.evict(&mut state)
     }
 
     /// Disables caching while logind cannot be watched. Signing still works,
@@ -567,8 +594,7 @@ impl Signer {
         let revoke = state.caching != next && state.caching != Caching::Pending;
         state.caching = next;
         if revoke {
-            self.invalidation.send_replace(());
-            state.cache.clear();
+            self.evict(&mut state);
         }
     }
 
@@ -580,8 +606,7 @@ impl Signer {
         let mut state = self.state.lock().await;
         if state.caching != Caching::Pending {
             state.caching = Caching::Pending;
-            self.invalidation.send_replace(());
-            state.cache.clear();
+            self.evict(&mut state);
         }
     }
 
@@ -603,18 +628,20 @@ impl Signer {
 
     /// Drops PINs whose lifetime or idle timeout ended, returning how many,
     /// and PINs of security keys that were unplugged (or replugged) since.
+    /// Ends the batches whose time is up, whose tool is gone or whose
+    /// security key was unplugged.
     pub async fn expire(&self, now: Instant) -> usize {
         let mut state = self.state.lock().await;
         let expired = state.cache.expire(now);
-        let unplugged = state.cache.evict_absent(|device| {
-            DeviceIdentity::of(device.path()).is_ok_and(|current| current == *device)
-        });
+        let unplugged = state.cache.evict_absent(still_plugged_in);
         if unplugged > 0 {
             tracing::info!(
                 unplugged,
                 "dropped the cached PINs of unplugged security keys"
             );
         }
+        // Whoever watches a batch logs its end.
+        state.batches.sweep(now, still_plugged_in);
         expired
     }
 
@@ -1108,7 +1135,7 @@ impl Signer {
         match outcome {
             Ok((raw, retries_after)) => {
                 let done = job
-                    .accept(raw, source.pin().is_some())
+                    .accept(raw, source.pin().is_some(), &running.device)
                     .with_context(|| format!("{} with {}", job.doing(), job.described()))?;
                 // The key just proved it holds the credential with a PIN the
                 // user typed: the moment to pair with it, once.
@@ -1439,7 +1466,7 @@ impl Signer {
         // No awaits from here on: a cancelled caller can't stop halfway.
         running.ticket.check()?;
         state.last_failure.remove(key);
-        let still_same_device = DeviceIdentity::of(device.path()).is_ok_and(|now| now == *device);
+        let still_same_device = still_plugged_in(device);
         if still_same_device {
             bindings.bind(key, device.clone(), running.serial, pairing);
         }
@@ -1505,6 +1532,11 @@ impl Signer {
         }
         state.last_failure.insert(key.clone(), note.to_owned());
     }
+}
+
+/// Whether `device` is still the plug-in it was.
+fn still_plugged_in(device: &DeviceIdentity) -> bool {
+    DeviceIdentity::of(device.path()).is_ok_and(|current| current == *device)
 }
 
 /// About how long a YubiKey waits for a touch, for the popup's countdown.

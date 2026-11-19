@@ -157,6 +157,11 @@
                 inherit pkgs;
                 package = config.packages.default;
               };
+              vm-batch = import ./nix/tests/batch.nix {
+                inherit pkgs;
+                package = config.packages.default;
+                testkey = config.packages.testkey;
+              };
               vm-pinentry = import ./nix/tests/pinentry.nix {
                 inherit pkgs;
                 package = config.packages.default;

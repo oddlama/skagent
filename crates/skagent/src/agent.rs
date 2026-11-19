@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use async_trait::async_trait;
 use skagent_age::wire::{
-    self, LIST_EXTENSION, ListReply, NEW_EXTENSION, NewReply, Refusal, UNWRAP_EXTENSION,
-    UnwrapReply, UnwrapRequest,
+    self, BATCH_EXTENSION, BatchReply, BatchRequest, LIST_EXTENSION, ListReply, NEW_EXTENSION,
+    NewReply, Refusal, UNWRAP_EXTENSION, UnwrapReply, UnwrapRequest,
 };
 use skagent_age::{Recipient, Seed};
 use skagent_fido::{AGE_USER_ID_BYTES, ErrorKind, error_kind};
@@ -40,20 +40,22 @@ use ssh_agent_lib::proto::{
 };
 use ssh_agent_lib::ssh_key::Signature;
 use tokio::net::UnixStream;
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard};
 use zeroize::Zeroize as _;
 
 use crate::age::{AgeIdentities, AgeIdentity, NotChosen};
+use crate::batch::{BatchId, Member, Served};
 use crate::bindings::{NotPluggedIn, Presence};
 use crate::cancel::Hangup;
 use crate::destination::{self, Bound, SESSION_BIND_EXTENSION, SessionBindings};
+use crate::display::{self, MAX_COMMAND_CHARS};
 use crate::frames::BoundedStream;
 use crate::identities::{
     AcceptedConstraints, IdentityStore, Origin, SkIdentity, evaluate_constraints,
 };
 use crate::peer::{OwnPrograms, Peer, Program};
 use crate::popup::cancelled_in_popup;
-use crate::signer::{Signer, SigningTicket};
+use crate::signer::{Offer, Signer, SigningTicket};
 use crate::socket::PeerCheckedListener;
 
 /// Agent protocol extension that drops all cached PINs and keeps the keys.
@@ -76,11 +78,12 @@ const SUPPORTED_EXTENSIONS: [&str; 4] = [
 ];
 
 /// What `query` answers on the socket for age requests.
-const AGE_EXTENSIONS: [&str; 4] = [
+const AGE_EXTENSIONS: [&str; 5] = [
     QUERY_EXTENSION,
     UNWRAP_EXTENSION,
     NEW_EXTENSION,
     LIST_EXTENSION,
+    BATCH_EXTENSION,
 ];
 
 /// Extra wait per consecutive failed unlock attempt.
@@ -238,6 +241,7 @@ impl Agent<PeerCheckedListener> for SkAgent {
             hangup,
             bindings: SessionBindings::default(),
             channel: Channel::Ssh,
+            batch: None,
         }
     }
 }
@@ -286,6 +290,7 @@ impl Agent<PeerCheckedListener> for AgeSocket {
             hangup,
             bindings: SessionBindings::default(),
             channel,
+            batch: None,
         }
     }
 }
@@ -312,6 +317,37 @@ pub struct AgentSession {
     bindings: SessionBindings,
     /// The socket it came in on.
     channel: Channel,
+    /// The batch this connection asked for (`skagent batch`), which lasts
+    /// as long as the connection at most.
+    batch: Option<OpenBatch>,
+}
+
+/// A connection's batch. Dropped with the connection, which closes the
+/// batch and wipes what it kept.
+#[derive(Debug)]
+struct OpenBatch {
+    id: BatchId,
+    shared: Arc<Shared>,
+}
+
+impl Drop for OpenBatch {
+    fn drop(&mut self) {
+        let (id, shared) = (self.id, Arc::clone(&self.shared));
+        // Without a runtime the agent is shutting down, and every batch
+        // goes with its state.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            drop(runtime.spawn(async move {
+                if let Some((files, ended)) = shared.signer.close_batch(id).await {
+                    tracing::info!(
+                        batch = %id,
+                        files,
+                        ended_before = ended.map(|reason| reason.to_string()),
+                        "closed the batch: its command is done"
+                    );
+                }
+            }));
+        }
+    }
 }
 
 /// Logs why a request is refused and turns it into a protocol `FAILURE`.
@@ -564,7 +600,12 @@ impl AgentSession {
                 let by = Requester::Program {
                     name: peer.started_by().map(|name| Signer::shown_program(&name)),
                 };
-                self.unwrap(&request, by).await
+                // Without a pidfd nobody is proven anybody's descendant.
+                let member = match peer.pidfd() {
+                    Some(pinned) => self.shared.signer.batch_of(peer.pid(), pinned).await,
+                    None => None,
+                };
+                self.unwrap(&request, by, member).await
             }
             Err(reason) => {
                 tracing::warn!(reason = %format!("{reason:#}"), "refused to decrypt");
@@ -578,14 +619,35 @@ impl AgentSession {
     }
 
     /// Decrypts for `request`: chooses the identity, has its security key
-    /// derive the secret, and unwraps. What went wrong becomes a reply.
-    async fn unwrap(&self, request: &UnwrapRequest, by: Requester) -> UnwrapReply {
+    /// derive the secret, and unwraps. For a `member` of a batch, the seed
+    /// the batch keeps does it, once the first request derived it. What
+    /// went wrong becomes a reply.
+    async fn unwrap(
+        &self,
+        request: &UnwrapRequest,
+        by: Requester,
+        member: Option<Member>,
+    ) -> UnwrapReply {
         let named = request.identity.recipient();
         let (identity, ticket) = match self.choose_identity(named).await {
             Ok(chosen) => chosen,
             Err(refusal) => return UnwrapReply::Refused(refusal),
         };
-        match self.unwrap_with(&identity, &ticket, request, by).await {
+        // A member's turn is held to the end: the members that asked
+        // meanwhile then find the seed this request left for the batch,
+        // instead of asking for touches of their own.
+        let turn = match &member {
+            Some(member) => match self.turn_in_batch(member, &identity, request).await {
+                Ok(turn) => Some(turn),
+                Err(reply) => return reply,
+            },
+            None => None,
+        };
+        let unwrapped = self
+            .unwrap_with(&identity, &ticket, request, by, member.as_ref())
+            .await;
+        drop(turn);
+        match unwrapped {
             Ok(reply) => reply,
             Err(error) => {
                 let refusal = refusal_of(&error, &ticket);
@@ -652,22 +714,107 @@ impl AgentSession {
         Ok((identity, ticket))
     }
 
+    /// Answers `request` from the seed `member`'s batch keeps for
+    /// `identity`: that is the `Err`, the reply. Without a seed, waits for
+    /// the member's turn to derive one, and returns it if there is still
+    /// none then.
+    async fn turn_in_batch(
+        &self,
+        member: &Member,
+        identity: &AgeIdentity,
+        request: &UnwrapRequest,
+    ) -> Result<OwnedMutexGuard<()>, UnwrapReply> {
+        if let Some(reply) = self.unwrap_in_batch(member, identity, request).await {
+            return Err(reply);
+        }
+        // Another member may be at the security key right now. Only this
+        // wait ends when the client leaves.
+        let waiting = Arc::clone(&member.turn).lock_owned();
+        let turn = Hangup::unless_closed(self.hangup.as_ref(), async { Ok(waiting.await) })
+            .await
+            .map_err(|error| {
+                tracing::warn!(reason = %format!("{error:#}"), "refused to decrypt");
+                UnwrapReply::Refused(Refusal::Cancelled)
+            })?;
+        match self.unwrap_in_batch(member, identity, request).await {
+            Some(reply) => Err(reply),
+            None => Ok(turn),
+        }
+    }
+
+    /// What the batch `member` belongs to answers `request` from the seed
+    /// it keeps for `identity`, without the security key. `None` if it
+    /// keeps none (yet, or any more): then the request is an ordinary one.
+    async fn unwrap_in_batch(
+        &self,
+        member: &Member,
+        identity: &AgeIdentity,
+        request: &UnwrapRequest,
+    ) -> Option<UnwrapReply> {
+        let served = self
+            .shared
+            .signer
+            .unwrap_in_batch(
+                member.id,
+                &identity.key(),
+                request.identity.recipient(),
+                &request.stanzas,
+            )
+            .await;
+        match served {
+            Ok(Served::NotKept) => None,
+            Ok(Served::FileKey(file_key)) => {
+                tracing::info!(
+                    identity = %identity.recipient().map(Recipient::abbreviated).unwrap_or_default(),
+                    batch = %member.id,
+                    command = %member.command,
+                    stanzas = request.stanzas.len(),
+                    matched = file_key.is_some(),
+                    "decrypted in a batch, without a touch"
+                );
+                Some(file_key.map_or(UnwrapReply::NoMatch, UnwrapReply::FileKey))
+            }
+            Ok(Served::AnotherIdentity) => {
+                tracing::warn!(
+                    batch = %member.id,
+                    "refused to decrypt: the batch's identity is another one than the one named"
+                );
+                Some(UnwrapReply::Refused(Refusal::AnotherIdentity))
+            }
+            Err(error) => {
+                tracing::warn!(
+                    reason = %format!("{error:#}"),
+                    batch = %member.id,
+                    "refused to decrypt"
+                );
+                Some(UnwrapReply::Refused(Refusal::Failed))
+            }
+        }
+    }
+
     async fn unwrap_with(
         &self,
         identity: &AgeIdentity,
         ticket: &SigningTicket,
         request: &UnwrapRequest,
         by: Requester,
+        member: Option<&Member>,
     ) -> Result<UnwrapReply> {
-        let purpose = format!("{by:?}");
+        let purpose = match member {
+            Some(member) => format!("the batch {} for {:?}", member.id, member.command),
+            None => format!("{by:?}"),
+        };
         // Only the device work is cut short when the client leaves.
-        let answer = Hangup::unless_closed(
+        let derived = Hangup::unless_closed(
             self.hangup.as_ref(),
-            self.shared.signer.derive(identity, by, ticket.clone()),
+            self.shared
+                .signer
+                .derive(identity, by, member.map(Offer::of), ticket.clone()),
         )
         .await?;
-        let seed = Seed::from_device_output(&answer)?;
-        drop(answer);
+        let seed = Seed::from_device_output(&derived.answer)?;
+        let device = derived.device;
+        drop(derived.answer);
         let recipient = seed.recipient()?;
         {
             let (mut state, _now) = self.shared.state_now().await;
@@ -690,6 +837,37 @@ impl AgentSession {
             return Ok(UnwrapReply::Refused(Refusal::AnotherIdentity));
         }
         let unwrapped = seed.unwrap(&request.stanzas)?;
+        if let Some(member) = member {
+            // The user agreed to the batch with this request's touch.
+            let kept = self
+                .shared
+                .signer
+                .keep_seed(
+                    member.id,
+                    identity.key(),
+                    (&seed, recipient.clone()),
+                    device,
+                    ticket,
+                    unwrapped.is_some(),
+                )
+                .await?;
+            if kept {
+                tracing::info!(
+                    identity = %recipient.abbreviated(),
+                    batch = %member.id,
+                    command = %member.command,
+                    seconds = member.remaining.as_secs(),
+                    "the batch started: its command's further decryptions with this identity \
+                     need no touch"
+                );
+            } else {
+                tracing::info!(
+                    batch = %member.id,
+                    "the batch is over, or nothing can be kept right now: further decryptions \
+                     take a touch each"
+                );
+            }
+        }
         drop(seed);
         ticket.check()?;
         tracing::info!(
@@ -741,6 +919,59 @@ impl AgentSession {
         Ok(Extension {
             name: NEW_EXTENSION.to_owned(),
             details: Unparsed::from(NewReply { recipient }.encode()),
+        })
+    }
+
+    /// Answers `age-batch@skagent`: opens a batch for the command line
+    /// tool at the other end. It lasts as long as this connection at most.
+    async fn age_batch(&mut self, details: &[u8]) -> Result<Extension> {
+        let peer = self.age_peer(Program::Agent)?;
+        let request = BatchRequest::decode(details).context("decoding the request for a batch")?;
+        ensure!(self.batch.is_none(), "the connection has its batch already");
+        // Without a pidfd nothing ties the batch to its tool, and no
+        // process could be proven to descend from it.
+        let tool = peer
+            .pidfd()
+            .context(
+                "batches need a kernel that pins the peer of a connection (SO_PEERPIDFD, \
+                 Linux 6.5)",
+            )?
+            .try_clone()
+            .context("keeping a pidfd of the batch's tool")?;
+        let tool_pid = peer.pid();
+        let command = display::plain(&request.command, MAX_COMMAND_CHARS);
+        let opened = {
+            let (state, _now) = self.shared.state_now().await;
+            ensure!(state.lock.is_none(), "the agent is locked");
+            self.shared
+                .signer
+                .open_batch(
+                    (tool_pid, tool),
+                    command,
+                    Duration::from_secs(u64::from(request.seconds)),
+                )
+                .await?
+        };
+        let seconds = u32::try_from(opened.lasts.as_secs()).unwrap_or(u32::MAX);
+        tracing::info!(
+            batch = %opened.id,
+            command = %opened.command,
+            seconds,
+            pid = tool_pid,
+            "opened a batch: the first decryption its command asks for takes the PIN and a \
+             touch, the following ones neither"
+        );
+        self.batch = Some(OpenBatch {
+            id: opened.id,
+            shared: Arc::clone(&self.shared),
+        });
+        let shared = Arc::clone(&self.shared);
+        drop(tokio::spawn(async move {
+            shared.signer.watch_batch(opened).await;
+        }));
+        Ok(Extension {
+            name: BATCH_EXTENSION.to_owned(),
+            details: Unparsed::from(BatchReply { seconds }.encode()),
         })
     }
 
@@ -835,6 +1066,7 @@ impl AgentSession {
             UNWRAP_EXTENSION => self.age_unwrap(details).await,
             NEW_EXTENSION => self.age_new(details).await,
             LIST_EXTENSION => self.age_list(details).await,
+            BATCH_EXTENSION => self.age_batch(details).await,
             SESSION_BIND_EXTENSION => {
                 // ssh binds the connections it forwards. None of skagent's
                 // programs does: this one is relayed, and gets nothing more.

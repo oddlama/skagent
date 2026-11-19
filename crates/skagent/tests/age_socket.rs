@@ -16,8 +16,8 @@ use skagent::peer::{FileId, OwnPrograms};
 use skagent::serve::{Listening, serve_sockets_until};
 use skagent::signer::Signer;
 use skagent_age::wire::{
-    self, LIST_EXTENSION, ListReply, NEW_EXTENSION, Refusal, UNWRAP_EXTENSION, UnwrapReply,
-    UnwrapRequest,
+    self, BATCH_EXTENSION, BatchReply, BatchRequest, LIST_EXTENSION, ListReply, NEW_EXTENSION,
+    Refusal, UNWRAP_EXTENSION, UnwrapReply, UnwrapRequest,
 };
 use skagent_age::{FileKey, Identity, Recipient, Seed};
 use skagent_fido::AgeCredential;
@@ -40,6 +40,8 @@ enum TakenFor {
 struct Running {
     ssh: PathBuf,
     age: PathBuf,
+    /// The agent that is served, to look at what the sockets don't show.
+    agent: SkAgent,
     shutdown: oneshot::Sender<()>,
     task: JoinHandle<Result<()>>,
     _directory: tempfile::TempDir,
@@ -53,6 +55,15 @@ impl Running {
     /// An agent with both sockets, knowing `identities`: credentials
     /// numbered by a byte, with or without a known recipient.
     async fn start(taken_for: TakenFor, identities: &[(u8, bool)]) -> Result<Self> {
+        Self::start_with(taken_for, identities, Signer::default()).await
+    }
+
+    /// [`Running::start`], with the agent using `signer`.
+    async fn start_with(
+        taken_for: TakenFor,
+        identities: &[(u8, bool)],
+        signer: Signer,
+    ) -> Result<Self> {
         let directory = tempfile::tempdir()?;
         let ssh = directory.path().join("agent.sock");
         let age = directory.path().join("agent-age.sock");
@@ -73,19 +84,15 @@ impl Running {
                 known.derived(&credential, &recipient(byte)?);
             }
         }
-        let agent = SkAgent::with_stores(
-            Signer::default(),
-            IdentityStore::default(),
-            known,
-            Some(own),
-        );
+        let agent = SkAgent::with_stores(signer, IdentityStore::default(), known, Some(own));
+        let served = agent.clone();
         let (shutdown, shutdown_received) = oneshot::channel::<()>();
         let (ssh_path, age_path) = (ssh.clone(), age.clone());
         let task = tokio::spawn(async move {
             serve_sockets_until(
                 Listening::Bind(ssh_path),
                 Some(Listening::Bind(age_path)),
-                agent,
+                served,
                 async move {
                     shutdown_received
                         .await
@@ -104,6 +111,7 @@ impl Running {
         Ok(Self {
             ssh,
             age,
+            agent,
             shutdown,
             task,
             _directory: directory,
@@ -396,10 +404,264 @@ async fn the_ssh_agent_socket_answers_no_age_request() -> Result<()> {
     for (name, details) in [
         (LIST_EXTENSION, wire::simple_request()),
         (NEW_EXTENSION, wire::new_request(false)),
+        (BATCH_EXTENSION, batch_request(0)?),
     ] {
         ensure!(
             Running::ask(&agent.ssh, name, details).await?.is_none(),
             "{name} was answered on the ssh-agent socket"
+        );
+    }
+    ensure!(agent.agent.signer().running_batches().await == 0);
+    agent.stop().await
+}
+
+/// The details of a request for a batch of `seconds` (zero: as long as
+/// allowed) for the command `agenix rekey`.
+fn batch_request(seconds: u32) -> Result<Vec<u8>> {
+    BatchRequest {
+        seconds,
+        command: "agenix rekey".to_owned(),
+    }
+    .encode()
+}
+
+/// Asks for a batch on `client`'s connection: how long it lasts, or `None`
+/// if the agent refused.
+async fn open_batch(client: &mut Client<UnixStream>, seconds: u32) -> Result<Option<u32>> {
+    let reply = client
+        .extension(Extension {
+            name: BATCH_EXTENSION.to_owned(),
+            details: Unparsed::from(batch_request(seconds)?),
+        })
+        .await;
+    match reply {
+        Ok(Some(extension)) => {
+            ensure!(extension.name == BATCH_EXTENSION);
+            Ok(Some(
+                BatchReply::decode(extension.details.as_ref())?.seconds,
+            ))
+        }
+        Ok(None) => bail!("a batch was answered with a bare success"),
+        Err(_) => Ok(None),
+    }
+}
+
+/// Waits until the agent has `running` batches running.
+async fn batches_running(agent: &Running, running: usize) -> Result<()> {
+    tokio::time::timeout(support::TIMEOUT, async {
+        while agent.agent.signer().running_batches().await != running {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .with_context(|| format!("never {running} batches running"))
+}
+
+/// Whether the kernel pins the peers of connections (Linux 6.5). Without
+/// that there are no batches.
+fn peers_are_pinned() -> Result<bool> {
+    let (one, _other) = std::os::unix::net::UnixStream::pair()?;
+    Ok(skagent_fds::peer_pidfd(std::os::fd::AsFd::as_fd(&one))?.is_some())
+}
+
+#[tokio::test]
+async fn the_command_line_gets_a_batch_that_lasts_as_long_as_its_connection() -> Result<()> {
+    let agent = Running::start(TakenFor::Agent, &[(1, true)]).await?;
+    let mut tool = Running::client(&agent.age).await?;
+    if !peers_are_pinned()? {
+        ensure!(
+            open_batch(&mut tool, 0).await?.is_none(),
+            "a batch nobody can be proven in"
+        );
+        return agent.stop().await;
+    }
+    // As long as the agent allows, unless less is asked for.
+    ensure!(open_batch(&mut tool, 0).await? == Some(600));
+    batches_running(&agent, 1).await?;
+    ensure!(
+        open_batch(&mut tool, 0).await?.is_none(),
+        "a second batch on one connection"
+    );
+    let mut shorter = Running::client(&agent.age).await?;
+    ensure!(open_batch(&mut shorter, 60).await? == Some(60));
+    let mut longer = Running::client(&agent.age).await?;
+    ensure!(
+        open_batch(&mut longer, 6000).await? == Some(600),
+        "longer than allowed"
+    );
+    batches_running(&agent, 3).await?;
+    ensure!(
+        agent.agent.signer().kept_seeds().await == 0,
+        "a seed before any decryption"
+    );
+
+    // The tool is gone when its connection is: so is its batch.
+    drop(shorter);
+    batches_running(&agent, 2).await?;
+    drop(tool);
+    drop(longer);
+    batches_running(&agent, 0).await?;
+
+    // A malformed request opens none.
+    for details in [
+        vec![],
+        vec![1],
+        vec![2, 0, 0, 0, 0, 0, 0, 0, 0],
+        vec![1, 0, 0, 0, 0],
+    ] {
+        ensure!(
+            Running::ask(&agent.age, BATCH_EXTENSION, details)
+                .await?
+                .is_none(),
+            "a malformed request for a batch was answered"
+        );
+    }
+    ensure!(agent.agent.signer().running_batches().await == 0);
+    agent.stop().await
+}
+
+#[tokio::test]
+async fn only_the_command_line_gets_a_batch() -> Result<()> {
+    for taken_for in [TakenFor::Plugin, TakenFor::Stranger] {
+        let agent = Running::start(taken_for, &[(1, true)]).await?;
+        let mut client = Running::client(&agent.age).await?;
+        ensure!(
+            open_batch(&mut client, 0).await?.is_none(),
+            "a batch for another program"
+        );
+        ensure!(agent.agent.signer().running_batches().await == 0);
+        agent.stop().await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_batch_ends_when_its_time_is_up() -> Result<()> {
+    if !peers_are_pinned()? {
+        return Ok(());
+    }
+    let agent = Running::start(TakenFor::Agent, &[(1, true)]).await?;
+    let mut tool = Running::client(&agent.age).await?;
+    ensure!(open_batch(&mut tool, 1).await? == Some(1));
+    ensure!(agent.agent.signer().running_batches().await == 1);
+    // Nobody asks it anything: the agent ends it by itself.
+    batches_running(&agent, 0).await?;
+    drop(tool);
+    agent.stop().await
+}
+
+#[tokio::test]
+async fn whatever_evicts_pins_ends_batches() -> Result<()> {
+    if !peers_are_pinned()? {
+        return Ok(());
+    }
+    let agent = Running::start(TakenFor::Agent, &[(1, true)]).await?;
+    let signer = agent.agent.signer();
+    let open = || async {
+        let mut tool = Running::client(&agent.age).await?;
+        ensure!(open_batch(&mut tool, 0).await?.is_some(), "no batch");
+        ensure!(signer.running_batches().await == 1);
+        Ok(tool)
+    };
+
+    // `skagent forget`.
+    let tool = open().await?;
+    Running::client(&agent.ssh)
+        .await?
+        .extension(Extension {
+            name: "forget-pins@skagent".to_owned(),
+            details: Unparsed::from(Vec::new()),
+        })
+        .await
+        .map_err(|error| anyhow!("forgetting PINs: {error}"))?;
+    ensure!(
+        signer.running_batches().await == 0,
+        "running after a forget"
+    );
+    drop(tool);
+
+    // `ssh-add -D`.
+    let tool = open().await?;
+    Running::client(&agent.ssh)
+        .await?
+        .remove_all_identities()
+        .await
+        .map_err(|error| anyhow!("removing all keys: {error}"))?;
+    ensure!(
+        signer.running_batches().await == 0,
+        "running after removing all keys"
+    );
+    drop(tool);
+
+    // The screen locks.
+    let tool = open().await?;
+    agent.agent.forget_pins("the screen locked").await;
+    ensure!(signer.running_batches().await == 0, "running after a lock");
+    drop(tool);
+
+    // Lock and sleep events can't be watched any more, or not yet again.
+    agent.agent.set_caching_available(true).await;
+    let tool = open().await?;
+    agent.agent.set_caching_available(false).await;
+    ensure!(
+        signer.running_batches().await == 0,
+        "running without monitoring"
+    );
+    drop(tool);
+    agent.agent.set_caching_available(true).await;
+    let tool = open().await?;
+    agent.agent.caching_pending().await;
+    ensure!(
+        signer.running_batches().await == 0,
+        "running while monitoring restarts"
+    );
+    drop(tool);
+
+    // `ssh-add -x`: over, and none is opened while the agent is locked.
+    let tool = open().await?;
+    let mut ssh = Running::client(&agent.ssh).await?;
+    ssh.lock("passphrase".to_owned())
+        .await
+        .map_err(|error| anyhow!("locking: {error}"))?;
+    ensure!(
+        signer.running_batches().await == 0,
+        "running in a locked agent"
+    );
+    drop(tool);
+    let mut tool = Running::client(&agent.age).await?;
+    ensure!(
+        open_batch(&mut tool, 0).await?.is_none(),
+        "a batch from a locked agent"
+    );
+    ssh.unlock("passphrase".to_owned())
+        .await
+        .map_err(|error| anyhow!("unlocking: {error}"))?;
+    ensure!(
+        open_batch(&mut tool, 0).await?.is_some(),
+        "no batch after unlocking"
+    );
+    agent.stop().await
+}
+
+#[tokio::test]
+async fn batches_can_be_turned_off() -> Result<()> {
+    let signer = Signer::default().with_batch_lifetime(Duration::ZERO);
+    let agent = Running::start_with(TakenFor::Agent, &[(1, true)], signer).await?;
+    let mut tool = Running::client(&agent.age).await?;
+    ensure!(
+        open_batch(&mut tool, 0).await?.is_none(),
+        "a batch although they are off"
+    );
+    ensure!(open_batch(&mut tool, 60).await?.is_none());
+    agent.stop().await?;
+
+    let signer = Signer::default().with_batch_lifetime(Duration::from_secs(30));
+    let agent = Running::start_with(TakenFor::Agent, &[(1, true)], signer).await?;
+    let mut tool = Running::client(&agent.age).await?;
+    if peers_are_pinned()? {
+        ensure!(
+            open_batch(&mut tool, 60).await? == Some(30),
+            "longer than the agent allows"
         );
     }
     agent.stop().await
@@ -419,7 +681,13 @@ async fn each_socket_names_its_own_extensions() -> Result<()> {
     };
     let age = query(agent.age.clone()).await?;
     ensure!(
-        age == ["query", UNWRAP_EXTENSION, NEW_EXTENSION, LIST_EXTENSION],
+        age == [
+            "query",
+            UNWRAP_EXTENSION,
+            NEW_EXTENSION,
+            LIST_EXTENSION,
+            BATCH_EXTENSION
+        ],
         "{age:?}"
     );
     let ssh = query(agent.ssh.clone()).await?;

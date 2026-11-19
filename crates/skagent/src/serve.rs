@@ -270,7 +270,16 @@ pub async fn run(args: ServeArgs, activated: Activated) -> Result<()> {
         .with_pin_policies(args.pin_policies)
         .with_config(Arc::new(config))
         .with_plug_in_timeout(args.plug_in_timeout)
+        .with_batch_lifetime(args.batch_lifetime)
         .with_pairing(!args.no_pairing);
+    if args.batch_lifetime.is_zero() {
+        tracing::info!("batches of decryptions are turned off");
+    } else {
+        tracing::info!(
+            seconds = args.batch_lifetime.as_secs(),
+            "batches of decryptions (skagent batch) last this long at most"
+        );
+    }
     match default_bindings_path(
         std::env::var_os("XDG_STATE_HOME").as_deref(),
         std::env::var_os("HOME").as_deref(),

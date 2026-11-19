@@ -11,7 +11,7 @@ use clap::Parser as _;
 use skagent::cli::{AgeCommand, AgeSocketArgs, CheckConfigArgs, Cli, Command};
 use skagent::config::Config;
 use skagent::serve::Activated;
-use skagent::{client, hardening, logging, output, serve, socket};
+use skagent::{batch_tool, client, hardening, logging, output, serve, socket};
 use skagent_age::Recipient;
 
 fn main() -> ExitCode {
@@ -23,7 +23,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     match run(cli, color) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => {
             // If stderr itself is gone there is nowhere left to report to;
             // the exit code still signals the failure.
@@ -33,13 +33,17 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli, color: bool) -> Result<()> {
-    // First, before any secret can enter the process. `skagent age` holds
-    // none, and the agent has to be able to see which program asks it.
-    if matches!(cli.command, Command::Age(_)) {
-        hardening::disable_core_dumps()?;
-    } else {
-        hardening::harden_process()?;
+fn run(cli: Cli, color: bool) -> Result<ExitCode> {
+    // First, before any secret can enter the process. `skagent age` and
+    // `skagent batch` hold none, and the agent has to be able to see which
+    // program asks it. `skagent batch` changes nothing at all: the command
+    // it runs would inherit it.
+    match cli.command {
+        Command::Batch(_) => {}
+        Command::Age(_) => hardening::disable_core_dumps()?,
+        Command::Serve(_) | Command::Forget(_) | Command::Load(_) | Command::CheckConfig(_) => {
+            hardening::harden_process()?;
+        }
     }
     logging::init(&cli.log, color)?;
 
@@ -49,21 +53,31 @@ fn run(cli: Cli, color: bool) -> Result<()> {
         Command::Serve(_) => Activated::from_passed(
             skagent_fds::activated_listeners().context("taking over the sockets systemd passed")?,
         )?,
-        Command::Forget(_) | Command::Load(_) | Command::CheckConfig(_) | Command::Age(_) => {
-            Activated::default()
-        }
+        Command::Forget(_)
+        | Command::Load(_)
+        | Command::CheckConfig(_)
+        | Command::Age(_)
+        | Command::Batch(_) => Activated::default(),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("starting the tokio runtime")?;
     match cli.command {
+        Command::Batch(args) => {
+            return runtime.block_on(batch_tool::run(
+                &age_socket(args.socket)?,
+                args.lasting,
+                &args.command,
+            ));
+        }
         Command::Serve(args) => runtime.block_on(serve::run(args, activated)),
         Command::Forget(args) => runtime.block_on(client::forget_pins(&serve::socket_path(args)?)),
         Command::Load(args) => {
             if args.if_connected && !client::security_key_connected()? {
                 return writeln!(io::stdout(), "No security key connected, nothing to load.")
-                    .context("writing the resident-loading result");
+                    .context("writing the resident-loading result")
+                    .map(|()| ExitCode::SUCCESS);
             }
             let loaded = runtime.block_on(client::load_keys(&serve::socket_path(args.socket)?))?;
             let mut stdout = io::stdout().lock();
@@ -78,6 +92,7 @@ fn run(cli: Cli, color: bool) -> Result<()> {
         Command::CheckConfig(args) => check_config(&args),
         Command::Age(args) => age(&runtime, args.command),
     }
+    .map(|()| ExitCode::SUCCESS)
 }
 
 /// The agent's socket for age requests: `--age-socket`, else next to the

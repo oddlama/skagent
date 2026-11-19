@@ -1,5 +1,6 @@
 //! Command line interface.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -41,6 +42,34 @@ pub enum Command {
     /// are encrypted to an identity's recipient with stock age, and decrypted
     /// through `age-plugin-skagent`, which asks the running agent.
     Age(AgeArgs),
+    /// Run a command whose age decryptions take one touch together: the
+    /// first file its processes decrypt through `age-plugin-skagent` takes
+    /// the PIN and a touch, the following ones neither, until the command
+    /// is done or the time is up. E.g. `skagent batch -- agenix rekey`.
+    Batch(BatchArgs),
+}
+
+/// Arguments of `skagent batch`.
+#[derive(Debug, Args)]
+pub struct BatchArgs {
+    /// Where the agent listens for age requests.
+    #[command(flatten)]
+    pub socket: AgeSocketArgs,
+
+    /// How long the batch lasts at most, e.g. `5m`. Never longer than the
+    /// agent allows (`skagent serve --batch-lifetime`), which is also what
+    /// it lasts without this.
+    #[arg(long = "for", value_name = "DURATION", value_parser = parse_batch_duration)]
+    pub lasting: Option<Duration>,
+
+    /// The command to run, with its arguments.
+    #[arg(
+        required = true,
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "COMMAND"
+    )]
+    pub command: Vec<OsString>,
 }
 
 /// Arguments of `skagent age`.
@@ -194,6 +223,13 @@ pub struct ServeArgs {
     #[arg(long, value_parser = parse_duration, default_value = "15s")]
     pub plug_in_timeout: Duration,
 
+    /// The longest a batch of decryptions (`skagent batch`) lasts, e.g.
+    /// `10m`. The key of an age identity stays in the agent's memory for
+    /// that long at most, and files are decrypted without a touch. `0`
+    /// turns batches off.
+    #[arg(long, value_parser = parse_duration, default_value = "10m")]
+    pub batch_lifetime: Duration,
+
     /// Don't pair with security keys on first use. Pairing takes one more
     /// touch, once per security key, and lets skagent tell the key from a
     /// device claiming to be it before a PIN goes there. Pairings made
@@ -259,6 +295,23 @@ pub fn parse_pin_policy(text: &str) -> Result<KeyPinPolicy, String> {
         lifetime,
         idle,
     })
+}
+
+/// Parses how long a batch lasts: a duration above zero, in seconds that
+/// fit the request.
+///
+/// # Errors
+///
+/// Returns a message for clap if `text` isn't such a duration.
+pub fn parse_batch_duration(text: &str) -> Result<Duration, String> {
+    let duration = parse_duration(text)?;
+    if duration.is_zero() {
+        return Err("a batch lasts longer than 0; leave --for out for as long as allowed".into());
+    }
+    if u32::try_from(duration.as_secs()).is_err() {
+        return Err(format!("{text:?} is too long"));
+    }
+    Ok(duration)
 }
 
 /// Parses `0` or a whole number with a unit: `s`, `m` or `h`.

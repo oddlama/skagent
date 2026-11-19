@@ -2,9 +2,13 @@
 //! `skagent age`.
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail, ensure};
-use skagent_age::wire::{self, LIST_EXTENSION, ListReply, NEW_EXTENSION, NewReply};
+use skagent_age::wire::{
+    self, BATCH_EXTENSION, BatchReply, BatchRequest, LIST_EXTENSION, ListReply, NEW_EXTENSION,
+    NewReply,
+};
 use skagent_age::{Identity, Recipient};
 use ssh_agent_lib::agent::Session as _;
 use ssh_agent_lib::client::Client;
@@ -117,13 +121,29 @@ pub async fn forget_pins(socket: &Path) -> Result<()> {
 /// Sends the extension `name` to the agent's socket for age requests and
 /// returns the details of its reply.
 async fn age_request(socket: &Path, name: &str, details: Vec<u8>) -> Result<Vec<u8>> {
+    let mut connection = age_connection(socket).await?;
+    age_request_on(&mut connection, socket, name, details).await
+}
+
+/// A connection to the agent's socket for age requests.
+async fn age_connection(socket: &Path) -> Result<Client<UnixStream>> {
     let stream = UnixStream::connect(socket).await.with_context(|| {
         format!(
             "connecting to the agent's socket for age requests at {} (is skagent running?)",
             socket.display()
         )
     })?;
-    let reply = Client::new(stream)
+    Ok(Client::new(stream))
+}
+
+/// [`age_request`] on a connection that is kept.
+async fn age_request_on(
+    connection: &mut Client<UnixStream>,
+    socket: &Path,
+    name: &str,
+    details: Vec<u8>,
+) -> Result<Vec<u8>> {
+    let reply = connection
         .extension(Extension {
             name: name.to_owned(),
             details: Unparsed::from(details),
@@ -163,6 +183,56 @@ pub async fn age_new(socket: &Path, another: bool) -> Result<Recipient> {
 pub async fn age_list(socket: &Path) -> Result<Vec<Option<Recipient>>> {
     let details = age_request(socket, LIST_EXTENSION, wire::simple_request()).await?;
     Ok(ListReply::decode(&details)?.identities)
+}
+
+/// A batch the agent opened. It lasts while this is kept: dropping it
+/// closes the connection, and the agent ends the batch.
+pub struct Batch {
+    _connection: Client<UnixStream>,
+    lasts: Duration,
+}
+
+impl std::fmt::Debug for Batch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Batch")
+            .field("lasts", &self.lasts)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Batch {
+    /// How long the batch lasts at most.
+    #[must_use]
+    pub fn lasts(&self) -> Duration {
+        self.lasts
+    }
+}
+
+/// Asks the agent for a batch for this process: decryptions asked for by
+/// its descendants take one touch together. `lasting`: how long at most
+/// (`None`: as long as the agent allows). `command`: what the batch is for,
+/// shown to the user.
+///
+/// # Errors
+///
+/// Returns an error if the agent can't be reached, opens no batch, or
+/// answers something else.
+pub async fn open_batch(socket: &Path, lasting: Option<Duration>, command: &str) -> Result<Batch> {
+    let seconds = u32::try_from(lasting.unwrap_or_default().as_secs())
+        .context("the batch's duration is too long")?;
+    let request = BatchRequest {
+        seconds,
+        command: command.to_owned(),
+    };
+    let mut connection = age_connection(socket).await?;
+    let details =
+        age_request_on(&mut connection, socket, BATCH_EXTENSION, request.encode()?).await?;
+    let reply = BatchReply::decode(&details)?;
+    Ok(Batch {
+        _connection: connection,
+        lasts: Duration::from_secs(u64::from(reply.seconds)),
+    })
 }
 
 /// The content of an identity file for `recipient`: what `age -d -i` takes
