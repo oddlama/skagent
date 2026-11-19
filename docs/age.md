@@ -22,7 +22,7 @@ security key:
 - Ciphertext that sits in a public repository stays safe against a later
   quantum computer, as far as its other recipients are post-quantum too.
 
-With agenix-rekey that would look like this (a sketch, checked in step 6):
+With agenix-rekey that looks like this:
 
 ```nix
 age.rekey = {
@@ -32,8 +32,25 @@ age.rekey = {
 };
 ```
 
-The hosts are outside skagent's reach: their rekeyed copies are post-quantum
-once `hostPubkey` is an `age1pq1…` key instead of the SSH host key.
+Read against agenix-rekey's source (commit `87e5d5f`, `nix/lib.nix`), which
+runs rage or age with the plugins' directories appended to `PATH`:
+
+- **Decrypting** (`rekey`, `edit`): `-d -i` with every master identity file.
+  The file from `skagent age identity` is one. `agenix rekey` runs these as
+  children of the `nix run` that the `agenix` wrapper starts, so
+  `skagent batch -- agenix rekey` has them all for members.
+- **Encrypting to the master identities** (`edit`, `generate`): an identity
+  file that is neither age-plugin-yubikey's nor age-plugin-fido2-hmac's is
+  passed with `-e -i`, which is why the plugin implements `recipient-v1`.
+  Every `extraEncryptionPubkeys` has to be post-quantum too, or age and rage
+  refuse the mix.
+- **Encrypting for a host:** `-e -r hostPubkey`, to that one recipient. So
+  hosts can keep their SSH host keys for now; their copies are post-quantum
+  once `hostPubkey` is an `age1pq1…` key.
+
+`vm-age` runs these calls with rage and with age: `-e -i` next to an
+`age1pq1…` key, and `-d -i`. agenix-rekey itself wasn't run here: that takes
+a repository of secrets encrypted to a key on a security key.
 
 ## decisions
 
@@ -272,8 +289,15 @@ Extension messages of the ssh-agent protocol, so forwarding carries them:
 - **Off by default.** Without `--age-forwarding` the ssh-agent socket doesn't
   know the extensions.
 - **A forwarded request** always asks for the touch, is never served from a
-  batch, and can't create or list identities. The prompt names the host by its
-  verified host key, or says that it is unverified.
+  batch (also not one whose own command asks through the ssh-agent socket),
+  and can't create or list identities or open a batch.
+- **Who asks** is the host the agent was forwarded to last, by the host key
+  that signed its session bind; if that isn't the first hop, the first one is
+  named with it, because only that one is a host this machine's ssh connected
+  to. Without a bind, with a failed one, or on a connection bound to
+  authenticate: an unverified host. The PIN prompt, the touch notification,
+  the popup (also on its touch screen) and the log say it: "decrypt a file
+  for the host with key SHA256:… (through your forwarded agent)".
 - **What the user can't see:** which file. A stanza says nothing about its
   content, so a host can ask for any file it has a copy of. One touch, one
   file.
@@ -430,14 +454,18 @@ break it, watch the test fail, restore.
    the proof against a process table in which pids change hands at every
    step, the state machine, and who gets a batch on the socket. `ssh -A`
    inside a batch comes with step 5, where forwarded requests exist.
-5. **Forwarding.** `--age-forwarding`. With the three machines of
-   `vm-destinations`: refused by default; with it, the prompt names the host,
-   every file takes a touch, a batch doesn't help; a client without a session
-   bind is unverified.
-6. **home-manager and docs.** Options for the socket, forwarding and the
-   batch lifetime; the identity file for `-i`; README, `design.md` (threat
-   model, protocol surface, secret memory) and `AGENTS.md` (rules for seeds
-   and batches); the agenix-rekey setup above, tried for real.
+5. ~~**Forwarding.**~~ Done. `--age-forwarding`. `vm-age-forwarding`, with a
+   client, a jump host and a target: refused by default; with it, the prompt
+   names the jump host, every file takes a touch, a host two hops away is
+   named with the first hop, a client without a session bind is unverified, a
+   forwarded request inside a running batch takes its own touch, and
+   `skagent age` and `skagent batch` are refused through the forwarded agent.
+6. ~~**home-manager and docs.**~~ Done, but for one thing. The module's
+   `age.enable`, `age.batchLifetime` and `age.forwarding`; README,
+   `design.md` and `AGENTS.md`. The agenix-rekey setup is read against its
+   source and its calls are run in `vm-age` (see the top); running
+   agenix-rekey itself on a repository of secrets with a real security key
+   is still to do.
 
 ## later
 

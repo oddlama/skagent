@@ -40,6 +40,7 @@ skagent runs on Linux 5.11 or newer and asks for PINs with a graphical pinentry.
        pinentry.package = pkgs.pinentry-gnome3; # default: pinentry-qt
        loadAtLogin = true; # runs `skagent load` when your graphical session starts
        pinPolicies = [ { application = "ssh:personal"; lifetime = "1h"; } ];
+       age.batchLifetime = "5m"; # default: 10m, see age below
      };
    }
    ```
@@ -428,7 +429,21 @@ more than it does anywhere else, so a batch is bounded:
 
 Batches need Linux 6.5 or newer.
 
-Decrypting through a forwarded agent isn't built yet.
+#### On other machines
+
+With `ssh -A`, age on the remote host can decrypt with the security key in
+your machine: the plugin there asks the forwarded agent. skagent only answers
+that if you start it with `--age-forwarding`
+(`services.skagent.age.forwarding`), because of what it means:
+
+- **Every file takes a touch** on your machine. A batch never covers a remote
+  host.
+- **The prompt names the host** by its host key, like for a forwarded login.
+- **It can't tell you which file** the host wants opened. A hostile host that
+  has your forwarded agent can ask for any file it holds a copy of and hope
+  that you touch.
+
+The remote host needs age and `age-plugin-skagent`, and the identity file.
 
 ### Prompts and notifications
 
