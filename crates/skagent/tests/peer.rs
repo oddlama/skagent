@@ -6,7 +6,9 @@
 use std::path::Path;
 
 use anyhow::{Context as _, Result, ensure};
-use skagent::peer::{FileId, OwnPrograms, PLUGIN_BINARY, Peer, Program, parse_stat, requester};
+use skagent::peer::{
+    FileId, OwnPrograms, PLUGIN_BINARY, Peer, Program, completed_name, parse_stat, requester,
+};
 use tokio::net::UnixStream;
 
 #[test]
@@ -128,4 +130,50 @@ fn a_request_comes_from_what_started_age_unless_that_only_launches() {
         assert_eq!(requester("age", Some(launcher)), "age", "{launcher}");
     }
     assert_eq!(requester("rage", None), "rage");
+}
+
+#[test]
+fn a_name_the_process_list_cut_is_completed_from_the_command_line() {
+    // A script: the interpreter, then the script's path.
+    let script =
+        b"/nix/store/abc-bash/bin/bash\0/nix/store/def-check/bin/skagent-age-check\0--files\08\0";
+    assert_eq!(
+        completed_name("skagent-age-che", script),
+        "skagent-age-check"
+    );
+    // A program of its own.
+    assert_eq!(
+        completed_name(
+            "nixos-rebuild-n",
+            b"/run/current-system/sw/bin/nixos-rebuild-ng\0switch\0"
+        ),
+        "nixos-rebuild-ng"
+    );
+    // Exactly 15 bytes, and nothing longer on the command line.
+    assert_eq!(
+        completed_name("fifteen-letters", b"fifteen-letters\0"),
+        "fifteen-letters"
+    );
+    assert_eq!(completed_name("fifteen-letters", b""), "fifteen-letters");
+    // A shorter name was never cut: an argument that starts like it is
+    // something else.
+    assert_eq!(completed_name("age", b"age\0agenix\0"), "age");
+    assert_eq!(
+        completed_name("sh", b"/bin/dash\0shutdown-everything\0"),
+        "sh"
+    );
+    // Only the program and what it runs are looked at, not its arguments.
+    assert_eq!(
+        completed_name("fifteen-letters", b"sh\0-c\0x\0fifteen-letters-and-more\0"),
+        "fifteen-letters"
+    );
+    // A name a process gave itself, which no file has.
+    assert_eq!(
+        completed_name("renamed-by-prct", b"/usr/bin/worker\0"),
+        "renamed-by-prct"
+    );
+    assert_eq!(
+        completed_name("fifteen-letters", &[0xff, 0xfe, 0]),
+        "fifteen-letters"
+    );
 }

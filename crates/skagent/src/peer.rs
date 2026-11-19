@@ -233,7 +233,38 @@ fn proc_path(pid: u32, file: &str) -> PathBuf {
 
 /// The name and the parent of process `pid`.
 fn process(pid: u32) -> Option<(String, u32)> {
-    parse_stat(&fs::read_to_string(proc_path(pid, "stat")).ok()?)
+    let (name, parent) = parse_stat(&fs::read_to_string(proc_path(pid, "stat")).ok()?)?;
+    let name = match fs::read(proc_path(pid, "cmdline")) {
+        Ok(command_line) => completed_name(&name, &command_line),
+        Err(_) => name,
+    };
+    Some((name, parent))
+}
+
+/// Bytes of a name the process list keeps (`TASK_COMM_LEN` without its NUL).
+const LISTED_NAME_BYTES: usize = 15;
+
+/// Arguments of a command line looked at for the rest of a name: the
+/// program, and the script an interpreter runs.
+const NAME_ARGUMENTS: usize = 3;
+
+/// `name` as the process list has it, with the rest the kernel cut off: a
+/// name of 15 bytes may be the start of a longer one, and then the command
+/// line (`/proc/<pid>/cmdline`, arguments ending in NUL) has it as the file
+/// name of the program or of the script it runs. `skagent-age-che` is
+/// `skagent-age-check` there.
+#[must_use]
+pub fn completed_name(name: &str, command_line: &[u8]) -> String {
+    if name.len() != LISTED_NAME_BYTES {
+        return name.to_owned();
+    }
+    command_line
+        .split(|byte| *byte == 0)
+        .take(NAME_ARGUMENTS)
+        .filter_map(|argument| std::str::from_utf8(argument).ok())
+        .filter_map(|argument| argument.rsplit('/').next())
+        .find(|file_name| file_name.starts_with(name))
+        .map_or_else(|| name.to_owned(), str::to_owned)
 }
 
 /// The name and the parent's pid from the content of `/proc/<pid>/stat`:
