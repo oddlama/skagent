@@ -22,6 +22,24 @@ use crate::frames::BoundedStream;
 /// File name of the socket inside `$XDG_RUNTIME_DIR`.
 pub const DEFAULT_SOCKET_NAME: &str = "skagent.sock";
 
+/// What the socket for age requests is called next to a socket `name.sock`:
+/// `name-age.sock`.
+const AGE_SOCKET_SUFFIX: &str = "-age";
+
+/// Where the socket for age requests is by default: next to the ssh-agent
+/// socket `ssh`, named after it. `skagent.sock` gives `skagent-age.sock`, so
+/// several agents with sockets of their own don't meet on one path.
+#[must_use]
+pub fn age_socket_path(ssh: &Path) -> PathBuf {
+    let mut name = ssh.file_stem().unwrap_or_default().to_owned();
+    name.push(AGE_SOCKET_SUFFIX);
+    if let Some(extension) = ssh.extension() {
+        name.push(".");
+        name.push(extension);
+    }
+    ssh.with_file_name(name)
+}
+
 /// Pause after a transient `accept` failure (e.g. out of file descriptors),
 /// so a persistent condition doesn't turn into a busy loop.
 const ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);

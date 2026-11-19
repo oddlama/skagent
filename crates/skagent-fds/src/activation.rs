@@ -16,7 +16,7 @@ use std::os::fd::{BorrowedFd, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::net::UnixListener;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::{Context as _, Result, anyhow, bail, ensure};
+use anyhow::{Context as _, Result, anyhow, ensure};
 use rustix::io::{FdFlags, fcntl_getfd, fcntl_setfd};
 use rustix::net::sockopt::{socket_acceptconn, socket_domain, socket_type};
 use rustix::net::{AddressFamily, SocketType};
@@ -81,18 +81,56 @@ pub fn check_listener(fd: BorrowedFd<'_>) -> Result<()> {
     Ok(())
 }
 
-/// The listening socket systemd passed to this process, if any. Close on
-/// exec and non-blocking, ready for an async runtime.
+/// Most sockets the agent takes over: the ssh-agent socket and the one for
+/// age requests.
+pub const MAX_PASSED_SOCKETS: u32 = 2;
+
+/// A listening socket systemd passed.
+#[derive(Debug)]
+pub struct Passed {
+    /// Its name: `FileDescriptorName=` of the socket unit, else the unit's
+    /// name. `None` if systemd named nothing.
+    pub name: Option<String>,
+    /// The socket: close on exec and non-blocking, ready for an async runtime.
+    pub listener: UnixListener,
+}
+
+/// The names of `count` passed sockets from the value of `LISTEN_FDNAMES`
+/// (`sd_listen_fds_with_names(3)`): one per socket, separated by colons.
 ///
-/// Call it early, from one place: the descriptor gets exactly one owner, a
+/// # Errors
+///
+/// Returns an error if the variable names another number of sockets or
+/// isn't UTF-8.
+pub fn passed_names(listen_fdnames: Option<&OsStr>, count: u32) -> Result<Vec<Option<String>>> {
+    let count = usize::try_from(count).context("more passed sockets than fit this machine")?;
+    let Some(names) = listen_fdnames else {
+        return Ok(vec![None; count]);
+    };
+    let names = names
+        .to_str()
+        .ok_or_else(|| anyhow!("LISTEN_FDNAMES={} is not UTF-8", names.display()))?;
+    let names: Vec<Option<String>> = names.split(':').map(|name| Some(name.to_owned())).collect();
+    ensure!(
+        names.len() == count,
+        "LISTEN_FDNAMES names {} sockets, LISTEN_FDS passes {count}",
+        names.len()
+    );
+    Ok(names)
+}
+
+/// The listening sockets systemd passed to this process, in the order it
+/// passed them, each with its name.
+///
+/// Call it early, from one place: every descriptor gets exactly one owner, a
 /// second call is an error.
 ///
 /// # Errors
 ///
 /// Returns an error if the variables are malformed, if systemd passed more
-/// than one socket, if the passed descriptor isn't a listening unix stream
-/// socket, or if it can't be configured.
-pub fn activated_listener() -> Result<Option<UnixListener>> {
+/// than [`MAX_PASSED_SOCKETS`], if a passed descriptor isn't a listening unix
+/// stream socket, or if it can't be configured.
+pub fn activated_listeners() -> Result<Vec<Passed>> {
     let count = passed_sockets(
         rustix::process::getpid()
             .as_raw_nonzero()
@@ -101,32 +139,44 @@ pub fn activated_listener() -> Result<Option<UnixListener>> {
         std::env::var_os("LISTEN_PID").as_deref(),
         std::env::var_os("LISTEN_FDS").as_deref(),
     )?;
-    match count {
-        0 => return Ok(None),
-        1 => {}
-        _ => bail!("systemd passed {count} sockets; exactly one ListenStream= is supported"),
+    if count == 0 {
+        return Ok(Vec::new());
     }
     ensure!(
+        count <= MAX_PASSED_SOCKETS,
+        "systemd passed {count} sockets; skagent takes its ssh-agent socket and one named \"age\""
+    );
+    let names = passed_names(std::env::var_os("LISTEN_FDNAMES").as_deref(), count)?;
+    ensure!(
         !TAKEN.swap(true, Ordering::SeqCst),
-        "the socket systemd passed was taken over already"
+        "the sockets systemd passed were taken over already"
     );
 
-    // SAFETY: LISTEN_PID names this process, so systemd passed descriptor 3
-    // open across exec. It has been open since the process started, so no
-    // later open() can have reused the number, and `TAKEN` makes this the
-    // only place that claims it.
-    let borrowed = unsafe { BorrowedFd::borrow_raw(FIRST_PASSED_FD) };
-    check_listener(borrowed)?;
-    // Passed descriptors are inheritable; the agent's prompts must not get it.
-    let flags = fcntl_getfd(borrowed).context("reading the passed socket's descriptor flags")?;
-    fcntl_setfd(borrowed, flags | FdFlags::CLOEXEC)
-        .context("marking the passed socket close-on-exec")?;
-    // SAFETY: as above; the listener becomes the descriptor's only owner and
-    // closes it once.
-    let owned = unsafe { OwnedFd::from_raw_fd(FIRST_PASSED_FD) };
-    let listener = UnixListener::from(owned);
-    listener
-        .set_nonblocking(true)
-        .context("making the passed socket non-blocking")?;
-    Ok(Some(listener))
+    let mut passed = Vec::new();
+    for (offset, name) in (0..).zip(names) {
+        let fd = FIRST_PASSED_FD
+            .checked_add(offset)
+            .context("a passed descriptor number that doesn't exist")?;
+        // SAFETY: LISTEN_PID names this process, so systemd passed the
+        // descriptors from 3 on, `count` of them, open across exec. They
+        // have been open since the process started, so no later open() can
+        // have reused a number, and `TAKEN` makes this the only place that
+        // claims them.
+        let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+        check_listener(borrowed)?;
+        // Passed descriptors are inheritable; the agent's prompts must not
+        // get them.
+        let flags = fcntl_getfd(borrowed).context("reading a passed socket's descriptor flags")?;
+        fcntl_setfd(borrowed, flags | FdFlags::CLOEXEC)
+            .context("marking a passed socket close-on-exec")?;
+        // SAFETY: as above; the listener becomes the descriptor's only owner
+        // and closes it once.
+        let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+        let listener = UnixListener::from(owned);
+        listener
+            .set_nonblocking(true)
+            .context("making a passed socket non-blocking")?;
+        passed.push(Passed { name, listener });
+    }
+    Ok(passed)
 }

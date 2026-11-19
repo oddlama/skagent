@@ -148,6 +148,11 @@
               clippy-pinentry = config.packages.pinentry.clippy;
               licenses-pinentry = config.packages.pinentry.licenses;
               tests-pinentry = config.packages.pinentry;
+              vm-age = import ./nix/tests/age.nix {
+                inherit pkgs;
+                package = config.packages.default;
+                testkey = config.packages.testkey;
+              };
               vm-agent = import ./nix/tests/agent.nix {
                 inherit pkgs;
                 package = config.packages.default;
@@ -202,6 +207,7 @@
                 shippedCrates = [
                   "skagent"
                   "skagent-age"
+                  "skagent-age-plugin"
                   "skagent-fido"
                   "skagent-fds"
                   "skagent-popup"

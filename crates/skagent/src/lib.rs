@@ -6,6 +6,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![forbid(unsafe_code)]
 
+pub mod age;
 pub mod agent;
 pub mod bindings;
 pub mod cancel;
@@ -24,6 +25,7 @@ pub mod logind;
 pub mod notify;
 pub mod output;
 pub mod pairing;
+pub mod peer;
 pub mod pin_cache;
 pub mod pinentry;
 pub mod popup;

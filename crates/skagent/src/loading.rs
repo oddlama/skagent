@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use skagent_fido::PairingCredential;
+use skagent_fido::{AgeCredential, PairingCredential};
 use skagent_popup::{Key, SecurityKey, State};
 use skagent_secret::SecretBuffer;
 
@@ -15,6 +15,8 @@ use crate::signer::SigningTicket;
 /// Keeps the device locked until identity insertion and cache priming finish.
 pub(crate) struct PreparedLoad {
     pub identities: Vec<SkIdentity>,
+    /// The age credentials on the security key.
+    pub age: Vec<AgeCredential>,
     pub pin: SecretBuffer,
     /// skagent's pairing on the key loaded from, if paired.
     pub pairing: Option<PairingCredential>,

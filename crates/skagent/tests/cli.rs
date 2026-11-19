@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail, ensure};
 use clap::{CommandFactory as _, Parser as _};
-use skagent::cli::{Cli, Command, ServeArgs, parse_duration};
+use skagent::cli::{AgeCommand, Cli, Command, ServeArgs, parse_duration};
 use skagent::prompt::PinPrompt;
 use skagent::serve::pin_prompt;
 
@@ -16,7 +16,7 @@ fn serve(args: &[&str]) -> Result<ServeArgs> {
         Cli::try_parse_from(["skagent", "serve"].iter().chain(args)).context("parsing serve")?;
     match cli.command {
         Command::Serve(args) => Ok(args),
-        Command::Forget(_) | Command::Load(_) | Command::CheckConfig(_) => {
+        Command::Forget(_) | Command::Load(_) | Command::CheckConfig(_) | Command::Age(_) => {
             bail!("not parsed as serve")
         }
     }
@@ -185,5 +185,50 @@ fn the_popup_replaces_pinentry_and_askpass() -> Result<()> {
     ensure!(args.popup.as_deref() == Some(Path::new("/run/skagent-pinentry")));
     ensure!(serve(&["--popup", "/x", "--pinentry", "/y"]).is_err());
     ensure!(serve(&["--popup", "/x", "--askpass", "/y"]).is_err());
+    Ok(())
+}
+
+fn age(args: &[&str]) -> Result<AgeCommand> {
+    let cli = Cli::try_parse_from(["skagent", "age"].iter().chain(args)).context("parsing age")?;
+    match cli.command {
+        Command::Age(args) => Ok(args.command),
+        _ => bail!("not parsed as age"),
+    }
+}
+
+#[test]
+fn serve_listens_for_age_requests_next_to_its_socket_unless_told_where() -> Result<()> {
+    ensure!(serve(&[])?.age_socket.is_none());
+    let args = serve(&["--age-socket", "/tmp/age.sock"])?;
+    ensure!(args.age_socket.as_deref() == Some(Path::new("/tmp/age.sock")));
+    Ok(())
+}
+
+#[test]
+fn age_identities_are_created_listed_and_written_out() -> Result<()> {
+    ensure!(matches!(
+        age(&["new"])?,
+        AgeCommand::New { another: false, ref socket } if socket.age_socket.is_none()
+    ));
+    ensure!(matches!(
+        age(&["new", "--another", "--age-socket", "/tmp/age.sock"])?,
+        AgeCommand::New { another: true, ref socket }
+            if socket.age_socket.as_deref() == Some(Path::new("/tmp/age.sock"))
+    ));
+    ensure!(matches!(age(&["list"])?, AgeCommand::List(ref socket) if socket.age_socket.is_none()));
+    ensure!(matches!(
+        age(&["identity"])?,
+        AgeCommand::Identity {
+            recipient: None,
+            ..
+        }
+    ));
+    ensure!(matches!(
+        age(&["identity", "age1pq1example"])?,
+        AgeCommand::Identity { recipient: Some(ref recipient), .. } if recipient == "age1pq1example"
+    ));
+    // Nothing takes a PIN, and `age` alone does nothing.
+    ensure!(age(&[]).is_err());
+    ensure!(age(&["new", "--pin", "123456"]).is_err());
     Ok(())
 }

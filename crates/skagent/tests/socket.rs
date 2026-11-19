@@ -11,7 +11,8 @@ use std::path::Path;
 use anyhow::{Context as _, Result, ensure};
 use rustix::io::Errno;
 use skagent::socket::{
-    DEFAULT_SOCKET_NAME, bind, default_socket_path, is_transient_accept_error, peer_allowed,
+    DEFAULT_SOCKET_NAME, age_socket_path, bind, default_socket_path, is_transient_accept_error,
+    peer_allowed,
 };
 
 #[test]
@@ -19,6 +20,23 @@ fn default_socket_path_lives_in_the_runtime_dir() -> Result<()> {
     let path = default_socket_path(Some(OsStr::new("/run/user/1000")))?;
     ensure!(path == Path::new("/run/user/1000").join(DEFAULT_SOCKET_NAME));
     Ok(())
+}
+
+#[test]
+fn the_socket_for_age_requests_is_named_after_the_ssh_agent_socket() {
+    // Several agents with sockets of their own don't meet on one path.
+    for (ssh, age) in [
+        (
+            "/run/user/1000/skagent.sock",
+            "/run/user/1000/skagent-age.sock",
+        ),
+        ("/tmp/agent.sock", "/tmp/agent-age.sock"),
+        ("/tmp/a.b.sock", "/tmp/a.b-age.sock"),
+        ("/tmp/agent", "/tmp/agent-age"),
+        ("agent.sock", "agent-age.sock"),
+    ] {
+        assert_eq!(age_socket_path(Path::new(ssh)), Path::new(age), "{ssh}");
+    }
 }
 
 #[test]

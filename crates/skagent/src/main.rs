@@ -3,13 +3,16 @@
 #![forbid(unsafe_code)]
 
 use std::io::{self, IsTerminal as _, Write as _};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use clap::Parser as _;
-use skagent::cli::{CheckConfigArgs, Cli, Command};
+use skagent::cli::{AgeCommand, AgeSocketArgs, CheckConfigArgs, Cli, Command};
 use skagent::config::Config;
-use skagent::{client, hardening, logging, output, serve};
+use skagent::serve::Activated;
+use skagent::{client, hardening, logging, output, serve, socket};
+use skagent_age::Recipient;
 
 fn main() -> ExitCode {
     let color = output::color_enabled(
@@ -31,17 +34,24 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli, color: bool) -> Result<()> {
-    // First, before any secret can enter the process.
-    hardening::harden_process()?;
+    // First, before any secret can enter the process. `skagent age` holds
+    // none, and the agent has to be able to see which program asks it.
+    if matches!(cli.command, Command::Age(_)) {
+        hardening::disable_core_dumps()?;
+    } else {
+        hardening::harden_process()?;
+    }
     logging::init(&cli.log, color)?;
 
     // Before the runtime opens descriptors of its own, while the passed
-    // socket is the only unowned one.
+    // sockets are the only unowned ones.
     let activated = match &cli.command {
-        Command::Serve(_) => {
-            skagent_fds::activated_listener().context("taking over the socket systemd passed")?
+        Command::Serve(_) => Activated::from_passed(
+            skagent_fds::activated_listeners().context("taking over the sockets systemd passed")?,
+        )?,
+        Command::Forget(_) | Command::Load(_) | Command::CheckConfig(_) | Command::Age(_) => {
+            Activated::default()
         }
-        Command::Forget(_) | Command::Load(_) | Command::CheckConfig(_) => None,
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -55,11 +65,95 @@ fn run(cli: Cli, color: bool) -> Result<()> {
                 return writeln!(io::stdout(), "No security key connected, nothing to load.")
                     .context("writing the resident-loading result");
             }
-            let count = runtime.block_on(client::load_keys(&serve::socket_path(args.socket)?))?;
-            writeln!(io::stdout(), "Loaded {count} resident SSH key(s).")
-                .context("writing the resident-loading result")
+            let loaded = runtime.block_on(client::load_keys(&serve::socket_path(args.socket)?))?;
+            let mut stdout = io::stdout().lock();
+            writeln!(stdout, "Loaded {} resident SSH key(s).", loaded.keys)
+                .context("writing the resident-loading result")?;
+            if loaded.age_identities > 0 {
+                writeln!(stdout, "Found {} age identity(ies).", loaded.age_identities)
+                    .context("writing the resident-loading result")?;
+            }
+            Ok(())
         }
         Command::CheckConfig(args) => check_config(&args),
+        Command::Age(args) => age(&runtime, args.command),
+    }
+}
+
+/// The agent's socket for age requests: `--age-socket`, else next to the
+/// default ssh-agent socket.
+fn age_socket(args: AgeSocketArgs) -> Result<PathBuf> {
+    match args.age_socket {
+        Some(path) => Ok(path),
+        None => Ok(socket::age_socket_path(&socket::default_socket_path(
+            std::env::var_os("XDG_RUNTIME_DIR").as_deref(),
+        )?)),
+    }
+}
+
+/// `skagent age`: what the user needs on stdout, hints on stderr.
+fn age(runtime: &tokio::runtime::Runtime, command: AgeCommand) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    match command {
+        AgeCommand::New { socket, another } => {
+            let recipient = runtime.block_on(client::age_new(&age_socket(socket)?, another))?;
+            writeln!(stdout, "{recipient}").context("writing the new identity's recipient")?;
+            writeln!(
+                io::stderr(),
+                "Created an age identity. Encrypt to the recipient above with `age -r`.\n\
+                 `skagent age identity > FILE` writes the identity file for `age -d -i FILE`.\n\
+                 The key exists on this security key only: give every file a second recipient."
+            )
+            .context("writing the hints")
+        }
+        AgeCommand::List(socket) => {
+            let identities = runtime.block_on(client::age_list(&age_socket(socket)?))?;
+            let unknown = identities
+                .iter()
+                .filter(|identity| identity.is_none())
+                .count();
+            for recipient in identities.iter().flatten() {
+                writeln!(stdout, "{recipient}").context("writing a recipient")?;
+            }
+            if unknown > 0 {
+                writeln!(
+                    io::stderr(),
+                    "{unknown} more identity(ies) whose recipient skagent hasn't derived on this \
+                     machine yet: decrypt a file with one, and it is listed."
+                )
+                .context("writing the hints")?;
+            }
+            if identities.is_empty() {
+                writeln!(
+                    io::stderr(),
+                    "No age identities known. `skagent load` finds the ones on a security key, \
+                     `skagent age new` creates one."
+                )
+                .context("writing the hints")?;
+            }
+            Ok(())
+        }
+        AgeCommand::Identity { socket, recipient } => {
+            let recipient: Recipient = if let Some(recipient) = recipient {
+                recipient.parse()?
+            } else {
+                let identities = runtime.block_on(client::age_list(&age_socket(socket)?))?;
+                let mut known = identities.into_iter().flatten();
+                match (known.next(), known.next()) {
+                    (Some(only), None) => only,
+                    (None, _) => bail!(
+                        "skagent knows no age identity with its recipient yet; pass the \
+                         recipient (age1pq1…)"
+                    ),
+                    (Some(_), Some(_)) => bail!(
+                        "skagent knows several age identities; pass the recipient of the one \
+                         you mean (`skagent age list` prints them)"
+                    ),
+                }
+            };
+            write!(stdout, "{}", client::identity_file(&recipient))
+                .context("writing the identity file")
+        }
     }
 }
 

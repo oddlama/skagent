@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 
+use crate::age::{AgeIdentities, default_age_path};
 use crate::agent::SkAgent;
 use crate::bindings::{Bindings, default_bindings_path};
 use crate::cli::{SecretMemory, ServeArgs, SocketArgs};
@@ -15,6 +16,7 @@ use crate::config::{self, Config};
 use crate::identities::{IdentityStore, default_keys_path};
 use crate::logind;
 use crate::notify::Notifier;
+use crate::peer::OwnPrograms;
 use crate::pin_cache::CachePolicy;
 use crate::pinentry::Pinentry;
 use crate::popup::Popup;
@@ -93,6 +95,48 @@ pub enum Listening {
     Activated(std::os::unix::net::UnixListener),
 }
 
+/// What systemd calls the socket for age requests: `FileDescriptorName=age`
+/// in its socket unit. A socket of any other name is the ssh-agent socket.
+pub const AGE_SOCKET_NAME: &str = "age";
+
+/// The sockets systemd passed (socket activation).
+#[derive(Debug, Default)]
+pub struct Activated {
+    /// The ssh-agent socket.
+    pub ssh: Option<std::os::unix::net::UnixListener>,
+    /// The socket for age requests.
+    pub age: Option<std::os::unix::net::UnixListener>,
+}
+
+impl Activated {
+    /// Tells the passed sockets apart by their names.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for two sockets of the same kind, or a socket for
+    /// age requests without an ssh-agent socket.
+    pub fn from_passed(passed: Vec<skagent_fds::Passed>) -> Result<Self> {
+        let mut activated = Self::default();
+        for socket in passed {
+            let slot = if socket.name.as_deref() == Some(AGE_SOCKET_NAME) {
+                &mut activated.age
+            } else {
+                &mut activated.ssh
+            };
+            if slot.replace(socket.listener).is_some() {
+                bail!(
+                    "systemd passed two sockets of the same kind; name the one for age requests \
+                     with FileDescriptorName={AGE_SOCKET_NAME}"
+                );
+            }
+        }
+        if activated.age.is_some() && activated.ssh.is_none() {
+            bail!("systemd passed a socket for age requests, but no ssh-agent socket");
+        }
+        Ok(activated)
+    }
+}
+
 /// Path of a socket systemd passed.
 ///
 /// # Errors
@@ -109,8 +153,69 @@ pub fn activated_path(listener: &std::os::unix::net::UnixListener) -> Result<Pat
         .context("the socket systemd passed has no path; use ListenStream=%t/skagent.sock")
 }
 
+/// Where the agent listens: on the sockets systemd passed, else on ones it
+/// binds at `socket` (or the default path) and, for age requests, at
+/// `age_socket` (or next to the first).
+fn sockets(
+    activated: Activated,
+    socket: SocketArgs,
+    age_socket: Option<PathBuf>,
+) -> Result<(Listening, Option<Listening>)> {
+    let Some(listener) = activated.ssh else {
+        let path = socket_path(socket)?;
+        let age = age_socket.unwrap_or_else(|| socket::age_socket_path(&path));
+        return Ok((Listening::Bind(path), Some(Listening::Bind(age))));
+    };
+    let passed = activated_path(&listener)?;
+    if let Some(given) = &socket.socket {
+        anyhow::ensure!(
+            *given == passed,
+            "systemd passed the socket {}, but --socket or SKAGENT_SOCKET names {}",
+            passed.display(),
+            given.display()
+        );
+    }
+    if activated.age.is_none() {
+        tracing::info!(
+            "systemd passed no socket named \"{AGE_SOCKET_NAME}\": not answering age requests"
+        );
+    }
+    Ok((
+        Listening::Activated(listener),
+        activated.age.map(Listening::Activated),
+    ))
+}
+
+/// The keys and the age identities remembered from before a restart, where
+/// they can be remembered at all.
+fn remembered() -> (IdentityStore, AgeIdentities) {
+    let state_home = std::env::var_os("XDG_STATE_HOME");
+    let home = std::env::var_os("HOME");
+    let identities = match default_keys_path(state_home.as_deref(), home.as_deref()) {
+        Ok(file) => IdentityStore::remembered_in(file),
+        Err(error) => {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "not remembering keys across restarts"
+            );
+            IdentityStore::default()
+        }
+    };
+    let age = match default_age_path(state_home.as_deref(), home.as_deref()) {
+        Ok(file) => AgeIdentities::remembered_in(file),
+        Err(error) => {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "not remembering age identities across restarts"
+            );
+            AgeIdentities::default()
+        }
+    };
+    (identities, age)
+}
+
 /// Runs `skagent serve` until SIGINT or SIGTERM, on `activated` if systemd
-/// passed a socket, else on one it binds.
+/// passed sockets, else on ones it binds.
 ///
 /// # Errors
 ///
@@ -118,10 +223,7 @@ pub fn activated_path(listener: &std::os::unix::net::UnixListener) -> Result<Pat
 /// resolved or bound, or
 /// `--socket` names another socket than the one systemd passed, the signal
 /// handlers can't be installed, or serving fails.
-pub async fn run(
-    args: ServeArgs,
-    activated: Option<std::os::unix::net::UnixListener>,
-) -> Result<()> {
+pub async fn run(args: ServeArgs, activated: Activated) -> Result<()> {
     skagent_fido::ensure_debug_off().context("refusing to serve")?;
     // Before any secret exists: the first buffer fixes where all of them live.
     if args.secret_memory == SecretMemory::MemfdSecret {
@@ -160,21 +262,7 @@ pub async fn run(
     } else {
         tracing::info!("PIN caching disabled, asking for every signature");
     }
-    let listening = match activated {
-        Some(listener) => {
-            let passed = activated_path(&listener)?;
-            if let Some(given) = &args.socket.socket {
-                anyhow::ensure!(
-                    *given == passed,
-                    "systemd passed the socket {}, but --socket or SKAGENT_SOCKET names {}",
-                    passed.display(),
-                    given.display()
-                );
-            }
-            Listening::Activated(listener)
-        }
-        None => Listening::Bind(socket_path(args.socket)?),
-    };
+    let (listening, age_listening) = sockets(activated, args.socket, args.age_socket)?;
     for rule in &args.pin_policies {
         tracing::info!(?rule, "caching the PINs of matching keys differently");
     }
@@ -201,24 +289,32 @@ pub async fn run(
     } else {
         signer = signer.with_notifier(Arc::new(Notifier::default()));
     }
-    let identities = match default_keys_path(
-        std::env::var_os("XDG_STATE_HOME").as_deref(),
-        std::env::var_os("HOME").as_deref(),
-    ) {
-        Ok(file) => IdentityStore::remembered_in(file),
+    let (identities, age) = remembered();
+    // The socket for age requests only answers skagent's own programs, and
+    // without knowing them it answers nobody.
+    let (own, age_listening) = match OwnPrograms::locate() {
+        Ok(own) => {
+            if !own.has_plugin() {
+                tracing::info!(
+                    plugin = %own.plugin_path().display(),
+                    "the age plugin isn't installed next to the agent: decryptions are refused"
+                );
+            }
+            (Some(own), age_listening)
+        }
         Err(error) => {
             tracing::warn!(
                 error = %format!("{error:#}"),
-                "not remembering keys across restarts"
+                "can't find the agent's own executable: not answering age requests"
             );
-            IdentityStore::default()
+            (None, None)
         }
     };
-    let agent = SkAgent::with_identities(signer, identities);
+    let agent = SkAgent::with_stores(signer, identities, age, own);
     // Installed before the socket exists, so a signal can't kill the process
     // between binding and serving and leave a stale socket behind.
     let signals = ShutdownSignals::install()?;
-    serve_until(listening, agent, signals.wait()).await
+    serve_sockets_until(listening, age_listening, agent, signals.wait()).await
 }
 
 /// Serves `agent` until `shutdown` completes, then drops all cached PINs and
@@ -232,24 +328,101 @@ pub async fn serve_until<F>(listening: Listening, agent: SkAgent, shutdown: F) -
 where
     F: Future<Output = Result<()>>,
 {
+    serve_sockets_until(listening, None, agent, shutdown).await
+}
+
+/// A socket the agent serves: the listener, its path, and what to remove on
+/// shutdown if the agent bound it itself.
+struct Served {
+    listener: tokio::net::UnixListener,
+    path: PathBuf,
+    bound: Option<socket::BoundSocket>,
+}
+
+impl Served {
+    fn open(listening: Listening) -> Result<Self> {
+        match listening {
+            Listening::Bind(path) => {
+                let (listener, bound) = socket::bind(&path)?;
+                Ok(Self {
+                    listener,
+                    path,
+                    bound: Some(bound),
+                })
+            }
+            Listening::Activated(listener) => {
+                let path = activated_path(&listener)?;
+                let listener = tokio::net::UnixListener::from_std(listener)
+                    .context("serving the socket systemd passed")?;
+                Ok(Self {
+                    listener,
+                    path,
+                    bound: None,
+                })
+            }
+        }
+    }
+}
+
+/// [`serve_until`], also answering age requests on the socket `age`, if
+/// there is one. That socket failing to open only costs the age requests,
+/// with a warning.
+///
+/// # Errors
+///
+/// Returns an error where [`serve_until`] does.
+pub async fn serve_sockets_until<F>(
+    listening: Listening,
+    age: Option<Listening>,
+    agent: SkAgent,
+    shutdown: F,
+) -> Result<()>
+where
+    F: Future<Output = Result<()>>,
+{
     agent.caching_pending().await;
-    let (listener, socket_path, bound) = match listening {
-        Listening::Bind(path) => {
-            let (listener, bound) = socket::bind(&path)?;
-            (listener, path, Some(bound))
-        }
-        Listening::Activated(listener) => {
-            let path = activated_path(&listener)?;
-            let listener = tokio::net::UnixListener::from_std(listener)
-                .context("serving the socket systemd passed")?;
-            (listener, path, None)
-        }
-    };
+    let Served {
+        listener,
+        path: socket_path,
+        bound,
+    } = Served::open(listening)?;
     tracing::info!(
         socket = %socket_path.display(),
         activated = bound.is_none(),
         "agent listening, point SSH_AUTH_SOCK at the socket"
     );
+    let age = age.and_then(|listening| match Served::open(listening) {
+        Ok(open) => {
+            tracing::info!(
+                socket = %open.path.display(),
+                activated = open.bound.is_none(),
+                "answering age requests"
+            );
+            Some(open)
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                "can't open the socket for age requests: not answering them"
+            );
+            None
+        }
+    });
+    let (age_listener, age_bound) = match age {
+        Some(open) => (Some((open.listener, open.path)), open.bound),
+        None => (None, None),
+    };
+    let age_served = async {
+        match age_listener {
+            Some((listener, path)) => ssh_agent_lib::agent::listen(
+                PeerCheckedListener::new(listener, &path),
+                agent.age_socket(),
+            )
+            .await
+            .with_context(|| format!("serving age requests on {}", path.display())),
+            None => std::future::pending().await,
+        }
+    };
 
     let served = tokio::select! {
         result = ssh_agent_lib::agent::listen(PeerCheckedListener::new(listener, &socket_path), agent.clone()) => {
@@ -257,12 +430,22 @@ where
                 format!("serving the ssh-agent protocol on {}", socket_path.display())
             })
         }
+        result = age_served => result,
         result = sweep_expired(agent.clone()) => result,
         result = logind::watch(agent.clone()) => result,
         result = shutdown => result,
     };
     agent.forget_pins("shutdown").await;
 
+    let age_removed = age_bound
+        .as_ref()
+        .map_or(Ok(()), socket::BoundSocket::remove);
+    if let Err(error) = &age_removed {
+        tracing::error!(
+            error = format!("{error:#}"),
+            "removing the socket for age requests"
+        );
+    }
     let removed = bound.as_ref().map_or(Ok(()), socket::BoundSocket::remove);
     match (served, removed) {
         (Ok(()), removed) => removed,

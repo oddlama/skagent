@@ -14,6 +14,13 @@ path = "src/lib.rs"
 name = "skagent"
 path = "src/main.rs"
 
+# age's plugin for skagent's identities. A binary of this package so it is
+# always installed next to the agent, which recognizes it by that. It uses
+# nothing of the library, and so doesn't link libfido2.
+[[bin]]
+name = "age-plugin-skagent"
+path = "src/plugin.rs"
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
@@ -24,6 +31,8 @@ rustix = { workspace = true, features = ["rand"] }
 serde.workspace = true
 sha2.workspace = true
 signature.workspace = true
+skagent-age.workspace = true
+skagent-age-plugin.workspace = true
 skagent-fds.workspace = true
 skagent-fido.workspace = true
 skagent-popup.workspace = true

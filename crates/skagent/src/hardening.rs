@@ -16,6 +16,21 @@ use rustix::process::{DumpableBehavior, Resource, Rlimit, set_dumpable_behavior,
 ///
 /// Returns an error if the core dump limit or the dumpable flag can't be set.
 pub fn harden_process() -> Result<()> {
+    disable_core_dumps()?;
+    set_dumpable_behavior(DumpableBehavior::NotDumpable)
+        .context("marking the process non-dumpable (prctl PR_SET_DUMPABLE to 0)")?;
+    Ok(())
+}
+
+/// `RLIMIT_CORE = 0` alone, for skagent's programs that talk to the agent's
+/// socket for age requests. The agent recognizes them by their executable
+/// (`/proc/<pid>/exe`), which the kernel hides for a non-dumpable process.
+/// They hold no PIN and no long-term secret.
+///
+/// # Errors
+///
+/// Returns an error if the core dump limit can't be set.
+pub fn disable_core_dumps() -> Result<()> {
     setrlimit(
         Resource::Core,
         Rlimit {
@@ -23,8 +38,5 @@ pub fn harden_process() -> Result<()> {
             maximum: Some(0),
         },
     )
-    .context("disabling core dumps (setrlimit RLIMIT_CORE to 0)")?;
-    set_dumpable_behavior(DumpableBehavior::NotDumpable)
-        .context("marking the process non-dumpable (prctl PR_SET_DUMPABLE to 0)")?;
-    Ok(())
+    .context("disabling core dumps (setrlimit RLIMIT_CORE to 0)")
 }

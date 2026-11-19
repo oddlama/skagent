@@ -9,6 +9,8 @@
 //! [`Job`] is what differs: a signature with an SSH key here, the secret of
 //! an age identity in [`crate::age`].
 
+mod age;
+
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, PoisonError};
@@ -18,7 +20,8 @@ use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use sha2::{Digest as _, Sha256};
 use signature::Verifier as _;
 use skagent_fido::{
-    AssertRequest, ErrorKind, PairingCredential, ResidentCredential, Statement, error_kind,
+    AgeCredential, AssertRequest, ErrorKind, PairingCredential, ResidentCredential, Statement,
+    error_kind,
 };
 use skagent_popup::{Failure, Host, Key, Mistake, Queued, Request, SecurityKey, State as Shown};
 use skagent_secret::SecretBuffer;
@@ -26,7 +29,7 @@ use ssh_agent_lib::ssh_key::{Algorithm, Signature};
 use tokio::sync::{Mutex, watch};
 
 use crate::bindings::{
-    Bindings, Missing, NotPluggedIn, SerialClaimedTwice, Unrecognized, present_first,
+    Bindings, Missing, NotPluggedIn, Presence, SerialClaimedTwice, Unrecognized, present_first,
 };
 use crate::cancel::{DeviceInterrupt, Ended};
 use crate::config::Config;
@@ -509,13 +512,19 @@ impl Signer {
     /// Authorizes a request for `identity`, also revoked when that identity
     /// is removed or expires.
     pub async fn ticket_for(&self, identity: &SkIdentity) -> SigningTicket {
+        self.ticket_for_credential(credential_key(identity)).await
+    }
+
+    /// Authorizes a request for the credential `key`, see
+    /// [`Signer::ticket_for`].
+    async fn ticket_for_credential(&self, key: CredentialKey) -> SigningTicket {
         let mut state = self.state.lock().await;
         state
             .revocations
             .retain(|_, sender| sender.receiver_count() > 0);
         let credential = state
             .revocations
-            .entry(credential_key(identity))
+            .entry(key)
             .or_insert_with(|| watch::channel(()).0)
             .subscribe();
         SigningTicket {
@@ -694,7 +703,7 @@ impl Signer {
             {
                 self.state.lock().await.cache.evict_device(&routed.identity);
             }
-            let (credentials, retries) = match outcome {
+            let (credentials, age, retries) = match outcome {
                 Ok(listed) => listed,
                 Err(error) => {
                     // In the popup the user just types it again.
@@ -713,8 +722,9 @@ impl Signer {
                 .identity
                 .ensure_present()
                 .context("during resident loading")?;
-            // The PIN worked and the key holds SSH keys: pair with it, once.
-            let (routed, pairing) = if credentials.is_empty() {
+            // The PIN worked and the key holds keys of ours: pair with it,
+            // once.
+            let (routed, pairing) = if credentials.is_empty() && age.is_empty() {
                 (routed, None)
             } else {
                 self.pair(None, ticket, session.as_deref_mut(), routed, &pin)
@@ -723,6 +733,7 @@ impl Signer {
             ticket.check()?;
             return Ok(PreparedLoad {
                 identities: credentials.iter().map(SkIdentity::from_resident).collect(),
+                age,
                 pin,
                 pairing,
                 routed,
@@ -793,8 +804,25 @@ impl Signer {
             .context("before committing resident credentials")?;
         // Allocate every copy before modifying state. An mlock failure cannot
         // leave a partially primed cache or partially loaded identity list.
+        let age_keys: Vec<CredentialKey> = loaded
+            .age
+            .iter()
+            .map(|credential| CredentialKey::new(skagent_fido::AGE_RP_ID, credential.id()))
+            .collect();
         let mut pins = Vec::new();
         if state.caching == Caching::Available {
+            // An age identity always needs the PIN.
+            let policy = self.age_policy();
+            if policy.caches() {
+                for key in &age_keys {
+                    pins.push((
+                        key.clone(),
+                        SecretBuffer::from_slice(loaded.pin.expose())
+                            .context("allocating an age identity's cached PIN")?,
+                        policy,
+                    ));
+                }
+            }
             for identity in identities.iter().filter(|identity| identity.requires_pin()) {
                 let policy = self.policy_for(identity);
                 if !policy.caches() {
@@ -808,9 +836,9 @@ impl Signer {
                 ));
             }
         }
-        for identity in identities {
+        for key in identities.iter().map(credential_key).chain(age_keys) {
             bindings.bind(
-                &credential_key(identity),
+                &key,
                 device.clone(),
                 loaded.routed.serial,
                 loaded.pairing.clone(),
@@ -1171,6 +1199,12 @@ impl Signer {
         let keys: Vec<CredentialKey> = identities.iter().map(credential_key).collect();
         let presence = self.router.presence(&keys).await;
         present_first(identities, &presence)
+    }
+
+    /// Where the security key of each of `keys` is right now, see
+    /// [`crate::routing::Router::presence`].
+    pub(crate) async fn presence(&self, keys: &[CredentialKey]) -> Vec<Presence> {
+        self.router.presence(keys).await
     }
 
     /// Pairs with the security key `routed`, right after a PIN the user
@@ -1582,12 +1616,13 @@ fn check_pin_on(routed: &mut RoutedDevice, pin: &SecretBuffer) -> Result<()> {
     }
 }
 
-/// What listing resident credentials yields: the credentials and the retry
-/// counter right after.
-type Listing = Result<(Vec<ResidentCredential>, u32)>;
+/// What listing resident credentials yields: the SSH credentials, the age
+/// credentials and the retry counter right after.
+type Listing = Result<(Vec<ResidentCredential>, Vec<AgeCredential>, u32)>;
 
-/// Lists the resident SSH credentials of the routed device with `pin`, in
-/// the device thread. The device and the PIN come back either way.
+/// Lists the resident SSH credentials and the age credentials of the routed
+/// device with `pin`, in the device thread. The device and the PIN come back
+/// either way.
 async fn list_resident(
     mut routed: RoutedDevice,
     pin: SecretBuffer,
@@ -1602,8 +1637,9 @@ async fn list_resident(
                 .context("during the loading prompt")?;
             let credentials =
                 with_tries_left(&mut routed.device, |device| device.resident_ssh_keys(&pin))?;
+            let age = with_tries_left(&mut routed.device, |device| device.age_credentials(&pin))?;
             let retries = routed.device.pin_retries()?;
-            Ok((credentials, retries))
+            Ok((credentials, age, retries))
         })();
         (routed, pin, outcome)
     })

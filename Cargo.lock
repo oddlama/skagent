@@ -2108,6 +2108,8 @@ dependencies = [
  "serde",
  "sha2 0.10.9",
  "signature 2.2.0",
+ "skagent-age",
+ "skagent-age-plugin",
  "skagent-fds",
  "skagent-fido",
  "skagent-popup",

@@ -10,7 +10,7 @@ use anyhow::{Context as _, Result, ensure};
 use clap::Parser as _;
 use skagent::agent::LOAD_KEYS_EXTENSION;
 use skagent::cli::{Cli, Command};
-use skagent::client::decode_loaded_count;
+use skagent::client::{Loaded, decode_loaded_count};
 use skagent::identities::{IdentityStore, Origin, SkIdentity};
 use skagent_fido::ResidentCredential;
 use ssh_agent_lib::agent::Session as _;
@@ -63,22 +63,31 @@ fn reload_preserves_existing_lifetime_and_comment() -> Result<()> {
 }
 
 #[test]
-fn reply_count_is_strictly_validated() -> Result<()> {
+fn reply_counts_are_strictly_validated() -> Result<()> {
+    // Two counts: the SSH keys, then the age identities.
+    let mut counts = 258_u32.to_be_bytes().to_vec();
+    counts.extend_from_slice(&3_u32.to_be_bytes());
     let reply = Extension {
         name: LOAD_KEYS_EXTENSION.to_owned(),
-        details: Unparsed::from(258_u32.to_be_bytes().to_vec()),
+        details: Unparsed::from(counts),
     };
-    ensure!(decode_loaded_count(&reply)? == 258);
-    for length in [0, 3, 5] {
+    ensure!(
+        decode_loaded_count(&reply)?
+            == Loaded {
+                keys: 258,
+                age_identities: 3
+            }
+    );
+    for length in [0, 3, 4, 5, 7, 9, 12] {
         let reply = Extension {
             name: LOAD_KEYS_EXTENSION.to_owned(),
             details: Unparsed::from(vec![0; length]),
         };
-        ensure!(decode_loaded_count(&reply).is_err());
+        ensure!(decode_loaded_count(&reply).is_err(), "{length} bytes");
     }
     let reply = Extension {
         name: "wrong-extension".to_owned(),
-        details: Unparsed::from(vec![0; 4]),
+        details: Unparsed::from(vec![0; 8]),
     };
     ensure!(decode_loaded_count(&reply).is_err());
     Ok(())

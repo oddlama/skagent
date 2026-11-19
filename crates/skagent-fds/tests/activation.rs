@@ -10,7 +10,7 @@ use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};
 
 use anyhow::{Context as _, Result, ensure};
 use rustix::net::{AddressFamily, SocketAddrUnix, SocketType, bind, listen, socket};
-use skagent_fds::{activated_listener, check_listener, passed_sockets};
+use skagent_fds::{activated_listeners, check_listener, passed_names, passed_sockets};
 
 fn os(text: &str) -> &OsStr {
     OsStr::new(text)
@@ -85,6 +85,28 @@ fn anything_else_is_refused() -> Result<()> {
 fn without_systemd_nothing_is_taken() -> Result<()> {
     // The test harness isn't socket activated (LISTEN_PID, if inherited,
     // names another process).
-    ensure!(activated_listener()?.is_none());
+    ensure!(activated_listeners()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn passed_sockets_are_named_one_by_one() -> Result<()> {
+    ensure!(passed_names(None, 2)? == [None, None], "no names");
+    ensure!(passed_names(None, 0)?.is_empty());
+    ensure!(
+        passed_names(Some(os("skagent.socket:age")), 2)?
+            == [Some("skagent.socket".to_owned()), Some("age".to_owned())]
+    );
+    ensure!(passed_names(Some(os("age")), 1)? == [Some("age".to_owned())]);
+    // systemd names every socket; another count means the variables don't
+    // belong together.
+    ensure!(
+        passed_names(Some(os("age")), 2).is_err(),
+        "one name, two sockets"
+    );
+    ensure!(
+        passed_names(Some(os("a:b:c")), 2).is_err(),
+        "three names, two sockets"
+    );
     Ok(())
 }

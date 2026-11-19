@@ -37,6 +37,59 @@ pub enum Command {
     /// Check the configuration file: fails if `serve` would refuse it or
     /// skip any of its settings, and says which.
     CheckConfig(CheckConfigArgs),
+    /// age identities: keys on security keys that decrypt age files. Files
+    /// are encrypted to an identity's recipient with stock age, and decrypted
+    /// through `age-plugin-skagent`, which asks the running agent.
+    Age(AgeArgs),
+}
+
+/// Arguments of `skagent age`.
+#[derive(Debug, Args)]
+pub struct AgeArgs {
+    /// What to do.
+    #[command(subcommand)]
+    pub command: AgeCommand,
+}
+
+/// `skagent age` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum AgeCommand {
+    /// Create an age identity on a security key and print its recipient.
+    /// The running agent asks for the PIN; the key then wants two touches,
+    /// one to create the credential and one to read the recipient.
+    New {
+        /// Where the agent listens for age requests.
+        #[command(flatten)]
+        socket: AgeSocketArgs,
+
+        /// Also on a security key that holds an age identity already.
+        #[arg(long)]
+        another: bool,
+    },
+    /// Print the recipients of the age identities the agent knows.
+    List(AgeSocketArgs),
+    /// Print an identity file for `age -d -i`. It holds no secret: it names
+    /// the identity by its recipient, which makes it usable for encrypting
+    /// too.
+    Identity {
+        /// Where the agent listens for age requests. Not needed with a
+        /// recipient.
+        #[command(flatten)]
+        socket: AgeSocketArgs,
+
+        /// The identity's recipient (`age1pq1…`). Without it: the one
+        /// identity the agent knows.
+        recipient: Option<String>,
+    },
+}
+
+/// Where the agent's socket for age requests is.
+#[derive(Debug, Args)]
+pub struct AgeSocketArgs {
+    /// Path of the socket for age requests. Defaults to
+    /// `$XDG_RUNTIME_DIR/skagent-age.sock`.
+    #[arg(long, env = "SKAGENT_AGE_SOCKET")]
+    pub age_socket: Option<PathBuf>,
 }
 
 /// Arguments of `skagent check-config`.
@@ -75,6 +128,12 @@ pub struct ServeArgs {
     /// Where to listen.
     #[command(flatten)]
     pub socket: SocketArgs,
+
+    /// Where to listen for age requests (`skagent age`, `age-plugin-skagent`).
+    /// Defaults to the ssh-agent socket's path with `-age` in its name:
+    /// `$XDG_RUNTIME_DIR/skagent-age.sock`.
+    #[arg(long, env = "SKAGENT_AGE_SOCKET")]
+    pub age_socket: Option<PathBuf>,
 
     /// Configuration file: emoji and labels for SSH keys, names for YubiKeys.
     /// Defaults to `$XDG_CONFIG_HOME/skagent/config.toml`, which may be
