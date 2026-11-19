@@ -96,8 +96,13 @@
           # The guided check against a real security key, asking with
           # `popup` unless told otherwise. Without one (the VM test, which
           # shouldn't have to build the popup) a prompt has to be named.
+          # `fidoTools`: libfido2's command line tools, which the VM test
+          # replaces to see what a machine with pcscd sees.
           ageCheck =
-            popup:
+            {
+              popup ? null,
+              fidoTools ? pkgs.libfido2,
+            }:
             pkgs.writeShellApplication {
               name = "skagent-age-check";
               runtimeInputs = [
@@ -107,7 +112,7 @@
                 pkgs.gawk
                 pkgs.gnugrep
                 pkgs.gnused
-                pkgs.libfido2
+                fidoTools
               ];
               runtimeEnv = lib.optionalAttrs (popup != null) { SKAGENT_CHECK_POPUP = popup; };
               text = builtins.readFile ./nix/age-check.sh;
@@ -158,7 +163,7 @@
               };
             # A guided check of age identities and batches against a real
             # security key: `nix run .#age-check`.
-            age-check = ageCheck (lib.getExe config.packages.pinentry);
+            age-check = ageCheck { popup = lib.getExe config.packages.pinentry; };
             # Pictures of the popup's every state, drawn by the popup in a VM.
             screenshots = import ./nix/screenshots {
               inherit pkgs lib;
@@ -182,8 +187,7 @@
                 testkey = config.packages.testkey;
               };
               vm-age-check = import ./nix/tests/age-check.nix {
-                inherit pkgs;
-                ageCheck = ageCheck null;
+                inherit pkgs ageCheck;
                 testkey = config.packages.testkey;
               };
               vm-age-forwarding = import ./nix/tests/age-forwarding.nix {

@@ -17,6 +17,16 @@ let
   user = pkgs.writers.writePython3Bin "age-check-user" {
     libraries = [ pkgs.python3Packages.pexpect ];
   } (builtins.readFile ./age-check-user.py);
+  # fido2-token as on a machine that runs pcscd: libfido2 lists a YubiKey
+  # once more there, over PC/SC. skagent only uses the HID device, and the
+  # check has to tell the two apart.
+  fidoToolsWithPcsc = pkgs.writeShellScriptBin "fido2-token" ''
+    if [ "$*" = "-L" ]; then
+      echo "pcsc://slot0: vendor=0x1050, product=0x0407 (Yubico YubiKey OTP+FIDO+CCID 00 00)"
+    fi
+    exec ${pkgs.libfido2}/bin/fido2-token "$@"
+  '';
+  check = ageCheck { fidoTools = fidoToolsWithPcsc; };
 in
 pkgs.testers.runNixOSTest {
   name = "skagent-age-check";
@@ -24,7 +34,7 @@ pkgs.testers.runNixOSTest {
   nodes.machine = {
     imports = [ common.virtualKeyMachine ];
     environment.systemPackages = [
-      ageCheck
+      check
       testkey
       user
       common.fakeNotifications

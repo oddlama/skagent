@@ -135,18 +135,22 @@ pause() {
 
 # ------------------------------------------------------------ the key's side
 
-device() { fido2-token -L 2>/dev/null | cut -d: -f1; }
+# The security keys skagent would use: those on USB HID. Where pcscd runs,
+# libfido2 lists a YubiKey once more over PC/SC (pcsc://slot0), which
+# skagent leaves alone.
+listed() { fido2-token -L 2>/dev/null | grep '^/dev/hidraw'; }
+device() { listed | cut -d: -f1; }
 device_field() { fido2-token -I "$1" 2>/dev/null | sed -n "s/^$2: //p" | head -n 1; }
 
 mapfile -t devices < <(device)
 case ${#devices[@]} in
-  0) die "no security key found (fido2-token -L lists none)" ;;
+  0) die "no security key found (fido2-token -L lists none on /dev/hidraw*)" ;;
   1) dev=${devices[0]} ;;
   *) die "several security keys are plugged in; leave only the one to check" ;;
 esac
 
 bold "skagent age check"
-say "Security key: $(fido2-token -L | head -n 1)"
+say "Security key: $(listed | head -n 1)"
 say "This creates one credential (skagent:age) on it and offers to delete it"
 say "at the end. Don't use ssh or sign commits with this key meanwhile: your"
 say "own agent would ask the key at the same time."

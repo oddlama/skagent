@@ -35,7 +35,9 @@ done
 if [ $# -ge 1 ]; then
   dev=$1
 else
-  mapfile -t devices < <(fido2-token -L | cut -d: -f1)
+  # Over USB HID only: where pcscd runs, a YubiKey is listed once more as
+  # pcsc://slot0.
+  mapfile -t devices < <(fido2-token -L | grep '^/dev/hidraw' | cut -d: -f1)
   case ${#devices[@]} in
     0) die "no FIDO2 device found (fido2-token -L lists none)" ;;
     1) dev=${devices[0]} ;;
