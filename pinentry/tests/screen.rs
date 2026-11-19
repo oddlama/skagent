@@ -294,7 +294,10 @@ fn creating_an_identity_says_what_each_touch_is_for() {
         label: "New age identity".to_owned(),
         fingerprint: String::new(),
     };
-    assert_eq!(request_subtitle(&Request::Create).text(), "Create an age identity");
+    assert_eq!(
+        request_subtitle(&Request::Create).text(),
+        "Create an age identity"
+    );
     let touch = |again| {
         Screen::of(&State::Touch {
             key: key(),
