@@ -392,7 +392,13 @@ impl Signer {
             }
             Err(error) => {
                 if let Some(session) = session.as_mut()
-                    && let Some(state) = final_state(&error, &ticket, Some(key), security_key)
+                    && let Some(state) = final_state(
+                        &error,
+                        &ticket,
+                        Some(key),
+                        security_key,
+                        Some(Request::Create),
+                    )
                 {
                     show_best_effort(session, state);
                 }

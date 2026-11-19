@@ -171,6 +171,7 @@ fn waiting(name: &str) -> Option<State> {
             key: Some(fox()),
             security_key: Some(desk()),
             reason: Failure::Unplugged,
+            request: None,
         },
         _ => return None,
     })

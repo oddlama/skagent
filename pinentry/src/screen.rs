@@ -311,7 +311,13 @@ impl Screen {
                 key,
                 security_key,
                 reason,
-            } => failed(key.as_ref(), security_key.as_ref(), *reason),
+                request,
+            } => failed(
+                key.as_ref(),
+                security_key.as_ref(),
+                *reason,
+                request.as_ref(),
+            ),
         }
     }
 }
@@ -394,13 +400,18 @@ pub fn request_subtitle(request: &Request) -> Subtitle {
                 Requester::Program { name: Some(name) } => {
                     spans.push(Span::text(format!(" · {name}")));
                 }
-                Requester::Forwarded { host, via } => {
+                // One host fits the line, by its key alone if it has no
+                // name. Of several hops it is the first: the one this
+                // machine's ssh connected to, which vouches for the rest.
+                Requester::Forwarded { host, via: None } => {
                     spans.push(Span::text(" · for "));
-                    spans.extend(host_spans(host));
-                    if let Some(via) = via {
-                        spans.push(Span::text(" · via "));
-                        spans.extend(host_spans(via));
-                    }
+                    spans.push(forwarded_host(host));
+                }
+                Requester::Forwarded {
+                    via: Some(first), ..
+                } => {
+                    spans.push(Span::text(" · via "));
+                    spans.push(forwarded_host(first));
                 }
             }
             Subtitle {
@@ -412,6 +423,18 @@ pub fn request_subtitle(request: &Request) -> Subtitle {
             spans: vec![Span::text("Unknown request")],
             tone: Tone::Warning,
         },
+    }
+}
+
+/// A host a decryption is for, in the room a subtitle has left.
+fn forwarded_host(host: &Host) -> Span {
+    match host {
+        Host::Named { name } => Span::text(name.clone()),
+        Host::HostKey { fingerprint } => Span {
+            text: short_fingerprint(fingerprint),
+            mono: true,
+        },
+        Host::Unverified => Span::text("Unknown host"),
     }
 }
 
@@ -756,14 +779,45 @@ fn replug(key: Option<&Key>, security_key: Option<&SecurityKey>, tries: Option<u
     }
 }
 
-fn failed(key: Option<&Key>, security_key: Option<&SecurityKey>, reason: Failure) -> Screen {
+/// What a request that failed was doing: the words differ.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Doing {
+    Signing,
+    Decrypting,
+    Creating,
+    Loading,
+}
+
+fn failed(
+    key: Option<&Key>,
+    security_key: Option<&SecurityKey>,
+    reason: Failure,
+    request: Option<&Request>,
+) -> Screen {
+    let doing = match (request, key) {
+        (Some(Request::Decrypt { .. } | Request::Batch { .. }), _) => Doing::Decrypting,
+        (Some(Request::Create), _) => Doing::Creating,
+        (_, Some(_)) => Doing::Signing,
+        (_, None) => Doing::Loading,
+    };
     let name = name_or(security_key, "Your security key");
     // The reason where the agent knows it; the log has the rest.
     let reason = match (reason, key) {
-        (Failure::Unplugged, Some(_)) => format!("{name} was unplugged mid-signature"),
-        (Failure::Unplugged, None) => format!("{name} was unplugged while loading"),
-        (Failure::Refused, Some(_)) => format!("{name} refused to sign"),
-        (Failure::Refused, None) => format!("{name} refused to list its keys"),
+        (Failure::Unplugged, _) => match doing {
+            Doing::Signing => format!("{name} was unplugged mid-signature"),
+            Doing::Decrypting => format!("{name} was unplugged while decrypting"),
+            Doing::Creating => format!("{name} was unplugged meanwhile"),
+            Doing::Loading => format!("{name} was unplugged while loading"),
+        },
+        (Failure::Refused, _) => match doing {
+            Doing::Signing => format!("{name} refused to sign"),
+            Doing::Decrypting => format!("{name} refused to decrypt"),
+            Doing::Creating => format!("{name} refused to create it"),
+            Doing::Loading => format!("{name} refused to list its keys"),
+        },
+        (Failure::NotOnKey, Some(_)) if doing == Doing::Decrypting => {
+            format!("{name} doesn't hold this age identity")
+        }
         (Failure::NotOnKey, Some(key)) => format!("{name} doesn't hold {}", key.label),
         (Failure::NotOnKey, None) => format!("{name} holds no SSH keys"),
         (Failure::NoPin, _) => format!("{name} has no PIN set"),
@@ -781,10 +835,11 @@ fn failed(key: Option<&Key>, security_key: Option<&SecurityKey>, reason: Failure
         },
         (Failure::Other, _) => "Something went wrong · see skagent's log".to_owned(),
     };
-    let title = if key.is_some() {
-        "Couldn't sign"
-    } else {
-        "Couldn't load keys"
+    let title = match doing {
+        Doing::Signing => "Couldn't sign",
+        Doing::Decrypting => "Couldn't decrypt",
+        Doing::Creating => "Couldn't create it",
+        Doing::Loading => "Couldn't load keys",
     };
     Screen {
         anchor: key.map_or_else(Anchor::device, |key| Anchor::key(key, Tint::Key)),

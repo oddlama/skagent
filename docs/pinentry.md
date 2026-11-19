@@ -129,7 +129,7 @@ one maps to a protocol state; the popup derives the copy from the data.
 | `locked` | `locked` | key or none, YubiKey | final |
 | `new-pin` | `new-pin` | key or none, YubiKey | final |
 | `timeout` | `timeout` | key, YubiKey | answered with `RETRY` (touch again, PIN kept) or `CANCEL` |
-| `failed` | `failed` | key or none, YubiKey, `reason` | final; "Couldn't load keys" without a key |
+| `failed` | `failed` | key or none, YubiKey, `reason`, the request unless loading | final; "Couldn't load keys" without a key, "Couldn't decrypt" and "Couldn't create it" for those requests |
 | queue pill | every message's `waiting` | the waiting requests' keys | `queue` messages update it |
 
 Keys without a serial (not YubiKeys) come without a YubiKey name; the popup

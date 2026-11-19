@@ -200,6 +200,10 @@ pub enum State {
         security_key: Option<SecurityKey>,
         /// What went wrong.
         reason: Failure,
+        /// What was asked, unless loading: a decryption that failed isn't
+        /// a signature that failed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request: Option<Request>,
     },
 }
 

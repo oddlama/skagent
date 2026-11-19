@@ -180,6 +180,33 @@ fn subtitles_name_what_is_signed() {
             "Signature for \"file\"",
         ),
         (Request::Unknown, "Unknown request"),
+    ];
+    for (request, expected) in cases {
+        assert_eq!(request_subtitle(&request).text(), expected);
+    }
+    assert_eq!(request_subtitle(&Request::Unknown).tone, Tone::Warning);
+    let unknown = request_subtitle(&login(
+        Host::HostKey {
+            fingerprint: "SHA256:abc".to_owned(),
+        },
+        None,
+    ));
+    assert!(
+        unknown
+            .spans
+            .iter()
+            .any(|span| span.mono && span.text == "SHA256:abc")
+    );
+}
+
+/// Who asks for a decryption: a program here, or a host elsewhere, named so
+/// that it fits the line.
+#[test]
+fn a_decryption_names_who_asks() {
+    let named = |name: &str| Host::Named {
+        name: name.to_owned(),
+    };
+    let cases = [
         (
             Request::Decrypt {
                 by: Requester::Program {
@@ -219,25 +246,24 @@ fn subtitles_name_what_is_signed() {
                     via: Some(named("jump")),
                 },
             },
-            "Decrypt a file · for build-host · via jump",
+            // Of several hops, the one this machine's ssh connected to.
+            "Decrypt a file · via jump",
+        ),
+        (
+            Request::Decrypt {
+                by: Requester::Forwarded {
+                    host: Host::HostKey {
+                        fingerprint: "SHA256:+DiY3wvvV6TuJJhbpZisF".to_owned(),
+                    },
+                    via: None,
+                },
+            },
+            "Decrypt a file · for SHA256:+DiY3wvv…",
         ),
     ];
     for (request, expected) in cases {
         assert_eq!(request_subtitle(&request).text(), expected);
     }
-    assert_eq!(request_subtitle(&Request::Unknown).tone, Tone::Warning);
-    let unknown = request_subtitle(&login(
-        Host::HostKey {
-            fingerprint: "SHA256:abc".to_owned(),
-        },
-        None,
-    ));
-    assert!(
-        unknown
-            .spans
-            .iter()
-            .any(|span| span.mono && span.text == "SHA256:abc")
-    );
 }
 
 #[test]
@@ -486,9 +512,88 @@ fn failed(reason: Failure, signing: bool, name: Option<&str>) -> String {
             name: name.to_owned(),
         }),
         reason,
+        request: None,
     })
     .subtitle
     .text()
+}
+
+/// A decryption or a new identity that failed doesn't say "sign".
+#[test]
+fn failures_are_worded_for_what_was_asked() {
+    let screen = |reason, request| {
+        Screen::of(&State::Failed {
+            key: Some(Key {
+                emoji: None,
+                label: "age identity".to_owned(),
+                fingerprint: "age1pq1x34nzs…fzv49zc0k".to_owned(),
+            }),
+            security_key: Some(SecurityKey {
+                name: "Desk 5C NFC".to_owned(),
+            }),
+            reason,
+            request: Some(request),
+        })
+    };
+    let decrypt = || Request::Decrypt {
+        by: Requester::Program { name: None },
+    };
+    let batch = || Request::Batch {
+        command: "agenix rekey".to_owned(),
+        seconds: 600,
+    };
+    for (reason, request, title, subtitle) in [
+        (
+            Failure::Unplugged,
+            decrypt(),
+            "Couldn't decrypt",
+            "Desk 5C NFC was unplugged while decrypting",
+        ),
+        (
+            Failure::Refused,
+            batch(),
+            "Couldn't decrypt",
+            "Desk 5C NFC refused to decrypt",
+        ),
+        (
+            Failure::NotOnKey,
+            decrypt(),
+            "Couldn't decrypt",
+            "Desk 5C NFC doesn't hold this age identity",
+        ),
+        (
+            Failure::NotPluggedIn,
+            decrypt(),
+            "Couldn't decrypt",
+            "Desk 5C NFC wasn't plugged in",
+        ),
+        (
+            Failure::Unplugged,
+            Request::Create,
+            "Couldn't create it",
+            "Desk 5C NFC was unplugged meanwhile",
+        ),
+        (
+            Failure::Refused,
+            Request::Create,
+            "Couldn't create it",
+            "Desk 5C NFC refused to create it",
+        ),
+        // A signature says so, with or without its request.
+        (
+            Failure::Refused,
+            Request::Sign {
+                namespace: "git".to_owned(),
+            },
+            "Couldn't sign",
+            "Desk 5C NFC refused to sign",
+        ),
+    ] {
+        let shown = screen(reason, request);
+        assert_eq!(shown.title, title);
+        assert_eq!(shown.subtitle.text(), subtitle);
+        assert_eq!(shown.announcement, format!("{title}, {subtitle}"));
+    }
 }
 
 /// The reason where the agent knows it, short; a pointer to the log

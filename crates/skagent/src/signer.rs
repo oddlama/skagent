@@ -672,7 +672,7 @@ impl Signer {
             }
             Err(error) => {
                 if let Some(session) = session.as_mut()
-                    && let Some(state) = final_state(&error, &ticket, None, security_key)
+                    && let Some(state) = final_state(&error, &ticket, None, security_key, None)
                 {
                     show_best_effort(session, state);
                 }
@@ -940,7 +940,13 @@ impl Signer {
         if let Some(session) = session.as_mut() {
             let last = match &done {
                 Ok(_) => Some(job.done()),
-                Err(error) => final_state(error, &ticket, Some(job.popup_key()), security_key),
+                Err(error) => final_state(
+                    error,
+                    &ticket,
+                    Some(job.popup_key()),
+                    security_key,
+                    Some(job.popup_request()),
+                ),
             };
             if let Some(state) = last {
                 show_best_effort(session, state);
@@ -1780,6 +1786,7 @@ fn final_state(
     ticket: &SigningTicket,
     key: Option<Key>,
     security_key: Option<SecurityKey>,
+    request: Option<Request>,
 ) -> Option<Shown> {
     if ticket.check().is_err() || cancelled_in_popup(error) {
         return None;
@@ -1801,6 +1808,7 @@ fn final_state(
             key,
             security_key,
             reason: failure(error, kind),
+            request,
         },
     })
 }

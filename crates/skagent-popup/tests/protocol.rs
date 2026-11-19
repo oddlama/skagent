@@ -220,6 +220,7 @@ fn every_state() -> Vec<State> {
             key: Some(key()),
             security_key: desk(),
             reason: Failure::Unplugged,
+            request: None,
         },
     ]
 }
@@ -266,6 +267,7 @@ fn failure_reasons_have_their_names_on_the_wire() -> Result<()> {
             key: None,
             security_key: None,
             reason,
+            request: None,
         };
         let message = Message::Show {
             seq: 2,
@@ -400,5 +402,34 @@ fn a_batch_is_a_request_kind_of_its_own() -> Result<()> {
         decode_message(older.trim_end()).is_err(),
         "decoded as a decryption"
     );
+    Ok(())
+}
+
+#[test]
+fn a_failure_says_what_was_asked_unless_it_was_loading() -> Result<()> {
+    let failed = |request| Message::Show {
+        seq: 2,
+        waiting: Vec::new(),
+        state: Box::new(State::Failed {
+            key: None,
+            security_key: None,
+            reason: Failure::Refused,
+            request,
+        }),
+    };
+    // Nothing more on the wire without one: an older agent's failure reads
+    // the same.
+    ensure!(
+        String::from_utf8(encode_message(&failed(None))?)?.trim_end() == failed_line("refused")
+    );
+    let decryption = failed(Some(Request::Decrypt {
+        by: Requester::Program { name: None },
+    }));
+    let text = String::from_utf8(encode_message(&decryption)?)?;
+    ensure!(
+        text.contains(r#""request":{"kind":"decrypt","by":{"kind":"program","name":null}}"#),
+        "{text}"
+    );
+    ensure!(decode_message(text.trim_end())? == decryption);
     Ok(())
 }
