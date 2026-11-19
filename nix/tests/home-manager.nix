@@ -148,6 +148,11 @@ pkgs.testers.runNixOSTest {
             machine.succeed("ls -la ${runtimeDir}")
         assert state("skagent") == "inactive", state("skagent")
 
+    with subtest("age requests have a socket of their own, which starts nothing either"):
+        retry(lambda _last_try: state("skagent-age.socket") == "active", timeout_seconds=30)
+        assert machine.succeed("stat -c '%a %U %F' ${runtimeDir}/skagent-age.sock").strip() == "600 alice socket"
+        assert state("skagent") == "inactive", state("skagent")
+
     with subtest("SSH_AUTH_SOCK points at skagent in login shells and in systemd"):
         out = user_ok("env -u SSH_AUTH_SOCK bash -lc 'echo $SSH_AUTH_SOCK'")
         assert out.strip() == "${socket}", out
@@ -237,6 +242,13 @@ pkgs.testers.runNixOSTest {
         loaded()
         assert prompts() == 2, prompts()
         assert pinentry_env().count("start WAYLAND_DISPLAY=wayland-second LISTEN_PID= LISTEN_FDS=") == 1, pinentry_env()
+
+    with subtest("skagent age finds its socket, which systemd passed by name"):
+        assert "answering age requests socket=${runtimeDir}/skagent-age.sock activated=true" in journal("skagent"), journal("skagent")
+        out = user_ok("skagent age list")
+        assert "No age identities known" in out, out
+        # The plugin is installed with the agent, where age looks for it.
+        assert "run by age" in user_ok("age-plugin-skagent")
 
     with subtest("skagent forget finds the socket without --socket"):
         user_ok("skagent forget")

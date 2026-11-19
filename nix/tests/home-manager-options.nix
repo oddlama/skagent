@@ -120,6 +120,23 @@ let
       !evaluates {
         popup.dark.accent = "88c0d0";
       };
+    "age requests get a socket of their own, by the name the agent knows" =
+      let
+        units = (home { }).systemd.user;
+      in
+      units.sockets.skagent-age.Socket.FileDescriptorName == "age"
+      && units.sockets.skagent-age.Socket.ListenStream == "%t/skagent-age.sock"
+      && units.sockets.skagent-age.Socket.Service == "skagent.service"
+      &&
+        units.services.skagent.Unit.Requires == [
+          "skagent.socket"
+          "skagent-age.socket"
+        ];
+    "without age, the agent gets its ssh-agent socket alone" =
+      let
+        units = (home { age.enable = false; }).systemd.user;
+      in
+      !(units.sockets ? skagent-age) && units.services.skagent.Unit.Requires == [ "skagent.socket" ];
     # Each works alone (above), so it's the combination that is refused.
     "the popup and askpass are refused together" =
       !evaluates {

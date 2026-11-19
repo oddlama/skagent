@@ -16,6 +16,8 @@ let
   inherit (lib) mkOption types;
 
   socketName = "skagent.sock";
+  ageSocketName = "skagent-age.sock";
+  sockets = [ "skagent.socket" ] ++ lib.optional cfg.age.enable "skagent-age.socket";
   exe = lib.getExe cfg.package;
 
   duration = types.strMatching "0|[0-9]+[smh]";
@@ -429,6 +431,18 @@ in
       session that starts {file}`graphical-session.target`
     '';
 
+    age.enable = mkOption {
+      type = types.bool;
+      default = true;
+      description = ''
+        Answer requests about age identities on a socket of their own,
+        {file}`$XDG_RUNTIME_DIR/skagent-age.sock`: `skagent age` creates and
+        lists identities on security keys, and `age-plugin-skagent` (in the
+        same package) decrypts age files with them. The socket answers these
+        two programs only.
+      '';
+    };
+
     setSshAuthSock = mkOption {
       type = types.bool;
       default = true;
@@ -506,11 +520,25 @@ in
       Install.WantedBy = [ "sockets.target" ];
     };
 
+    # Passed to the same agent, under the name it knows it by. Either socket's
+    # first client starts the agent, with both.
+    systemd.user.sockets.skagent-age = lib.mkIf cfg.age.enable {
+      Unit.Description = "skagent socket for age requests";
+      Socket = {
+        ListenStream = "%t/${ageSocketName}";
+        FileDescriptorName = "age";
+        SocketMode = "0600";
+        DirectoryMode = "0700";
+        Service = "skagent.service";
+      };
+      Install.WantedBy = [ "sockets.target" ];
+    };
+
     systemd.user.services.skagent = {
       Unit = {
         Description = "skagent: ssh-agent for FIDO2 security keys";
-        Requires = [ "skagent.socket" ];
-        After = [ "skagent.socket" ];
+        Requires = sockets;
+        After = sockets;
         # Logging out drops the PINs; the next session's first client starts
         # a fresh agent with that session's display variables (and the
         # remembered keys).
