@@ -129,14 +129,16 @@ one maps to a protocol state; the popup derives the copy from the data.
 | `replug` | `replug` | key or none, YubiKey, `tries_left` | final until step 5 waits for the re-plug |
 | `locked` | `locked` | key or none, YubiKey | final |
 | `new-pin` | `new-pin` | key or none, YubiKey | final |
-| `timeout` | `timeout` | key, YubiKey | answered with `RETRY` (touch again, PIN kept) or `CANCEL` |
+| `timeout` | `timeout` | key, YubiKey | answered with `RETRY` (touch again, PIN kept) or `CANCEL`. The key gave up waiting: `FIDO_ERR_OPERATION_DENIED`, which is CTAP's answer to a touch that never came and to one declined, or an `ACTION_TIMEOUT` |
 | `failed` | `failed` | key or none, YubiKey, `reason`, the request unless loading | final; "Couldn't load keys" without a key, "Couldn't decrypt" and "Couldn't create it" for those requests |
 | queue pill | every message's `waiting` | the waiting requests' keys | `queue` messages update it |
 
 Keys without a serial (not YubiKeys) come without a YubiKey name; the popup
 says "your security key" instead. A final state stays for its moment (900 ms for
 `signed` and `loaded`, 5 s for `failed`) before the next request's state or
-the end of input replaces it.
+the end of input replaces it. No state stays longer than
+`skagent_popup::LONGEST_LINGER`: the agent waits that long and 3 s more for
+a popup to leave once it closed its input, and kills it then.
 
 ### why a request failed
 
@@ -146,12 +148,14 @@ points to the log. Signing and loading differ only in the verb.
 | `reason` | From | Subtitle (signing) |
 | --- | --- | --- |
 | `unplugged` | libfido2 transport errors, or the key gone or replaced at a step | `Desk 5C NFC was unplugged mid-signature` |
-| `refused` | `FIDO_ERR_OPERATION_DENIED` | `Desk 5C NFC refused to sign` |
+| `refused` | not sent by the agent: a declined touch can't be told from one that never came, and both are `timeout` | `Desk 5C NFC refused to sign` |
 | `not-on-key` | `FIDO_ERR_NO_CREDENTIALS`: another key was touched, or it was reset | `Desk 5C NFC doesn't hold github-work` |
 | `no-pin` | `FIDO_ERR_PIN_NOT_SET` | `Desk 5C NFC has no PIN set` |
 | `unrecognized` | a device reports the paired YubiKey's serial but can't sign skagent's pairing challenge; it gets no PIN | `This isn't the Desk 5C NFC skagent paired` |
 | `duplicate` | two plugged-in security keys report the serial of the YubiKey holding the key; neither gets the PIN | `Two security keys claim to be Desk 5C NFC` |
 | `not-plugged-in` | the wait for the security key (`no-key`, `wrong-key`) ran out | `Desk 5C NFC wasn't plugged in`, without a known YubiKey `No security key was plugged in` |
+| `not-for-identity` | a decryption: the key answered, and its identity opens none of the file's stanzas | `The file isn't encrypted to this identity` |
+| `another-identity` | a decryption: the key's identities were tried, and none is the one the request names | `Desk 5C NFC holds another age identity` |
 | `other` | anything else, and reasons the popup doesn't know yet | `Something went wrong · see skagent's log` |
 
 ### subtitle per request kind
