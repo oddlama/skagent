@@ -13,6 +13,7 @@ needs your PIN and a touch. skagent caches the PIN securely and can handle multi
 - 🤝 **Pairs with your security keys**, so a fake key that pretends to be yours never gets your PIN
 - 📥 **Loads resident keys** straight from the security key, no stub files needed
 - 🌍 **Agent forwarding and `ssh-add -h`** destination constraints, checked like OpenSSH does
+- 🗄️ **Decrypts age files** with a post-quantum key derived from your security key, one touch per file
 - 💬 **Prompts that tell you what you sign**, plus a notification while the key waits for a touch
 
 <p align="center">
@@ -45,7 +46,8 @@ skagent runs on Linux 5.11 or newer and asks for PINs with a graphical pinentry.
 
 This runs skagent as a socket-activated user service. The socket at
 `$XDG_RUNTIME_DIR/skagent.sock` exists from login on, and the agent starts with
-its first client. It stops together with your graphical session, so logging out
+its first client. A second socket next to it, `skagent-age.sock`, is for
+[age](#age) (`services.skagent.age.enable`, on by default). It stops together with your graphical session, so logging out
 drops all PINs. Your keys stay, see below. Your compositor or desktop has to import the
 display variables into the systemd user manager so pinentry and notifications
 can show up. Most do that already.
@@ -90,8 +92,9 @@ ssh -T git@github.com # just touch the key, no PIN prompt
 skagent forget # drops all cached PINs and keeps the keys
 ```
 
-Under systemd, `skagent serve` also accepts its socket through socket
-activation (one `ListenStream=`). That's what the home-manager module does.
+Under systemd, `skagent serve` also accepts its sockets through socket
+activation: its ssh-agent socket, and for [age](#age) a second socket unit with
+`FileDescriptorName=age`. That's what the home-manager module does.
 
 ## 🧭 Usage
 
@@ -352,6 +355,55 @@ Through a forwarded agent, remote hosts can't load keys or make skagent forget
 PINs. Keys of a web origin (any application other than `ssh:...`) only sign SSH
 logins and `ssh-keygen -Y sign` data, nothing a website would accept.
 
+### age
+
+skagent can also decrypt [age](https://age-encryption.org) files with a key
+that comes from your security key. Create an identity once:
+
+```console
+$ skagent age new
+age1pq1…
+```
+
+skagent asks for the PIN, and the key blinks twice: once to create the
+credential, once to read the recipient. That recipient is an ordinary
+post-quantum age recipient. Anyone can encrypt to it with age 1.3 or newer, or
+with rage and age's `age-plugin-pq`, without skagent and without your key:
+
+```console
+$ age -r age1pq1… -o secret.age secret.txt
+```
+
+To decrypt, age needs an identity file. It holds no secret, only which key to
+ask skagent for, so you can keep it anywhere:
+
+```console
+$ skagent age identity > skagent-identity.txt
+$ age -d -i skagent-identity.txt secret.age
+```
+
+Every file takes one touch, and the PIN if skagent doesn't have it cached.
+`age -d -j skagent` works without the file, with the identity on the security
+key that's plugged in. The identity file also works for encrypting
+(`age -e -i`), and `skagent age list` prints the recipients skagent knows.
+On another machine, `skagent load` finds the identity on the key.
+
+- **One recipient type per file:** age refuses to mix post-quantum recipients
+  with classic ones, such as SSH host keys or `age1…` keys from
+  `age-keygen` without `-pq`. Every other recipient of the file has to be an
+  `age1pq1…` key too.
+- **Keep a second recipient:** the key exists on that one security key only
+  and can't be copied. If you reset the key, block its PIN or lose it, files
+  without another recipient are gone. A second security key or an offline
+  `age-keygen -pq` key works.
+- **How it works:** the security key keeps a secret that never leaves it, and
+  skagent derives the age key from the key's answer each time, uses it for
+  that one file and wipes it. [`docs/age.md`](docs/age.md) has the details and
+  what this can't protect.
+
+Decrypting many files with one touch (`skagent batch`) and decrypting through
+a forwarded agent aren't built yet.
+
 ### Prompts and notifications
 
 PIN prompts tell you which key is used and what for, for example
@@ -377,11 +429,12 @@ Protected:
 - **A hostile host with your forwarded agent** still needs a touch for every signature, and `ssh-add -h` limits where keys work
 - **Other processes of yours** can't read the agent's memory, since core dumps and ptrace are disabled
 - **A fake security key** swapped in for yours, or plugged in next to it, gets no PIN once skagent paired with your key
+- **age files** need the security key, its PIN and a touch per file, and stay safe against a future quantum computer if all their recipients are post-quantum
 
 Not protected:
 
 - **Malware running as you** in an unlocked session can get signatures whenever you touch the key, like with any agent. It could also log your PIN while you type it.
-- **root** can do anything anyway.
+- **root** can do anything anyway. That includes reading an age key from skagent's memory during the moment it decrypts a file, which opens every file for that key, old and new.
 - **A malicious USB device** you use before skagent paired with your real key, or one that sits between your key and the computer and passes its messages on, receives the PIN, same as with OpenSSH.
 
 Have a look at [`docs/design.md`](docs/design.md) for the details, and at
