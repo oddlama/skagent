@@ -119,17 +119,36 @@ fn a_process_is_named_and_placed_by_its_stat_line() {
 
 #[test]
 fn a_request_comes_from_what_started_age_unless_that_only_launches() {
-    assert_eq!(requester("age", Some("agenix")), "agenix");
+    assert_eq!(requester("age", &["agenix", "zsh"]), "agenix");
     assert_eq!(
-        requester("rage", Some(".agenix-rekey-wrapped")),
+        requester("rage", &[".agenix-rekey-wrapped"]),
         ".agenix-rekey-wrapped"
     );
     for launcher in [
         "bash", "sh", "zsh", "fish", "nu", "su", "sudo", "env", "systemd",
     ] {
-        assert_eq!(requester("age", Some(launcher)), "age", "{launcher}");
+        // Not what is above the shell either: that is a terminal.
+        assert_eq!(requester("age", &[launcher, "foot"]), "age", "{launcher}");
     }
-    assert_eq!(requester("rage", None), "rage");
+    assert_eq!(requester("rage", &[]), "rage");
+}
+
+#[test]
+fn a_wrapper_around_age_is_not_who_asks() {
+    // What agenix-rekey 87e5d5f runs for `agenix edit` and `agenix rekey`,
+    // as its processes were listed: rage, started by its ageWrapper,
+    // started by the script of the command.
+    assert_eq!(
+        requester("rage", &["ageWrapper", "agenix-edit-view", "zsh"]),
+        "agenix-edit-view"
+    );
+    assert_eq!(
+        requester("rage", &["ageWrapper", "agenix-rekey", "agenix-rekey"]),
+        "agenix-rekey"
+    );
+    // A wrapper that a shell started, or nothing known: the client.
+    assert_eq!(requester("rage", &["ageWrapper", "bash", "foot"]), "rage");
+    assert_eq!(requester("rage", &["ageWrapper"]), "rage");
 }
 
 #[test]

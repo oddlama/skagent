@@ -261,6 +261,19 @@ pkgs.testers.runNixOSTest {
         expect(before, 0, 1, "the identity at hand")
         assert journal("skagent").count("agent: decrypted") == 7
 
+    with subtest("a request through agenix-rekey's wrapper is shown to come from what ran the wrapper"):
+        # As agenix-rekey has it: rage is started by a script called
+        # ageWrapper, and that by the script of the command. Neither ends
+        # in an exec, so both are there while the plugin asks.
+        alice_ok("printf '#!/bin/sh\\nrage -d -i ~/id.txt \"$@\"\\nexit $?\\n' > ~/ageWrapper")
+        alice_ok("printf '#!/bin/sh\\n~/ageWrapper \"$@\"\\nexit $?\\n' > ~/agenix-edit-view")
+        alice_ok("chmod +x ~/ageWrapper ~/agenix-edit-view")
+        touch()
+        status, out = alice("~/agenix-edit-view ~/age.age")
+        assert (status, out.strip()) == (0, "from-age"), out
+        # By its whole name, of which the process list keeps 15 bytes.
+        assert "purpose=decrypt a file for agenix-edit-view stanzas" in journal("skagent"), journal("skagent")
+
     with subtest("without a touch there is no file key"):
         touched = touches()
         status, out = alice("age -d -i ~/id.txt ~/age.age")

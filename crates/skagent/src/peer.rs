@@ -45,6 +45,11 @@ const LAUNCHERS: [&str; 15] = [
     "systemd",
 ];
 
+/// Scripts that run the age client for the program that asks, and that
+/// nobody knows by name: agenix-rekey's `ageWrapper`, which stands between
+/// `agenix edit` or `agenix rekey` and rage. What started them is shown.
+const WRAPPERS: [&str; 1] = ["ageWrapper"];
+
 /// A file, by where it is stored: two paths to the same file are equal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileId {
@@ -215,15 +220,26 @@ impl Peer {
     }
 
     /// What started the age client this peer (the plugin) works for, as the
-    /// process list names it: `agenix` for a script that runs age, `age`
-    /// itself when a shell ran it. A hint for prompts, read from `/proc`
-    /// without a guarantee; `None` if the processes are gone.
+    /// process list names it: `agenix-edit-view` for agenix-rekey's script
+    /// that runs rage, `age` itself when a shell ran it. A hint for prompts,
+    /// read from `/proc` without a guarantee; `None` if the processes are
+    /// gone.
     #[must_use]
     pub fn started_by(&self) -> Option<String> {
         let (_, client_pid) = process(self.pid)?;
-        let (client, starter_pid) = process(client_pid)?;
-        let starter = process(starter_pid).map(|(name, _)| name);
-        Some(requester(&client, starter.as_deref()))
+        let (client, mut next) = process(client_pid)?;
+        // What started the client, and what started that: one of them may
+        // be a wrapper.
+        let mut above = Vec::new();
+        for _ in 0..=WRAPPERS.len() {
+            let Some((name, parent)) = process(next) else {
+                break;
+            };
+            above.push(name);
+            next = parent;
+        }
+        let above: Vec<&str> = above.iter().map(String::as_str).collect();
+        Some(requester(&client, &above))
     }
 }
 
@@ -280,13 +296,14 @@ pub fn parse_stat(stat: &str) -> Option<(String, u32)> {
     Some((name.to_owned(), parent))
 }
 
-/// Who a request is shown to come from: what started the age client
-/// (`starter`), or the client itself if that was a shell or the like, or
-/// isn't known.
+/// Who a request is shown to come from: what started the age client, or
+/// the client itself if that was a shell or the like, or isn't known.
+/// `above`: the client's parent, that one's parent and so on. A wrapper
+/// around the client is passed over.
 #[must_use]
-pub fn requester(client: &str, starter: Option<&str>) -> String {
-    match starter {
-        Some(starter) if !LAUNCHERS.contains(&starter) => starter.to_owned(),
+pub fn requester(client: &str, above: &[&str]) -> String {
+    match above.iter().find(|name| !WRAPPERS.contains(name)) {
+        Some(starter) if !LAUNCHERS.contains(starter) => (*starter).to_owned(),
         _ => client.to_owned(),
     }
 }

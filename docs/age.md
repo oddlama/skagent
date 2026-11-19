@@ -367,7 +367,8 @@ the threat model already has.
 
 - **Text:** the PIN prompt, the touch notification and the log say "decrypt a
   file", the identity, and who asks: for a local request the program that
-  started age (from the peer's parents, shown through `display::shown`), for a
+  started age (from the peer's parents, shown through `display::shown`; a
+  wrapper around age like agenix-rekey's `ageWrapper` is passed over), for a
   forwarded one the host.
 - **Popup:** the request kinds `decrypt` (with who asks), `batch` (with the
   command and the time) and `create`, shown in the states of a signature:
