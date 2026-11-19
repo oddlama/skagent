@@ -8,8 +8,8 @@ mod support;
 use anyhow::{Context as _, Result, bail, ensure};
 use skagent_age::wire::{
     LIST_EXTENSION, ListReply, MAX_LISTED, MAX_REPLY_BYTES, MAX_STANZAS, NEW_EXTENSION, NewReply,
-    Refusal, UNWRAP_EXTENSION, UnwrapReply, UnwrapRequest, check_simple_request, reply_details,
-    reply_length, request_frame, simple_request,
+    Refusal, UNWRAP_EXTENSION, UnwrapReply, UnwrapRequest, check_simple_request,
+    decode_new_request, new_request, reply_details, reply_length, request_frame, simple_request,
 };
 use skagent_age::{FileKey, Identity, STANZA_BYTES, Stanza, WRAP_RANDOM_BYTES};
 
@@ -207,6 +207,17 @@ fn requests_that_say_nothing_are_one_version_byte() {
     for other in [&[][..], &[0], &[2], &[1, 0], &[1, 1]] {
         assert!(check_simple_request(other).is_err(), "{other:?}");
     }
+}
+
+#[test]
+fn a_request_for_a_new_identity_says_whether_another_is_meant() -> Result<()> {
+    ensure!(new_request(false) == [1, 0] && new_request(true) == [1, 1]);
+    ensure!(!decode_new_request(&[1, 0])?);
+    ensure!(decode_new_request(&[1, 1])?);
+    for other in [&[][..], &[1], &[1, 2], &[2, 0], &[1, 0, 0]] {
+        ensure!(decode_new_request(other).is_err(), "{other:?}");
+    }
+    Ok(())
 }
 
 #[test]

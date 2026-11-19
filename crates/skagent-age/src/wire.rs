@@ -17,7 +17,7 @@ use crate::stanza::{STANZA_BYTES, Stanza};
 /// [`UnwrapReply`].
 pub const UNWRAP_EXTENSION: &str = "age-unwrap@skagent";
 
-/// Creates an age identity on a security key: [`simple_request`], answered
+/// Creates an age identity on a security key: [`new_request`], answered
 /// with a [`NewReply`].
 pub const NEW_EXTENSION: &str = "age-new@skagent";
 
@@ -118,6 +118,30 @@ pub fn check_simple_request(details: &[u8]) -> Result<()> {
     let mut reader = Reader(details);
     reader.version()?;
     reader.end()
+}
+
+/// The details of a request for a new identity. `another`: also on a
+/// security key that holds one already.
+#[must_use]
+pub fn new_request(another: bool) -> Vec<u8> {
+    vec![VERSION, u8::from(another)]
+}
+
+/// Whether a request for a new identity asks for `another`.
+///
+/// # Errors
+///
+/// Returns an error for anything but one well-formed request.
+pub fn decode_new_request(details: &[u8]) -> Result<bool> {
+    let mut reader = Reader(details);
+    reader.version()?;
+    let another = match reader.byte()? {
+        0 => false,
+        1 => true,
+        other => bail!("unknown flags {other} in a request for a new identity"),
+    };
+    reader.end()?;
+    Ok(another)
 }
 
 /// Asks for the file key of one file.

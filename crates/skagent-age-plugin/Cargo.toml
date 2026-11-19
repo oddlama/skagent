@@ -1,0 +1,21 @@
+[package]
+name = "skagent-age-plugin"
+description = "age-plugin-skagent: age's plugin protocol in front of skagent, the agent that holds the key"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+rustix = { workspace = true, features = ["event", "rand"] }
+skagent-age.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

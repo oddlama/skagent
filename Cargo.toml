@@ -31,6 +31,7 @@ rustix = { version = "1", features = ["fs", "mm", "param", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 skagent-age = { path = "crates/skagent-age" }
+skagent-age-plugin = { path = "crates/skagent-age-plugin" }
 skagent-fds = { path = "crates/skagent-fds" }
 skagent-fido = { path = "crates/skagent-fido" }
 skagent-popup = { path = "crates/skagent-popup" }

@@ -2140,6 +2140,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "skagent-age-plugin"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "rustix",
+ "skagent-age",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
 name = "skagent-fds"
 version = "0.1.0"
 dependencies = [
