@@ -208,6 +208,12 @@ impl Peer {
         self.pidfd.is_some()
     }
 
+    /// The pidfd that pins the peer, where the kernel has them for peers.
+    #[must_use]
+    pub fn pidfd(&self) -> Option<&OwnedFd> {
+        self.pidfd.as_ref()
+    }
+
     /// What started the age client this peer (the plugin) works for, as the
     /// process list names it: `agenix` for a script that runs age, `age`
     /// itself when a shell ran it. A hint for prompts, read from `/proc`

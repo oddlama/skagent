@@ -8,6 +8,7 @@
 
 pub mod age;
 pub mod agent;
+pub mod ancestry;
 pub mod bindings;
 pub mod cancel;
 pub mod cli;
