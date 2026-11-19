@@ -183,6 +183,10 @@ pkgs.testers.runNixOSTest {
         # Next to a native post-quantum recipient, never next to a classic one.
         alice_ok("echo for-both | age -e -i ~/id.txt -r $(age-keygen -y ~/native.key) -o ~/both.age")
         assert alice_ok("age -d -i ~/native.key ~/both.age").strip() == "for-both"
+        # The same with rage, as agenix-rekey encrypts to a master identity
+        # and a backup key.
+        alice_ok("echo for-both-by-rage | rage -e -i ~/id.txt -r $(age-keygen -y ~/native.key) -o ~/rekey.age")
+        assert alice_ok("age -d -i ~/native.key ~/rekey.age").strip() == "for-both-by-rage"
         alice_ok("age-keygen -o ~/classic.key 2>/dev/null")
         status, out = alice("echo no | age -e -i ~/id.txt -r $(age-keygen -y ~/classic.key) -o ~/mixed.age")
         assert status != 0 and "can't mix post-quantum and classic" in out, out
@@ -205,6 +209,7 @@ pkgs.testers.runNixOSTest {
             ("rage", "~/age.age", "from-age"),
             ("rage", "~/identity.age", "from-the-identity"),
             ("age", "~/both.age", "for-both"),
+            ("rage", "~/rekey.age", "for-both-by-rage"),
         ]:
             before = (prompts(), touches())
             status, out = decrypt(client, file)
@@ -214,7 +219,7 @@ pkgs.testers.runNixOSTest {
         status, out = decrypt("age", "~/age.age", "-j skagent")
         assert (status, out.strip()) == (0, "from-age"), out
         expect(before, 0, 1, "the identity at hand")
-        assert journal("skagent").count("agent: decrypted") == 6
+        assert journal("skagent").count("agent: decrypted") == 7
 
     with subtest("without a touch there is no file key"):
         touched = touches()
