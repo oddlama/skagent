@@ -17,10 +17,7 @@ needs your PIN and a touch. skagent caches the PIN securely and can handle multi
 - 💬 **Prompts that tell you what you sign**, plus a notification while the key waits for a touch
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/REPLACE-skagent-popup-flow-dark">
-    <img alt="skagent's popup: the PIN for github-work, then touching the YubiKey, then Signed" width="780" src="https://github.com/user-attachments/assets/REPLACE-skagent-popup-flow-light">
-  </picture>
+  <img alt="skagent's popup, eight times. In its light and dark presets: asking for the PIN of Desk 5C NFC to load its keys, waiting for a touch for github-work, asking to plug in Desk 5C NFC because the plugged-in key doesn't hold github-work, and listing 3 loaded keys. In four styles: Catppuccin Mocha waiting for the touch that starts a batch of decryptions, Solarized Light asking for a PIN with requests waiting, Gruvbox Dark in IBM Plex Sans after signing, and green on black in a monospaced font after a wrong PIN" width="880" src="https://github.com/user-attachments/assets/REPLACE-skagent-popup">
 </p>
 
 ## 📦 Installation
@@ -196,16 +193,10 @@ typo can't go unnoticed.
 
 ### The popup
 
-Instead of pinentry, skagent can use its own popup: one window that takes you
-from the PIN to the touch to the result, and tells you what went wrong if
-something does. It replaces the touch notification.
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/REPLACE-skagent-popup-help-dark">
-    <img alt="skagent's popup asking to plug in Desk 5C NFC, saying the PIN was wrong with 6 tries left, and listing 3 keys it loaded" width="780" src="https://github.com/user-attachments/assets/REPLACE-skagent-popup-help-light">
-  </picture>
-</p>
+Instead of pinentry, skagent can use its own popup, the one in the picture at
+the top: one window that takes you from the PIN to the touch to the result,
+and tells you what went wrong if something does. It replaces the touch
+notification.
 
 ```nix
 services.skagent.popup.enable = true;
@@ -222,12 +213,9 @@ The popup comes in light and dark, following your desktop (it asks the
 desktop portal; without one, set `appearance`). Both are presets you can
 adjust: colours, fonts and size.
 
-<p align="center">
-  <img alt="The popup in four styles: Catppuccin Mocha asking for a PIN, Solarized Light waiting for a touch, Gruvbox Dark in IBM Plex Sans listing loaded keys, and green on black in a monospaced font after a wrong PIN" width="880" src="https://github.com/user-attachments/assets/REPLACE-skagent-popup-styles">
-</p>
-
-Catppuccin Mocha and Solarized Light are six colours each, Gruvbox Dark adds a
-font, and the last one is nobody's palette. Their settings are in
+The second row of the picture at the top shows four styles. Catppuccin Mocha
+and Solarized Light are six colours each, Gruvbox Dark adds a font, and the
+last one is nobody's palette. Their settings are in
 [`nix/screenshots/themes`](nix/screenshots/themes).
 
 ```nix

@@ -225,20 +225,27 @@ VARIANTS: list[tuple[str, dict, list[dict], str]] = [
     ("create-failed-unplugged", failed("unplugged", NEW_IDENTITY, request=CREATE), [], ""),
 ]
 
-# The README's pictures: which variants stand side by side.
-STRIPS = {
-    "flow": ["pin", "touch", "signed"],
-    "help": ["no-key-known", "wrong-pin", "loaded-3"],
-    "age": ["decrypt-pin", "batch-touch", "batch-started"],
-}
+# The README's picture, two rows of four. The first row: variants in the
+# presets, light and dark in turn.
+README_ROW = [
+    ("load-pin", "light"),
+    ("touch", "dark"),
+    ("wrong-key", "light"),
+    ("loaded-3", "dark"),
+]
 
-# The styled row: a configuration, light or dark, and the screen to show.
+# The styled row under it: a configuration, light or dark, and the screen to
+# show. Eight different screens in all, and no two of a kind above each
+# other.
 STYLED = [
-    ("catppuccin-mocha", "dark", "pin"),
-    ("solarized-light", "light", "touch"),
-    ("gruvbox-dark", "dark", "load-done"),
+    ("catppuccin-mocha", "dark", "batch-touch"),
+    ("solarized-light", "light", "queue"),
+    ("gruvbox-dark", "dark", "done"),
     ("terminal", "dark", "wrong-pin"),
 ]
+
+# Between the popups of the README's picture, in the pixels of the shots.
+GAP = 48
 
 # ------------------------------------------------------------- the drawing
 
@@ -329,7 +336,7 @@ with subtest("styled: a configuration each, as --preview shows it"):
         shoot(raw, f"{PINENTRY} --preview {screen} --theme {theme} --config {THEMES[style]}")
         cut_out(raw, f"{SHOTS}/styled/{style}.png")
 
-with subtest("the sheets and the README's pictures"):
+with subtest("the sheets and the README's picture"):
     machine.succeed(f"install -d {SHOTS}/readme")
     for theme in ["light", "dark"]:
         files = " ".join(f"{SHOTS}/matrix/{theme}/{name}.png" for name, _, _, _ in VARIANTS)
@@ -337,14 +344,12 @@ with subtest("the sheets and the README's pictures"):
             f"magick montage -background '{PAGE[theme]}' -fill '{INK[theme]}' -font {LABEL_FONT} -pointsize 20"
             f" -label '%t' {files} -tile 8x -geometry 360x360+20+14 -strip {SHOTS}/matrix/sheet-{theme}.png"
         )
-        for strip, names in STRIPS.items():
-            files = " ".join(f"{SHOTS}/matrix/{theme}/{name}.png" for name in names)
-            machine.succeed(
-                f"magick {files} -background none +smush 48 -strip"
-                f" {SHOTS}/readme/skagent-popup-{strip}-{theme}.png"
-            )
-    files = " ".join(f"{SHOTS}/styled/{style}.png" for style, _, _ in STYLED)
-    machine.succeed(f"magick {files} -background none +smush 48 -strip {SHOTS}/readme/skagent-popup-styles.png")
+    presets = " ".join(f"{SHOTS}/matrix/{theme}/{name}.png" for name, theme in README_ROW)
+    styled = " ".join(f"{SHOTS}/styled/{style}.png" for style, _, _ in STYLED)
+    machine.succeed(
+        f"magick '(' {presets} -background none +smush {GAP} ')' '(' {styled} -background none +smush {GAP} ')'"
+        f" -background none -smush {GAP} -strip {SHOTS}/readme/skagent-popup.png"
+    )
 
 machine.succeed(f"tar -C {SHOTS} -cf /tmp/screenshots.tar matrix styled readme")
 machine.copy_from_machine("/tmp/screenshots.tar")
