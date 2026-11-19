@@ -174,9 +174,12 @@ pkgs.testers.runNixOSTest {
         )
         machine.wait_until_succeeds("ls ${runtime} | grep -E '^wayland-[0-9]+$'", timeout=30)
         display = machine.succeed("ls ${runtime} | grep -E '^wayland-[0-9]+$' | head -1").strip()
+        # WAYLAND_DEBUG, as someone debugging their desktop may have it in
+        # the session: with it the Wayland library logs every key it gets.
         machine.succeed(
             f"systemd-run --unit skagent --uid alice --setenv XDG_RUNTIME_DIR=${runtime}"
             f" --setenv WAYLAND_DISPLAY={display} --setenv SKAGENT_PINENTRY_LOG=skagent_pinentry=debug"
+            " --setenv WAYLAND_DEBUG=1"
             " ${package}/bin/skagent serve --log skagent=debug --socket ${socket}"
             " --config ${dir}/config.toml --popup ${pinentry}/bin/skagent-pinentry"
         )
@@ -199,6 +202,8 @@ pkgs.testers.runNixOSTest {
         assert status != 0, "alice could read the popup's environment"
         type_keys("${pin} -k Return")
         wait_for_state(mark, "touch")
+        # Nothing of the Wayland protocol is in the journal, so no key is.
+        assert "wl_keyboard" not in journal("skagent"), "the keys typed into the popup were logged"
         settle()
         assert screenshot("touch") > 0.8, "the popup isn't showing"
         touch()

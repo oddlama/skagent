@@ -94,6 +94,13 @@ fn run(cli: Cli) -> Result<()> {
     // no core file gets any of this process, and no other process of the
     // user reads it.
     skagent_secret::harden_process()?;
+    // With this set, the Wayland client library writes every message it
+    // gets to stderr: each key of a typed PIN, into the agent's log. The
+    // agent doesn't pass it on; whoever else starts the popup may. A preview
+    // is given no PIN.
+    if cli.preview.is_none() && std::env::var_os("WAYLAND_DEBUG").is_some() {
+        bail!("WAYLAND_DEBUG is set, which would log every key typed into the popup; unset it");
+    }
     let mode = cli.theme.map(|theme| match theme {
         ThemeArg::Light => Mode::Light,
         ThemeArg::Dark => Mode::Dark,

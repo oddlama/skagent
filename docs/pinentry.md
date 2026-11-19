@@ -113,6 +113,11 @@ and in the popup. Look again when the rev changes.
   and `PR_SET_DUMPABLE=0`. So what lingers in its heap reaches no core file,
   and no other process of the user reads it. It can still be swapped out;
   the `SecretBuffer`s can't.
+- **`WAYLAND_DEBUG`** makes libwayland-client write every message it gets
+  to stderr, `wl_keyboard.key` with each key code among them, and the
+  popup's stderr is the agent's log. The agent takes the variable out of the
+  environment of every prompt program it starts (stock pinentry programs
+  use the same library), and the popup refuses to take a PIN with it set.
 - **Not in reach:** the compositor, the kernel's input layer and an input
   method see every key, and root reads anything.
 

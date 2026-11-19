@@ -271,9 +271,13 @@ pub fn checked_pin(bytes: &[u8]) -> Result<SecretBuffer> {
     SecretBuffer::from_slice(bytes).context("storing the PIN in locked memory")
 }
 
-/// A command for a prompt program (pinentry, askpass): it gets stdio and the
-/// agent's environment, nothing else of the agent's, and is killed when the
-/// request is dropped (a client that disconnects takes its prompt along).
+/// The environment variable that makes libwayland-client log its protocol.
+const WAYLAND_DEBUG: &str = "WAYLAND_DEBUG";
+
+/// A command for a prompt program (pinentry, askpass, the popup): it gets
+/// stdio and the agent's environment but for [`WAYLAND_DEBUG`], nothing else
+/// of the agent's, and is killed when the request is dropped (a client that
+/// disconnects takes its prompt along).
 pub(crate) fn prompt_command(program: &Path) -> Command {
     let mut command = Command::new(program);
     command
@@ -281,6 +285,10 @@ pub(crate) fn prompt_command(program: &Path) -> Command {
         .env_remove("LISTEN_PID")
         .env_remove("LISTEN_FDS")
         .env_remove("LISTEN_FDNAMES")
+        // With it the Wayland client library writes every message it gets
+        // to stderr, each key of a typed PIN among them, and a prompt's
+        // stderr is the agent's: the journal.
+        .env_remove(WAYLAND_DEBUG)
         .kill_on_drop(true);
     // Neither the agent socket nor an open security key.
     skagent_fds::inherit_stdio_only(command.as_std_mut());
