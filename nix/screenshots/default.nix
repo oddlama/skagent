@@ -1,7 +1,7 @@
 # Pictures of the popup, drawn by skagent-pinentry itself in a VM: every
 # state in light and dark (`matrix/`, with a sheet of each), a few styles
 # (`styled/`, from `themes/`) and the README's picture (`readme/`): four
-# screens in the presets above the four styles.
+# light popups above four dark ones, presets and styles.
 #
 #   nix build .#screenshots
 #

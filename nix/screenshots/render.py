@@ -225,23 +225,24 @@ VARIANTS: list[tuple[str, dict, list[dict], str]] = [
     ("create-failed-unplugged", failed("unplugged", NEW_IDENTITY, request=CREATE), [], ""),
 ]
 
-# The README's picture, two rows of four. The first row: variants in the
-# presets, light and dark in turn.
-README_ROW = [
-    ("load-pin", "light"),
-    ("touch", "dark"),
-    ("wrong-key", "light"),
-    ("loaded-3", "dark"),
+# The styled popups: a name, the configuration, light or dark, and the
+# screen to show.
+STYLED = [
+    ("catppuccin-latte", "catppuccin", "light", "queue"),
+    ("solarized-light", "solarized-light", "light", "done"),
+    ("catppuccin-mocha", "catppuccin", "dark", "batch-touch"),
+    ("gruvbox-dark", "gruvbox-dark", "dark", "load-done"),
+    ("terminal", "terminal", "dark", "wrong-pin"),
 ]
 
-# The styled row under it: a configuration, light or dark, and the screen to
-# show. Eight different screens in all, and no two of a kind above each
+# The README's picture, two rows of four: the light ones above the dark
+# ones, each row from the preset to the styles, Catppuccin's two under each
+# other. A popup is a variant in a preset ("light", "dark") or a styled one
+# ("styled"). Eight different screens, and no two of a kind above each
 # other.
-STYLED = [
-    ("catppuccin-mocha", "dark", "batch-touch"),
-    ("solarized-light", "light", "queue"),
-    ("gruvbox-dark", "dark", "done"),
-    ("terminal", "dark", "wrong-pin"),
+README_ROWS = [
+    [("light", "load-pin"), ("light", "touch"), ("styled", "catppuccin-latte"), ("styled", "solarized-light")],
+    [("dark", "wrong-key"), ("dark", "loaded-3"), ("styled", "catppuccin-mocha"), ("styled", "terminal")],
 ]
 
 # Between the popups of the README's picture, in the pixels of the shots.
@@ -331,10 +332,10 @@ with subtest("every state, light and dark"):
 
 with subtest("styled: a configuration each, as --preview shows it"):
     machine.succeed(f"install -d -o alice -g users {SHOTS}/raw-styled {SHOTS}/styled")
-    for style, theme, screen in STYLED:
-        raw = f"{SHOTS}/raw-styled/{style}.png"
-        shoot(raw, f"{PINENTRY} --preview {screen} --theme {theme} --config {THEMES[style]}")
-        cut_out(raw, f"{SHOTS}/styled/{style}.png")
+    for name, config, theme, screen in STYLED:
+        raw = f"{SHOTS}/raw-styled/{name}.png"
+        shoot(raw, f"{PINENTRY} --preview {screen} --theme {theme} --config {THEMES[config]}")
+        cut_out(raw, f"{SHOTS}/styled/{name}.png")
 
 with subtest("the sheets and the README's picture"):
     machine.succeed(f"install -d {SHOTS}/readme")
@@ -344,12 +345,16 @@ with subtest("the sheets and the README's picture"):
             f"magick montage -background '{PAGE[theme]}' -fill '{INK[theme]}' -font {LABEL_FONT} -pointsize 20"
             f" -label '%t' {files} -tile 8x -geometry 360x360+20+14 -strip {SHOTS}/matrix/sheet-{theme}.png"
         )
-    presets = " ".join(f"{SHOTS}/matrix/{theme}/{name}.png" for name, theme in README_ROW)
-    styled = " ".join(f"{SHOTS}/styled/{style}.png" for style, _, _ in STYLED)
-    machine.succeed(
-        f"magick '(' {presets} -background none +smush {GAP} ')' '(' {styled} -background none +smush {GAP} ')'"
-        f" -background none -smush {GAP} -strip {SHOTS}/readme/skagent-popup.png"
+    rows = " ".join(
+        "'(' "
+        + " ".join(
+            f"{SHOTS}/styled/{name}.png" if kind == "styled" else f"{SHOTS}/matrix/{kind}/{name}.png"
+            for kind, name in row
+        )
+        + f" -background none +smush {GAP} ')'"
+        for row in README_ROWS
     )
+    machine.succeed(f"magick {rows} -background none -smush {GAP} -strip {SHOTS}/readme/skagent-popup.png")
 
 machine.succeed(f"tar -C {SHOTS} -cf /tmp/screenshots.tar matrix styled readme")
 machine.copy_from_machine("/tmp/screenshots.tar")
