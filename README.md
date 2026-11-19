@@ -2,27 +2,29 @@
   <img alt="skagent's popup, eight times. Four light ones: in its light preset asking for the PIN of Desk 5C NFC to load its keys and waiting for a touch for github-work, in Catppuccin Latte asking for a PIN with requests waiting, and in Solarized Light after signing. Four dark ones: in its dark preset asking to plug in Desk 5C NFC because the plugged-in key doesn't hold github-work and listing 3 loaded keys, in Catppuccin Mocha waiting for the touch that starts a batch of decryptions, and green on black in a monospaced font after a wrong PIN" width="880" src="https://github.com/user-attachments/assets/3574ae98-1579-47c9-b9b2-a51e37da79e5">
 </p>
 
-[📦 Installation](#-installation) | [🧭 Usage](#-usage) | [🔐 Security](#-security) | [📐 Design](docs/design.md)
+[📦 Installation](#-installation) | [🧭 Usage](#-usage) | [🔐 Security](#-security)
 
 ## 🔑 skagent
 
-skagent is an ssh-agent for FIDO2 security keys like the YubiKey. It works with
-`ed25519-sk` keys created with `verify-required`, where every signature
-needs your PIN and a touch. skagent caches the PIN securely and can handle multiple keys.
+skagent is a specialized (ssh-)agent for FIDO2 security keys like the YubiKey
+with support for multiple hardware keys, multiple ssh keys per hardware key,
+forwarding support and encryption via an [`age`](https://github.com/FiloSottile/age) plugin.
 
-- 🛡️ **Hardened** with PINs in locked, guarded and zeroized memory, no core dumps and no ptrace
-- ⏱️ **Bounded PIN cache** with a hard lifetime, an optional idle timeout and per-key policies
-- 🔒 **Forgets your PIN** when the screen locks, the machine sleeps or the key is unplugged
+It was primarily designed for convenient and secure handling of `ed25519-sk`
+keys when created with `verify-required`, where every signature would need both
+the PIN and a touch. skagent can securely cache the PIN and provide proper UI
+popups when your key needs your attention.
+
+- 🛡️ **Hardened** with PINs in non-dumpable, locked, guarded and zeroized memory (no core dumps and no ptrace)
+- 🤝 **Pairs with your security keys**, so a fake key that pretends to be yours can never extract your PIN accidentally
+- 📥 **No stub files**, it can load the resident keys from the security key directly
+- 🔒 **Forgets your PIN** after a time delay, when the screen locks, the machine sleeps or the key is unplugged (all configurable)
+- 🗄️ **Age support** with a custom age plugin post-quantum key derived from your security key
+- ⏩ **Agent forwarding** with support for destination constraints, including forwarding for aforementioned `age` keys
 - 🗝️ **Multiple security keys** with separate PIN caches, recognized by their serial number
-- 🤝 **Pairs with your security keys**, so a fake key that pretends to be yours never gets your PIN
-- 📥 **Loads resident keys** straight from the security key, no stub files needed
-- 🌍 **Agent forwarding and `ssh-add -h`** destination constraints, checked like OpenSSH does
-- 🗄️ **Decrypts age files** with a post-quantum key derived from your security key, one touch per file or one for a whole command
-- 💬 **Prompts that tell you what you sign**, plus a notification while the key waits for a touch
+- 💬 **Custom pinentry** based on GPUI which is aware of the operation and state of your security key
 
 ## 📦 Installation
-
-skagent runs on Linux 5.11 or newer and asks for PINs with a graphical pinentry.
 
 ### home-manager
 
