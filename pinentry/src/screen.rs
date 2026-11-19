@@ -379,6 +379,7 @@ pub fn request_subtitle(request: &Request) -> Subtitle {
         }
         Request::Sign { namespace } if namespace == "git" => Subtitle::muted("Git signature"),
         Request::Sign { namespace } => Subtitle::muted(format!("Signature for \"{namespace}\"")),
+        Request::Create => Subtitle::muted("Create an age identity"),
         Request::Decrypt { by } => {
             let mut spans = vec![Span::text("Decrypt a file")];
             match by {
@@ -500,10 +501,10 @@ fn pair(security_key: Option<&SecurityKey>, timeout_ms: u64) -> Screen {
 }
 
 fn signed(key: &Key, request: &Request) -> Screen {
-    let title = if matches!(request, Request::Decrypt { .. }) {
-        "Decrypted"
-    } else {
-        "Signed"
+    let title = match request {
+        Request::Decrypt { .. } => "Decrypted",
+        Request::Create => "Created",
+        Request::Login { .. } | Request::Sign { .. } | Request::Unknown => "Signed",
     };
     Screen {
         anchor: Anchor::key(key, Tint::Key),
@@ -580,10 +581,10 @@ fn touch(
         (false, Some(_)) => "Touch your YubiKey",
         (false, None) => "Touch your security key",
     };
-    let now_to = if matches!(request, Request::Decrypt { .. }) {
-        "now to decrypt"
-    } else {
-        "now to sign"
+    let now_to = match request {
+        Request::Decrypt { .. } => "now to decrypt",
+        Request::Create => "now to read its recipient",
+        Request::Login { .. } | Request::Sign { .. } | Request::Unknown => "now to sign",
     };
     let subtitle = match (again, security_key) {
         (true, Some(security_key)) => Subtitle::muted(format!("{} · {now_to}", security_key.name)),

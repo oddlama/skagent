@@ -343,3 +343,19 @@ fn a_decryption_says_who_asks() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn creating_an_identity_is_a_request_kind_of_its_own() -> Result<()> {
+    let message = Message::Show {
+        seq: 1,
+        waiting: Vec::new(),
+        state: Box::new(State::Signed {
+            key: key(),
+            request: Request::Create,
+        }),
+    };
+    let text = String::from_utf8(encode_message(&message)?)?;
+    ensure!(text.contains(r#""request":{"kind":"create"}"#), "{text}");
+    ensure!(decode_message(text.trim_end())? == message);
+    Ok(())
+}

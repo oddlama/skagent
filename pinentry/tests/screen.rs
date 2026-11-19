@@ -286,6 +286,34 @@ fn a_decryption_is_decrypted_not_signed() {
     assert_eq!(pin.subtitle.text(), "Decrypt a file · agenix");
 }
 
+/// Creating an age identity: the PIN, then two touches.
+#[test]
+fn creating_an_identity_says_what_each_touch_is_for() {
+    let key = || Key {
+        emoji: None,
+        label: "New age identity".to_owned(),
+        fingerprint: String::new(),
+    };
+    assert_eq!(request_subtitle(&Request::Create).text(), "Create an age identity");
+    let touch = |again| {
+        Screen::of(&State::Touch {
+            key: key(),
+            request: Request::Create,
+            security_key: None,
+            timeout_ms: 15_000,
+            again,
+        })
+    };
+    assert_eq!(touch(false).subtitle.text(), "Create an age identity");
+    assert_eq!(touch(true).title, "Touch once more");
+    assert_eq!(touch(true).subtitle.text(), "now to read its recipient");
+    let done = Screen::of(&State::Signed {
+        key: key(),
+        request: Request::Create,
+    });
+    assert_eq!(done.title, "Created");
+}
+
 /// Keys that aren't YubiKeys report no serial, so no name.
 #[test]
 fn screens_without_a_yubikey_name_still_read() {

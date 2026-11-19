@@ -277,6 +277,10 @@ pub enum Request {
         /// Who asks.
         by: Requester,
     },
+    /// Creating an age identity on a security key: the PIN, a touch for the
+    /// credential and one more to read its recipient. The [`Key`] of the
+    /// state stands for the identity to be.
+    Create,
     /// Data of no known kind.
     Unknown,
 }
