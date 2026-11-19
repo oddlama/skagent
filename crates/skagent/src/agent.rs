@@ -894,6 +894,7 @@ impl AgentSession {
                     batch = %member.id,
                     command = %member.command,
                     seconds = member.remaining.as_secs(),
+                    memory = ?skagent_secret::strongest_backend(),
                     "the batch started: its command's further decryptions with this identity \
                      need no touch"
                 );

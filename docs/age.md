@@ -295,9 +295,11 @@ Extension messages of the ssh-agent protocol, so forwarding carries them:
   that signed its session bind; if that isn't the first hop, the first one is
   named with it, because only that one is a host this machine's ssh connected
   to. Without a bind, with a failed one, or on a connection bound to
-  authenticate: an unverified host. The PIN prompt, the touch notification,
-  the popup (also on its touch screen) and the log say it: "decrypt a file
-  for the host with key SHA256:… (through your forwarded agent)".
+  authenticate: an unverified host. The PIN prompt, the touch notification
+  and the log say it: "decrypt a file for the host with key SHA256:…
+  (through your forwarded agent)". The popup has one line for it, also on
+  its touch screen: "Decrypt a file · for SHA256:+DiY3wvv…", and with
+  several hops the first one alone, "· via SHA256:…".
 - **What the user can't see:** which file. A stanza says nothing about its
   content, so a host can ask for any file it has a copy of. One touch, one
   file.
@@ -366,8 +368,10 @@ the threat model already has.
   rekey", "Batch started", "Create an age identity", "Created". A batch is
   named with the PIN and with every touch, also where the touch screen would
   show the YubiKey's name: after a cached PIN the touch is all the user
-  agrees with. Done as far as words go; the failure screens still say
-  "sign", and all of it needs a look from the popup's design.
+  agrees with. A failure is worded for what was asked ("Couldn't decrypt",
+  "Couldn't create it"): the `failed` state carries the request. All of it
+  needs a look from the popup's design; `nix build .#screenshots` draws
+  every state.
 - **A running batch** is shown by a desktop notification, not by the popup:
   the popup is an overlay that takes the keyboard, and a batch runs for
   minutes. The notification appears once the batch keeps a seed, names the
@@ -466,6 +470,42 @@ break it, watch the test fail, restore.
    source and its calls are run in `vm-age` (see the top); running
    agenix-rekey itself on a repository of secrets with a real security key
    is still to do.
+
+## checking with a real key
+
+The VM tests use a virtual key. What only hardware shows is in a guided
+check:
+
+```sh
+nix run .#age-check
+```
+
+It runs an agent of its own on temporary sockets and state (yours isn't
+asked anything), creates one identity on the plugged-in key, and goes
+through: creating (PIN, two touches), one file per touch, no touch and no
+file (which measures how long the key waits), a batch of 40 files for one
+touch, a program outside a batch, Stop in the notification, unplugging,
+locking the screen, a request through the ssh-agent socket, and a fresh
+agent that finds the identity with `skagent load`. It checks what it can
+from results and from the agent's log, asks about what only a person sees
+(touches, the prompts' words, the notification), and offers to delete the
+identity at the end. Its last block of lines is the report.
+
+What to look out for, beyond its own verdicts:
+
+- **Touches:** two for creating, one per file, one for a whole batch.
+- **Words:** the prompt that starts a batch names it and its command, with
+  the PIN and with the touch; the one through the ssh-agent socket names an
+  unknown host.
+- **The notification:** whether your notification program shows the Stop
+  button, counts in place or stacks new bubbles, and goes away with the
+  batch.
+- **Replugging:** whether the key is recognized again without a touch of its
+  own, and that the PIN is asked for.
+- **The lock:** whether locking your screen reaches the agent at all (it
+  listens to logind).
+- **Times:** how long the key waits for a touch (the popup's ring assumes
+  15 s), and how long 40 files take.
 
 ## later
 

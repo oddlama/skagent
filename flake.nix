@@ -92,6 +92,26 @@
             pkgs.vulkan-loader
             pkgs.wayland
           ];
+
+          # The guided check against a real security key, asking with
+          # `popup` unless told otherwise. Without one (the VM test, which
+          # shouldn't have to build the popup) a prompt has to be named.
+          ageCheck =
+            popup:
+            pkgs.writeShellApplication {
+              name = "skagent-age-check";
+              runtimeInputs = [
+                config.packages.default
+                pkgs.age
+                pkgs.coreutils
+                pkgs.gawk
+                pkgs.gnugrep
+                pkgs.gnused
+                pkgs.libfido2
+              ];
+              runtimeEnv = lib.optionalAttrs (popup != null) { SKAGENT_CHECK_POPUP = popup; };
+              text = builtins.readFile ./nix/age-check.sh;
+            };
         in
         {
           nci = {
@@ -136,6 +156,9 @@
                   rustc = toolchain;
                 };
               };
+            # A guided check of age identities and batches against a real
+            # security key: `nix run .#age-check`.
+            age-check = ageCheck (lib.getExe config.packages.pinentry);
             # Pictures of the popup's every state, drawn by the popup in a VM.
             screenshots = import ./nix/screenshots {
               inherit pkgs lib;
@@ -156,6 +179,11 @@
               vm-age = import ./nix/tests/age.nix {
                 inherit pkgs;
                 package = config.packages.default;
+                testkey = config.packages.testkey;
+              };
+              vm-age-check = import ./nix/tests/age-check.nix {
+                inherit pkgs;
+                ageCheck = ageCheck null;
                 testkey = config.packages.testkey;
               };
               vm-age-forwarding = import ./nix/tests/age-forwarding.nix {
