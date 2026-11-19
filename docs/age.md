@@ -498,7 +498,8 @@ nix run .#age-check
 ```
 
 It runs an agent of its own on temporary sockets and state (yours isn't
-asked anything), creates one identity on the plugged-in key, and goes
+asked anything), creates one identity on the plugged-in key (a mistyped PIN
+is asked for once more), and goes
 through: creating (PIN, two touches), one file per touch, no touch and no
 file (which measures how long the key waits), a batch of 40 files for one
 touch, a program outside a batch, Stop in the notification, unplugging,
@@ -523,6 +524,9 @@ What to look out for, beyond its own verdicts:
   listens to logind).
 - **Times:** how long the key waits for a touch (the popup's ring assumes
   28 s, what a YubiKey 5.8 took), and how long 40 files take.
+- **The PIN retry counter:** it must not be lower afterwards. It can be
+  higher: a right PIN sets it back to where it starts, so a key that came
+  with a try missing (a mistyped PIN before) leaves with all of them.
 
 What it showed on a YubiKey 5.8 is in
 [`research/hmac-secret.md`](research/hmac-secret.md).

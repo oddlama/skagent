@@ -68,9 +68,20 @@ pkgs.testers.runNixOSTest {
     machine.succeed("${builtins.elemAt notifications.start 1}")
     machine.wait_until_succeeds("${notifications.ready}")
 
+    with subtest("a wrong PIN before the check: one try is gone"):
+        # Like a check that was given a wrong PIN and gave up, which is how
+        # the counter came to be at 7 on a real key. Without a terminal
+        # fido2-token reads the PIN from its input.
+        device = machine.succeed("${pkgs.libfido2}/bin/fido2-token -L | grep -F 'check key' | cut -d: -f1").strip()
+        machine.fail(f"echo 000000 | setsid -w ${pkgs.libfido2}/bin/fido2-token -L -r {device}")
+        assert "pin retries: 7" in machine.succeed(f"${pkgs.libfido2}/bin/fido2-token -I {device}")
+        # And the first PIN the check is given is wrong, too.
+        machine.succeed("install -m 0600 -o alice -g users /dev/null ${dir}/once && echo 000000 > ${dir}/once")
+
     with subtest("the check passes against the virtual key, touched exactly as it says"):
         command = (
             "DBUS_SESSION_BUS_ADDRESS=${notifications.address} SKAGENT_TEST_ANSWER=${pin}"
+            " SKAGENT_TEST_ANSWER_ONCE=${dir}/once"
             " age-check-user ${pin} ${touchFile} ${unpluggedFile} ${dir}/notifications.press --"
             " skagent-age-check --askpass /run/current-system/sw/bin/test-askpass --files 8"
         )
@@ -85,7 +96,11 @@ pkgs.testers.runNixOSTest {
         # No screen is locked here: the check goes on by forgetting the PINs.
         skipped = [line for line in report.splitlines() if line.startswith("skip")]
         assert len(skipped) == 1 and "locking the screen" in skipped[0], skipped
+        # A mistyped PIN doesn't end the check: it asks once more.
+        assert "That PIN was wrong." in out, out
         for line in [
+            "key   PIN retries 7, free slots",
+            "note  [2] a PIN was mistyped, and entered again",
             "ok    [3] a file is decrypted",
             "ok    [3] with the cached PIN",
             "ok    [3] a file for another recipient costs a touch and opens nothing",
@@ -108,7 +123,9 @@ pkgs.testers.runNixOSTest {
             "ok    [10] for an unverified host, as the log has it",
             "ok    [11] the identity's recipient is the one from the start",
             "note  [11] finding the identity among 1 took 1 touch(es)",
-            "ok    [12] the PIN retry counter is where it was (8)",
+            # A right PIN set the counter back: that is no failure.
+            "ok    [12] the PIN retry counter is no lower than it was (7 before, 8 now)",
+            "note  [12] the counter went up: the last PIN the key was given before this check was a wrong one",
             "ok    [12] the test credential is deleted",
         ]:
             assert line in report, (line, report)

@@ -303,16 +303,35 @@ say "skagent asks for the PIN. Then the key should blink twice: once to create"
 say "the credential, once to read its recipient."
 todo "Enter the PIN, then touch the key each time it blinks."
 started=$(date +%s.%N)
-recipient=$(skagent age new 2>"$work/new.err")
-if [ -z "$recipient" ] && grep -q . "$work/new.err" && [ "$(said 'holds an age identity already')" -ge 1 ]; then
+recipient=
+mistyped=0
+# new_identity ARGUMENTS…: skagent age new, once more after a wrong PIN. Once
+# for the whole check: three wrong PINs in a row block the key until it is
+# plugged in again.
+new_identity() {
+  local wrong
+  wrong=$(said 'FIDO_ERR_PIN_INVALID')
+  recipient=$(skagent age new "$@" 2>"$work/new.err")
+  [ -z "$recipient" ] || return 0
+  if [ "$mistyped" = 1 ] || [ "$(said 'FIDO_ERR_PIN_INVALID')" -le "$wrong" ]; then
+    return 1
+  fi
+  mistyped=1
+  todo "That PIN was wrong. Enter it once more, then touch the key each time it blinks."
+  recipient=$(skagent age new "$@" 2>"$work/new.err")
+  [ -n "$recipient" ]
+}
+held=$(said 'holds an age identity already')
+if ! new_identity && [ "$(said 'holds an age identity already')" -gt "$held" ]; then
   say "  The key holds an age identity already; adding one more for the check."
   todo "Enter the PIN again, then touch the key each time it blinks."
-  recipient=$(skagent age new --another 2>"$work/new.err")
+  new_identity --another || true
 fi
 [ -n "$recipient" ] || {
   cat "$work/new.err" >&2
   die "no identity was created"
 }
+[ "$mistyped" = 0 ] || result "note  [$step_number] a PIN was mistyped, and entered again"
 result "time  [$step_number] creating took $(awk -v a="$started" -v b="$(date +%s.%N)" 'BEGIN { printf "%.1f", b - a }') s, PIN included"
 is_recipient() { [ "${#1}" = 1959 ] && [ "${1#age1pq1}" != "$1" ]; }
 check "the recipient is a post-quantum age recipient of 1959 characters" is_recipient "$recipient"
@@ -338,13 +357,15 @@ todo "Touch the key when it blinks."
 cached=$(said 'using the cached PIN')
 check "a file is decrypted" test "$(decrypt f1.age 2>"$work/err")" = file-1
 check "with the cached PIN" test "$(said 'using the cached PIN')" -gt "$cached"
+say "Next a file for somebody else. It takes a touch too, and can't be"
+say "decrypted: the popup should end in \"Couldn't decrypt\"."
 todo "Touch the key once more: a file for somebody else."
 if decrypt other.age >/dev/null 2>"$work/err"; then
   bad "a file for another recipient was decrypted"
 else
   ok "a file for another recipient costs a touch and opens nothing"
 fi
-ask "one-file" "Did each of the two ask for one touch, without the PIN, and say that a file is decrypted?"
+ask "one-file" "Did each of the two ask for one touch, without the PIN, to decrypt a file? In the popup: did the first end in \"Decrypted\", the second in \"Couldn't decrypt\"?"
 
 step "No touch, no file"
 say "This measures how long the key waits for a touch."
@@ -532,7 +553,15 @@ step "The key afterwards"
 stop_agent
 dev=$(device | head -n 1)
 retries_after=$(device_field "$dev" 'pin retries')
-check "the PIN retry counter is where it was ($retries_before)" test "$retries_after" = "$retries_before"
+if [ -n "$retries_before" ] && [ -n "$retries_after" ] && [ "$retries_after" -ge "$retries_before" ]; then
+  ok "the PIN retry counter is no lower than it was ($retries_before before, $retries_after now)"
+else
+  bad "the PIN retry counter went down: ${retries_before:-unknown} before, ${retries_after:-unknown} now"
+fi
+if [ "${retries_after:-0}" -gt "${retries_before:-0}" ]; then
+  # A right PIN sets the counter back to where it starts.
+  result "note  [$step_number] the counter went up: the last PIN the key was given before this check was a wrong one"
+fi
 printf '\033[1;36m ? \033[0m %s [Y/n] ' "Delete the test identity from the key now? fido2-token asks for the PIN."
 read -r answer </dev/tty
 if [ "${answer:-y}" = y ] || [ "${answer:-y}" = Y ]; then

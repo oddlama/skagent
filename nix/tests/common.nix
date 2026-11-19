@@ -20,7 +20,10 @@
   # while the asking process keeps running.
   testAskpass = pkgs.writeShellApplication {
     name = "test-askpass";
-    runtimeInputs = [ pkgs.coreutils ];
+    runtimeInputs = [
+      pkgs.coreutils
+      pkgs.gnused
+    ];
     text = ''
       if [[ -n ''${SKAGENT_TEST_ASKPASS_LOG:-} ]]; then
         printf '%s\n' "''${1:-}" >>"$SKAGENT_TEST_ASKPASS_LOG"
@@ -28,7 +31,11 @@
       while [[ -n ''${SKAGENT_TEST_ASKPASS_GATE:-} && -e $SKAGENT_TEST_ASKPASS_GATE ]]; do
         sleep 0.05
       done
-      if [[ -n ''${SKAGENT_TEST_ANSWER_FILE:-} ]]; then
+      if [[ -n ''${SKAGENT_TEST_ANSWER_ONCE:-} && -s $SKAGENT_TEST_ANSWER_ONCE ]]; then
+        # An answer for one prompt: the file's first line, which is used up.
+        head -n 1 "$SKAGENT_TEST_ANSWER_ONCE"
+        sed -i 1d "$SKAGENT_TEST_ANSWER_ONCE"
+      elif [[ -n ''${SKAGENT_TEST_ANSWER_FILE:-} ]]; then
         cat "$SKAGENT_TEST_ANSWER_FILE"
       else
         printf '%s\n' "$SKAGENT_TEST_ANSWER"
