@@ -290,13 +290,16 @@ pub async fn run(args: ServeArgs, activated: Activated) -> Result<()> {
             "not remembering which YubiKey holds which key across restarts"
         ),
     }
+    let notifier = Arc::new(Notifier::default());
+    // Whatever shows the prompts: a batch runs long after them.
+    signer = signer.with_batch_notifier(Arc::clone(&notifier));
     if let Some(popup) = popup {
         // The popup shows the touch itself.
         signer = signer.with_popup(popup);
     } else if args.no_touch_notification {
         tracing::info!("not showing touch notifications");
     } else {
-        signer = signer.with_notifier(Arc::new(Notifier::default()));
+        signer = signer.with_notifier(notifier);
     }
     let (identities, age) = remembered();
     // The socket for age requests only answers skagent's own programs, and

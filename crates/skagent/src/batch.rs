@@ -27,6 +27,7 @@ use tokio::sync::watch;
 
 use crate::ancestry::{NotProven, Pinned, Processes, descends};
 use crate::device::DeviceIdentity;
+use crate::display;
 use crate::pin_cache::CredentialKey;
 
 /// How many batches there can be at once. Each is a running `skagent batch`.
@@ -74,8 +75,63 @@ impl fmt::Display for Ended {
 pub struct Progress {
     /// Files decrypted for it so far.
     pub files: u64,
+    /// It keeps a seed: files are decrypted without a touch.
+    pub keeps: bool,
     /// Set once it is over.
     pub ended: Option<Ended>,
+}
+
+/// What the notification of a batch says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notice {
+    /// The headline.
+    pub summary: String,
+    /// The text below it.
+    pub body: String,
+}
+
+impl Notice {
+    fn summary(command: &str) -> String {
+        format!("skagent batch: {command}")
+    }
+
+    fn files(files: u64) -> String {
+        match files {
+            0 => "No file".to_owned(),
+            1 => "1 file".to_owned(),
+            files => format!("{files} files"),
+        }
+    }
+
+    /// For a batch that decrypts for `command` without a touch, and has
+    /// `remaining` left at most.
+    #[must_use]
+    pub fn running(command: &str, files: u64, remaining: Duration) -> Self {
+        // Never less than what is left.
+        let seconds = remaining
+            .as_secs()
+            .saturating_add(u64::from(remaining.subsec_nanos() > 0));
+        Self {
+            summary: Self::summary(command),
+            body: format!(
+                "{} decrypted without a touch. Ends with the command, or in {} at most.",
+                Self::files(files),
+                display::about(seconds)
+            ),
+        }
+    }
+
+    /// For a batch that ended for `reason` before its command was done.
+    #[must_use]
+    pub fn ended(command: &str, files: u64, reason: Ended) -> Self {
+        Self {
+            summary: Self::summary(command),
+            body: format!(
+                "Ended: {reason}. {} decrypted; the command's further ones take a touch each.",
+                Self::files(files)
+            ),
+        }
+    }
 }
 
 /// A batch that was just opened.
@@ -156,6 +212,7 @@ impl<P> Batch<P> {
     fn tell(&self) {
         self.progress.send_replace(Progress {
             files: self.files,
+            keeps: !self.seeds.is_empty(),
             ended: self.ended,
         });
     }

@@ -67,6 +67,9 @@ pub struct Signer {
     invalidation: watch::Sender<()>,
     /// Shows "touch your security key" while an assertion waits.
     notifier: Option<Arc<Notifier>>,
+    /// Shows the batches that decrypt without a touch, with a button to
+    /// stop them.
+    batch_notifier: Option<Arc<Notifier>>,
     /// The cache policy of keys no rule in `pin_policies` matches.
     default_policy: CachePolicy,
     /// Per-key overrides (`--pin-policy`); the first match wins.
@@ -346,6 +349,7 @@ impl Signer {
             router: Router::default(),
             invalidation: watch::channel(()).0,
             notifier: None,
+            batch_notifier: None,
             default_policy: policy,
             pin_policies: Vec::new(),
             config: Arc::default(),

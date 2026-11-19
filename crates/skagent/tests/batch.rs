@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use skagent::ancestry::{Pinned, Processes};
-use skagent::batch::{Batches, Ended, MAX_BATCHES, Opened, Progress, Served};
+use skagent::batch::{Batches, Ended, MAX_BATCHES, Notice, Opened, Progress, Served};
 use skagent::device::DeviceIdentity;
 use skagent::pin_cache::CredentialKey;
 use skagent_age::{FileKey, Recipient, Seed, Stanza};
@@ -255,15 +255,18 @@ fn the_seed_of_the_first_request_serves_the_following() -> Result<()> {
         Served::NotKept
     ));
     ensure!(batches.seeds() == 0);
+    ensure!(
+        !opened.progress.borrow().keeps,
+        "keeps before anything was derived"
+    );
     ensure!(keep(&mut batches, &opened, 7, now)?);
     ensure!(batches.seeds() == 1);
-    ensure!(
-        *opened.progress.borrow()
-            == Progress {
-                files: 1,
-                ended: None
-            }
-    );
+    let told = Progress {
+        files: 1,
+        keeps: true,
+        ended: None,
+    };
+    ensure!(*opened.progress.borrow() == told);
 
     let Served::FileKey(Some(unwrapped)) = ask(&mut batches, &opened, 7, None, &stanza, now)?
     else {
@@ -331,6 +334,10 @@ fn over(
         opened.progress.borrow().ended == Some(reason),
         "{reason}: told {:?}",
         opened.progress.borrow().ended
+    );
+    ensure!(
+        !opened.progress.borrow().keeps,
+        "{reason}: told that it keeps a seed"
     );
     ensure!(
         matches!(ask(batches, opened, 7, None, stanza, now)?, Served::NotKept),
@@ -514,4 +521,45 @@ fn closing_a_batch_drops_its_seed_and_tells_how_it_went() -> Result<()> {
         "the progress is still open"
     );
     Ok(())
+}
+
+#[test]
+fn the_notification_of_a_batch_says_what_it_does_and_how_it_ended() {
+    let running = Notice::running("agenix rekey", 37, Duration::from_millis(540_001));
+    assert_eq!(running.summary, "skagent batch: agenix rekey");
+    assert_eq!(
+        running.body,
+        "37 files decrypted without a touch. Ends with the command, or in 10 minutes at most."
+    );
+    assert!(
+        Notice::running("x", 1, LIMIT)
+            .body
+            .starts_with("1 file decrypted")
+    );
+    // The first file may have been for somebody else.
+    assert!(
+        Notice::running("x", 0, LIMIT)
+            .body
+            .starts_with("No file decrypted")
+    );
+
+    let ended = Notice::ended("agenix rekey", 37, Ended::Unplugged);
+    assert_eq!(ended.summary, running.summary);
+    assert_eq!(
+        ended.body,
+        "Ended: the security key was unplugged. 37 files decrypted; the command's further ones \
+         take a touch each."
+    );
+    for reason in [
+        Ended::Stopped,
+        Ended::TimeUp,
+        Ended::PinsEvicted,
+        Ended::ToolGone,
+    ] {
+        assert!(
+            Notice::ended("x", 1, reason)
+                .body
+                .starts_with(&format!("Ended: {reason}. 1 file "))
+        );
+    }
 }

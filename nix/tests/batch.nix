@@ -1,6 +1,7 @@
 # Batches of decryptions (skagent batch), end to end with stock age and a
 # (virtual) security key: many files for one touch, who is a member of a
-# batch, and every way a batch ends.
+# batch, every way a batch ends, and the notification that shows a running
+# batch and stops it.
 {
   pkgs,
   package,
@@ -18,6 +19,8 @@ let
   answerFile = "${socketDir}/pin";
   promptLog = "${socketDir}/prompts";
   popupLog = "${socketDir}/log";
+  notifications = common.notificationSetup socketDir;
+  notificationLog = "${socketDir}/notifications";
   # What alice's commands need to find the agent's socket for age requests.
   environment = "SKAGENT_AGE_SOCKET=${ageSocket}";
 
@@ -78,6 +81,7 @@ pkgs.testers.runNixOSTest {
     environment.systemPackages = [
       package
       testkey
+      common.fakeNotifications
       common.fakePopup
       common.testAskpass
       pkgs.age
@@ -159,6 +163,15 @@ pkgs.testers.runNixOSTest {
     def ended(unit: str, reason: str) -> int:
         return journal(unit).count(f"reason={reason}")
 
+    def notified() -> list[str]:
+        return machine.succeed("cat ${notificationLog} 2>/dev/null || true").splitlines()
+
+    def notification_of(command: str) -> str:
+        """The number of the notification that shows the batch for `command` last."""
+        shown = [line.split()[1] for line in notified() if line.startswith("notify ") and f" skagent batch: {command} | " in line]
+        assert shown, (command, notified())
+        return shown[-1]
+
     def untouched(file: str, why: str) -> None:
         """A decryption that isn't a batch's waits for a touch, and gets no file key without it."""
         before = (prompts(), touches())
@@ -180,6 +193,7 @@ pkgs.testers.runNixOSTest {
             " --setenv SKAGENT_TEST_ANSWER_FILE=${answerFile}"
             " --setenv SKAGENT_TEST_ASKPASS_LOG=${promptLog}"
             " --setenv SKAGENT_TEST_POPUP_DIR=${socketDir}"
+            " --setenv DBUS_SESSION_BUS_ADDRESS=${notifications.address}"
             " ${package}/bin/skagent serve --no-pairing"
             f" --socket ${socket} {' '.join(args)}"
         )
@@ -227,6 +241,11 @@ pkgs.testers.runNixOSTest {
     machine.succeed("""
     ${installScripts}
     """)
+    machine.succeed("${builtins.elemAt notifications.start 0}")
+    machine.wait_for_file("${socketDir}/bus")
+    machine.succeed("${builtins.elemAt notifications.start 1}")
+    machine.wait_until_succeeds("${notifications.ready}")
+    # Notifications for touches are off; a batch has its own.
     askpass = "--no-touch-notification --askpass /run/current-system/sw/bin/test-askpass"
     start_agent("skagent", askpass)
 
@@ -260,6 +279,21 @@ pkgs.testers.runNixOSTest {
         retry(lambda _last_try: "closed the batch: its command is done" in journal("skagent"), timeout_seconds=5)
         assert "files=5" in journal("skagent")
 
+    with subtest("a notification shows the batch while it runs, with a button to stop it"):
+        command = "./decrypt-all f1.age f2.age f3.age f4.age f5.age"
+        number = notification_of(command)
+        shown = notified()
+        first = [line for line in shown if line.startswith(f"notify {number} ")][0]
+        assert re.fullmatch(
+            rf"notify {number} skagent batch: {re.escape(command)} \| \d files? decrypted without a touch\."
+            r" Ends with the command, or in 10 minutes at most\.",
+            first,
+        ), first
+        assert f"actions {number} stop=Stop" in shown, shown
+        # Not before the touch: until then the prompt says what is asked for.
+        assert not [line for line in shown if "No file decrypted" in line], shown
+        retry(lambda _last_try: f"close {number}" in notified(), timeout_seconds=5)
+
     with subtest("after the command, a file takes a touch again and no key is kept"):
         retry(lambda _last_try: kept_keys("skagent") == 0, timeout_seconds=5)
         untouched("f1.age", "after the batch")
@@ -285,12 +319,16 @@ pkgs.testers.runNixOSTest {
         assert kept_keys("skagent") == 1
         # Another program of alice's, started by something else.
         untouched("f4.age", "outside a running batch")
+        number = notification_of("./gated")
         before = (prompts(), touches())
         alice_ok("touch ~/go")
         status, out = finished()
         assert status == 0 and out.split() == ["file-1", "file-2", "file-3"], out
         expect(before, 0, 0, "the batch's further files")
         retry(lambda _last_try: kept_keys("skagent") == 0, timeout_seconds=5)
+        # The same notification counted on, and went with the batch.
+        assert [line for line in notified() if re.match(rf"notify {number} skagent batch: ./gated \| [23] files decrypted", line)], notified()
+        retry(lambda _last_try: f"close {number}" in notified(), timeout_seconds=5)
 
     with subtest("what the command leaves behind is handed to the tool, and stays in the batch"):
         before = (prompts(), touches())
@@ -335,6 +373,40 @@ pkgs.testers.runNixOSTest {
         def forget() -> None:
             alice_ok("skagent forget --socket ${socket}")
         interrupted(forget, "PINs", 1)
+        # The notification says why the command asks for touches again, and
+        # isn't closed with the batch.
+        number = notification_of("./gated")
+        last = [line for line in notified() if line.startswith(f"notify {number} ")][-1]
+        assert "| Ended: PINs were dropped (lock, sleep or a request to forget them). 1 file decrypted;" in last, last
+        assert f"close {number}" not in notified(), notified()
+
+    with subtest("the button in the notification stops a batch"):
+        def press_stop() -> None:
+            retry(lambda _last_try: "| 1 file decrypted" in notified()[-2], timeout_seconds=5)
+            machine.succeed("echo stop > ${notificationLog}.press")
+        # The PIN stays: stopping a batch evicts nothing else.
+        interrupted(press_stop, "stopped by the user", 0)
+        number = notification_of("./gated")
+        assert f"pressed {number} stop" in notified(), notified()
+        last = [line for line in notified() if line.startswith(f"notify {number} ")][-1]
+        assert "| Ended: stopped by the user. 1 file decrypted;" in last, last
+
+    with subtest("a notification the user closed isn't shown again, and the batch goes on"):
+        closed = journal("skagent").count("closed the batch")
+        background("skagent batch -- ./gated")
+        touch()
+        machine.wait_for_file("/home/alice/first")
+        retry(lambda _last_try: "| 1 file decrypted" in notified()[-2], timeout_seconds=5)
+        machine.succeed("touch ${notificationLog}.dismiss")
+        retry(lambda _last_try: notified()[-1].startswith("dismissed "), timeout_seconds=5)
+        before = (prompts(), touches())
+        alice_ok("touch ~/go")
+        status, out = finished()
+        assert status == 0 and out.split() == ["file-1", "file-2", "file-3"], out
+        expect(before, 0, 0, "after closing the notification")
+        retry(lambda _last_try: journal("skagent").count("closed the batch") == closed + 1, timeout_seconds=5)
+        machine.sleep(1)
+        assert notified()[-1].startswith("dismissed "), notified()
 
     with subtest("an unplugged security key ends a batch, also while nobody asks"):
         def replug() -> None:
@@ -394,6 +466,8 @@ pkgs.testers.runNixOSTest {
             # What is left of the two minutes when the request asks.
             assert 100 <= request["seconds"] <= 120, state
             assert state["key"]["label"] == "age identity", state
+        # The popup is gone after the touch; the notification shows the batch.
+        notification_of("./decrypt-all f1.age f2.age")
 
     with subtest("PINs never reach the journal"):
         for unit in ["skagent", "skagent-popup"]:
