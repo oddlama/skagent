@@ -567,6 +567,19 @@ fn failures_are_worded_for_what_was_asked() {
             "Couldn't decrypt",
             "Desk 5C NFC wasn't plugged in",
         ),
+        // The key did its part, and still no file was opened.
+        (
+            Failure::NotForIdentity,
+            decrypt(),
+            "Couldn't decrypt",
+            "The file isn't encrypted to this identity",
+        ),
+        (
+            Failure::AnotherIdentity,
+            decrypt(),
+            "Couldn't decrypt",
+            "Desk 5C NFC holds another age identity",
+        ),
         (
             Failure::Unplugged,
             Request::Create,

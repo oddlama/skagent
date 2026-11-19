@@ -822,6 +822,8 @@ fn failed(
         (Failure::NotOnKey, Some(key)) => format!("{name} doesn't hold {}", key.label),
         (Failure::NotOnKey, None) => format!("{name} holds no SSH keys"),
         (Failure::NoPin, _) => format!("{name} has no PIN set"),
+        (Failure::NotForIdentity, _) => "The file isn't encrypted to this identity".to_owned(),
+        (Failure::AnotherIdentity, _) => format!("{name} holds another age identity"),
         (Failure::Unrecognized, _) => format!(
             "This isn't the {} skagent paired",
             name_or(security_key, "security key")

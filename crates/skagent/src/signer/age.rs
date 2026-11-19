@@ -14,8 +14,8 @@ use skagent_popup::{Host, Key, Mistake, Queued, Request, Requester, State as Sho
 use skagent_secret::SecretBuffer;
 
 use super::{
-    Caching, Job, Signer, SigningTicket, TOUCH_TIMEOUT_HINT, Work, final_state, popup_cancelled,
-    read_retries, select_in_popup, show_best_effort, with_tries_left,
+    Caching, Job, LastWord, Signer, SigningTicket, TOUCH_TIMEOUT_HINT, Work, final_state,
+    popup_cancelled, read_retries, select_in_popup, show_best_effort, with_tries_left,
 };
 use crate::age::AgeIdentity;
 use crate::batch::Member;
@@ -130,6 +130,9 @@ struct DeriveJob {
     /// Set if the request starts a batch: then that is what the user is
     /// asked for, not one file.
     batch: Option<Offer>,
+    /// The request follows one whose identity turned out to be another:
+    /// the user is asked to touch once more.
+    again: bool,
     described: String,
     policy: CachePolicy,
 }
@@ -220,6 +223,10 @@ impl Job for DeriveJob {
             key: self.popup_key(),
             request: self.popup_request(),
         }
+    }
+
+    fn again(&self) -> bool {
+        self.again
     }
 }
 
@@ -327,6 +334,12 @@ impl Signer {
     /// the cache or the user, a touch. With `batch`, the request starts
     /// one, and the user is asked for that.
     ///
+    /// The popup comes back with the answer: whether a file was decrypted
+    /// shows only once the caller unwrapped, and the last word is theirs.
+    /// `follows`: the last word of a derivation right before this one,
+    /// whose identity wasn't the one asked for. This one goes on in its
+    /// popup, and asks to touch once more.
+    ///
     /// # Errors
     ///
     /// Returns an error where [`Signer::sign`] does.
@@ -336,17 +349,19 @@ impl Signer {
         by: Requester,
         batch: Option<Offer>,
         ticket: SigningTicket,
-    ) -> Result<Derived> {
+        follows: Option<LastWord>,
+    ) -> Result<(Derived, LastWord)> {
         let job = DeriveJob {
             key: identity.key(),
             credential: identity.credential().clone(),
             popup_key: popup_key(identity),
             by,
             batch,
+            again: follows.is_some(),
             described: describe(identity),
             policy: self.age_policy(),
         };
-        self.run(&job, ticket).await
+        self.run_open(&job, ticket, follows).await
     }
 
     /// Creates an age identity on a security key: picks the key like a load

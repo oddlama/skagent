@@ -371,6 +371,12 @@ pub enum Failure {
     /// A device reports the serial of the paired YubiKey but can't prove
     /// skagent's pairing: a fake, or the key was reset. It got no PIN.
     Unrecognized,
+    /// The file isn't encrypted to the age identity: the security key did
+    /// its part, and none of the file's stanzas opened.
+    NotForIdentity,
+    /// The security key's age identity is another one than the identity
+    /// file names.
+    AnotherIdentity,
     /// Something else; the agent's log says what. Also any reason this
     /// popup doesn't know yet.
     #[serde(other)]

@@ -15,6 +15,8 @@ let
   touchFile = "/run/testkey-touch";
   answerFile = "${socketDir}/pin";
   promptLog = "${socketDir}/prompts";
+  # What the fake popup was shown; it answers with the PIN in the answer file.
+  popupLog = "${socketDir}/log";
   # What alice's commands need to find the agent's socket for age requests.
   environment = "SKAGENT_AGE_SOCKET=${ageSocket}";
 in
@@ -26,6 +28,7 @@ pkgs.testers.runNixOSTest {
     environment.systemPackages = [
       package
       testkey
+      common.fakePopup
       common.testAskpass
       pkgs.age
       pkgs.libfido2
@@ -41,8 +44,10 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
+    import json
     import re
     import shlex
+    import time
 
     def alice(command: str) -> tuple[int, str]:
         return machine.execute(f"su - alice -c {shlex.quote('export ${environment}; ' + command)} 2>&1")
@@ -100,15 +105,16 @@ pkgs.testers.runNixOSTest {
         now = (prompts(), touches())
         assert now == (before[0] + asked, before[1] + touched), (why, before, now)
 
-    def start_agent(unit: str, *args: str) -> None:
+    def start_agent(unit: str, *args: str, popup: bool = False) -> None:
+        prompt = "--popup /run/current-system/sw/bin/fake-popup" if popup else "--askpass /run/current-system/sw/bin/test-askpass"
         machine.succeed(
             f"systemd-run --unit {unit} --uid alice"
             " --setenv SKAGENT_TEST_ANSWER_FILE=${answerFile}"
             " --setenv SKAGENT_TEST_ASKPASS_LOG=${promptLog}"
             " --setenv SKAGENT_TEST_ASKPASS_GATE=${socketDir}/hold-prompt"
+            " --setenv SKAGENT_TEST_POPUP_DIR=${socketDir}"
             " ${package}/bin/skagent serve --no-pairing --no-touch-notification"
-            " --askpass /run/current-system/sw/bin/test-askpass"
-            f" --socket ${socket} {' '.join(args)}"
+            f" {prompt} --socket ${socket} {' '.join(args)}"
         )
         machine.wait_for_file("${socket}")
         machine.wait_for_file("${ageSocket}")
@@ -118,6 +124,38 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"systemctl stop {unit}")
         machine.wait_until_fails("test -e ${socket}")
         machine.wait_until_fails("test -e ${ageSocket}")
+
+    def fresh(stop: str, start: str, popup: bool = False) -> None:
+        """A new machine, as far as the agent can tell: nothing remembered, and the key's two identities found by a load."""
+        stop_agent(stop)
+        alice_ok("rm -rf ~/.local/state/skagent")
+        start_agent(start, popup=popup)
+        out = alice_ok("skagent load --socket ${socket}")
+        assert "Found 2 age identity(ies)." in out, out
+        if popup:
+            # The popup that asked for the load's PIN is gone before the next request.
+            retry(lambda _last_try: popup_log()[-1:] == ["exit"], timeout_seconds=10)
+
+    def touched_as_asked(command: str) -> tuple[int, str, int]:
+        """Runs `command`, touching the key whenever it asks: its exit status, its output, and how many touches it took."""
+        before = touches()
+        given = 0
+        background(command)
+        while machine.execute("test -e /home/alice/status")[0] != 0:
+            if touches() - before > given:
+                touch()
+                machine.wait_until_fails("test -e ${touchFile}", timeout=30)
+                given += 1
+        status, out = finished()
+        return status, out, given
+
+    def popup_log() -> list[str]:
+        return machine.succeed("cat ${popupLog} 2>/dev/null || true").splitlines()
+
+    def shown(since: int) -> list[dict]:
+        """The states the popup was shown since its log had `since` lines."""
+        shows = [json.loads(line) for line in popup_log()[since:] if line.startswith("{")]
+        return [message["state"] for message in shows if message["type"] == "show"]
 
     machine.wait_for_unit("multi-user.target")
     machine.wait_until_succeeds("loginctl show-user alice -p Sessions --value | grep . >/dev/null")
@@ -358,14 +396,102 @@ pkgs.testers.runNixOSTest {
         # Each identity opens its own files only.
         status, out = decrypt("age", "~/second.age", "-i ~/id.txt")
         assert status != 0 and "for-the-second" not in out, out
-        # Both identity files: the one that fits is used. The touches come
-        # late here, so age says meanwhile what the plugin waits for.
-        status, out = touching("age -d -i ~/id.txt -i ~/second.txt ~/second.age", 2)
+        # Both identity files: the one that fits is used. The second touch
+        # comes late, so age says meanwhile what the plugin waits for.
+        before = (prompts(), touches())
+        background("age -d -i ~/id.txt -i ~/second.txt ~/second.age")
+        touch()
+        retry(lambda _last_try: touches() == before[1] + 2, timeout_seconds=30)
+        time.sleep(1.5)
+        touch()
+        status, out = finished()
         assert status == 0 and out.strip().splitlines()[-1] == "for-the-second", out
         assert out.count("waiting for skagent") == 1, out
 
+    with subtest("a fresh machine finds the identity a request names among several, a touch each"):
+        # Nothing tells two identities apart that were never used here but
+        # the key's answers. The agent tries them in turn, and knows each
+        # from then on: whichever it tries first, one of the two orders
+        # below starts with the other one.
+        files = {"second": ("~/second.age", "for-the-second"), "id": ("~/age.age", "from-age")}
+        guesses = journal("skagent").count("is another one than the one named")
+        asked = prompts()
+        first_tries = []
+        for one, other in [("second", "id"), ("id", "second")]:
+            fresh("skagent", "skagent")
+            status, out, taken = touched_as_asked(f"age -d -i ~/{one}.txt {files[one][0]}")
+            assert (status, out.strip().splitlines()[-1]) == (0, files[one][1]), out
+            first_tries.append(taken)
+            # Whatever that took, both are known now, or the one left is.
+            status, out, taken = touched_as_asked(f"age -d -i ~/{other}.txt {files[other][0]}")
+            assert (status, out.strip().splitlines()[-1], taken) == (0, files[other][1], 1), (out, taken)
+            assert sorted(alice_ok("skagent age list").split()) == sorted([recipient, second])
+        assert sorted(first_tries) == [1, 2], first_tries
+        assert journal("skagent").count("is another one than the one named") == guesses + 1
+        # The PINs came with the two loads.
+        assert prompts() == asked + 2, "asked for a PIN to try an identity"
+
+    with subtest("the popup says what came of a decryption once that is known"):
+        def outcome(since: int) -> list[tuple]:
+            """Per state shown: its name, and what tells it from another of that name."""
+            return [
+                (state["name"], state["again"]) if state["name"] == "touch"
+                else (state["name"], state.get("reason", state["request"]["kind"]))
+                for state in shown(since)
+            ]
+
+        # Trying identities happens in one popup: "touch once more", and
+        # "decrypted" only for the one that opened the file.
+        sequences = []
+        stop = "skagent"
+        for one in ["second", "id"]:
+            fresh(stop, "skagent-popup", popup=True)
+            stop = "skagent-popup"
+            mark = len(popup_log())
+            status, out, taken = touched_as_asked(f"age -d -i ~/{one}.txt {files[one][0]}")
+            assert (status, out.strip().splitlines()[-1]) == (0, files[one][1]), out
+            retry(lambda _last_try: popup_log()[-1:] == ["exit"], timeout_seconds=10)
+            assert popup_log()[mark:].count("start") == 1, popup_log()[mark:]
+            sequences.append(outcome(mark))
+        assert sorted(sequences) == [
+            [("touch", False), ("signed", "decrypt")],
+            [("touch", False), ("touch", True), ("signed", "decrypt")],
+        ], sequences
+
+        # A file for another identity of the key: the key does its part,
+        # and nothing is decrypted.
+        mark = len(popup_log())
+        status, out, taken = touched_as_asked("age -d -i ~/id.txt ~/second.age")
+        assert status != 0 and "for-the-second" not in out and taken == 1, (out, taken)
+        retry(lambda _last_try: popup_log()[-1:] == ["exit"], timeout_seconds=10)
+        assert outcome(mark) == [("touch", False), ("failed", "not-for-identity")], outcome(mark)
+
+        # An identity no security key here holds. On a fresh machine the two
+        # of this key could each be it: both are tried, and known afterwards.
+        alice_ok("age-keygen -pq -o ~/foreign.key 2>/dev/null")
+        foreign = alice_ok("age-keygen -y ~/foreign.key").strip()
+        alice_ok(f"skagent age identity {foreign} > ~/foreign.txt")
+        alice_ok(f"echo for-someone-else | age -r {foreign} -o ~/foreign.age")
+        fresh("skagent-popup", "skagent-popup", popup=True)
+        mark = len(popup_log())
+        status, out, taken = touched_as_asked("age -d -i ~/foreign.txt ~/foreign.age")
+        assert status != 0 and "for-someone-else" not in out and taken == 2, (out, taken)
+        retry(lambda _last_try: popup_log()[-1:] == ["exit"], timeout_seconds=10)
+        assert outcome(mark) == [("touch", False), ("touch", True), ("failed", "another-identity")], outcome(mark)
+        assert sorted(alice_ok("skagent age list").split()) == sorted([recipient, second])
+        # From then on such a request is refused before the key is asked.
+        mark = len(popup_log())
+        status, out, taken = touched_as_asked("age -d -i ~/foreign.txt ~/foreign.age")
+        assert status != 0 and taken == 0, (out, taken)
+        assert shown(mark) == [], shown(mark)
+        # And what is this key's works as before.
+        status, out, taken = touched_as_asked("age -d -i ~/id.txt ~/age.age")
+        assert (status, out.strip().splitlines()[-1], taken) == (0, "from-age", 1), (out, taken)
+
     with subtest("PINs never reach the journal"):
-        assert "${pin}" not in messages("skagent")
+        for unit in ["skagent", "skagent-popup"]:
+            assert "${pin}" not in messages(unit), unit
         assert "lock-passphrase" not in messages("skagent")
+        assert "${pin}" not in "\n".join(line for line in popup_log() if line.startswith("{")), "PIN in a message to the popup"
   '';
 }

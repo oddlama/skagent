@@ -209,6 +209,13 @@ one request still yield one key.
   whose security key is plugged in; with several at hand it fails and says
   so, without a touch. An identity whose recipient isn't known yet could be
   the one a request names: the derivation tells, and is remembered.
+- **Several identities nobody used here yet** (a key with two of them on a
+  new machine, after `skagent load`): only the key's answers tell which one
+  a request names. The agent tries them in turn, those at hand first, a
+  touch each, in the same popup ("Touch once more"). Each is known from then
+  on, so this happens once per machine. A request that names none isn't
+  tried this way: which identity a file is for would cost those touches
+  every time.
 - **`skagent age identity`** prints an identity file: the string, and the
   recipient in a `# Recipient:` comment for people and for tools that read it.
   `skagent age list` prints the known identities.
@@ -369,9 +376,11 @@ the threat model already has.
   named with the PIN and with every touch, also where the touch screen would
   show the YubiKey's name: after a cached PIN the touch is all the user
   agrees with. A failure is worded for what was asked ("Couldn't decrypt",
-  "Couldn't create it"): the `failed` state carries the request. All of it
-  needs a look from the popup's design; `nix build .#screenshots` draws
-  every state.
+  "Couldn't create it"): the `failed` state carries the request. "Decrypted"
+  is only said once a file key came out: the popup stays on the touch until
+  the agent unwrapped, and a file that isn't for the identity ends in
+  "The file isn't encrypted to this identity". All of it needs a look from
+  the popup's design; `nix build .#screenshots` draws every state.
 - **A running batch** is shown by a desktop notification, not by the popup:
   the popup is an overlay that takes the keyboard, and a batch runs for
   minutes. The notification appears once the batch keeps a seed, names the

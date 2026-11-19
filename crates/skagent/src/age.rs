@@ -35,7 +35,7 @@ const HEADER: &str = "\
 
 /// Most identities kept. A security key holds 25 to 100 credentials of all
 /// kinds.
-const MAX_IDENTITIES: usize = 256;
+pub const MAX_IDENTITIES: usize = 256;
 
 /// One age identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -170,12 +170,16 @@ impl AgeIdentities {
     /// identity fits.
     ///
     /// An identity whose recipient isn't known yet could be the one named;
-    /// the derivation tells.
+    /// the derivation tells. Of several such, the first one at hand is
+    /// chosen (else the first): once the caller knows its recipient
+    /// ([`AgeIdentities::derived`]) and it wasn't the one, the next choice
+    /// is another.
     ///
     /// # Errors
     ///
-    /// Returns [`NotChosen`] if no identity fits, or several do and it isn't
-    /// exactly one of them that is at hand.
+    /// Returns [`NotChosen`] if no identity fits, or the request names none
+    /// and it isn't exactly one that is at hand: which one a file is for
+    /// only shows by trying, with a touch each, every time.
     pub fn choose(
         &self,
         named: Option<&Recipient>,
@@ -199,8 +203,11 @@ impl AgeIdentities {
             [only] => Ok((*only).clone()),
             several => {
                 let mut present = several.iter().filter(|identity| at_hand(identity));
-                match (present.next(), present.next()) {
-                    (Some(only), None) => Ok((*only).clone()),
+                match (present.next(), present.next(), named, several.first()) {
+                    (Some(only), None, _, _) => Ok((*only).clone()),
+                    (Some(first), Some(_), Some(_), _) | (None, _, Some(_), Some(first)) => {
+                        Ok((*first).clone())
+                    }
                     _ => Err(NotChosen::Ambiguous),
                 }
             }

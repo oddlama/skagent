@@ -30,9 +30,9 @@ use skagent_age::wire::{
     self, BATCH_EXTENSION, BatchReply, BatchRequest, LIST_EXTENSION, ListReply, NEW_EXTENSION,
     NewReply, Refusal, UNWRAP_EXTENSION, UnwrapReply, UnwrapRequest,
 };
-use skagent_age::{Recipient, Seed};
+use skagent_age::{FileKey, Recipient, Seed};
 use skagent_fido::{AGE_USER_ID_BYTES, ErrorKind, error_kind};
-use skagent_popup::{Host, Requester};
+use skagent_popup::{Failure, Host, Requester};
 use skagent_secret::SecretBuffer;
 use ssh_agent_lib::agent::{Agent, Session};
 use ssh_agent_lib::error::AgentError;
@@ -46,7 +46,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{Mutex, MutexGuard, OwnedMutexGuard};
 use zeroize::Zeroize as _;
 
-use crate::age::{AgeIdentities, AgeIdentity, NotChosen};
+use crate::age::{AgeIdentities, AgeIdentity, MAX_IDENTITIES, NotChosen};
 use crate::batch::{BatchId, Member, Served};
 use crate::bindings::{NotPluggedIn, Presence};
 use crate::cancel::Hangup;
@@ -58,7 +58,7 @@ use crate::identities::{
 };
 use crate::peer::{OwnPrograms, Peer, Program};
 use crate::popup::cancelled_in_popup;
-use crate::signer::{Offer, Signer, SigningTicket, decryption_purpose};
+use crate::signer::{Derived, LastWord, Offer, Signer, SigningTicket, decryption_purpose};
 use crate::socket::PeerCheckedListener;
 
 /// Agent protocol extension that drops all cached PINs and keeps the keys.
@@ -662,36 +662,77 @@ impl AgentSession {
         member: Option<Member>,
     ) -> UnwrapReply {
         let named = request.identity.recipient();
-        let (identity, ticket) = match self.choose_identity(named).await {
-            Ok(chosen) => chosen,
-            Err(refusal) => return UnwrapReply::Refused(refusal),
-        };
         // A member's turn is held to the end: the members that asked
         // meanwhile then find the seed this request left for the batch,
         // instead of asking for touches of their own.
-        let turn = match &member {
-            Some(member) => match self.turn_in_batch(member, &identity, request).await {
-                Ok(turn) => Some(turn),
-                Err(reply) => return reply,
-            },
-            None => None,
-        };
-        let unwrapped = self
-            .unwrap_with(&identity, &ticket, request, by, member.as_ref())
-            .await;
-        drop(turn);
-        match unwrapped {
-            Ok(reply) => reply,
-            Err(error) => {
-                let refusal = refusal_of(&error, &ticket);
-                tracing::warn!(
-                    reason = %format!("{error:#}"),
-                    ?refusal,
-                    "refused to decrypt"
-                );
-                UnwrapReply::Refused(refusal)
+        let mut turn = None;
+        // Of several identities that weren't used on this machine yet, only
+        // the security key's answer tells which one a request names. They
+        // are tried in turn, a touch each, and each is known from then on.
+        // `another`: the popup of the one tried before, which it wasn't.
+        let mut another: Option<LastWord> = None;
+        for _tried in 0..=MAX_IDENTITIES {
+            let (identity, ticket) = match self.choose_identity(named).await {
+                Ok(chosen) => chosen,
+                Err(refusal) => {
+                    let Some(last_word) = another else {
+                        return UnwrapReply::Refused(refusal);
+                    };
+                    // Nothing is left that could be the one named.
+                    last_word.failed(Failure::AnotherIdentity);
+                    return UnwrapReply::Refused(Refusal::AnotherIdentity);
+                }
+            };
+            if let Some(member) = &member {
+                let served = if turn.is_none() {
+                    match self.turn_in_batch(member, &identity, request).await {
+                        Ok(taken) => {
+                            turn = Some(taken);
+                            None
+                        }
+                        Err(reply) => Some(reply),
+                    }
+                } else {
+                    self.unwrap_in_batch(member, &identity, request).await
+                };
+                if let Some(reply) = served {
+                    if let Some(last_word) = another {
+                        match &reply {
+                            UnwrapReply::FileKey(_) => last_word.done(),
+                            UnwrapReply::NoMatch => last_word.failed(Failure::NotForIdentity),
+                            UnwrapReply::Refused(_) => last_word.failed(Failure::Other),
+                        }
+                    }
+                    return reply;
+                }
+            }
+            let unwrapped = self
+                .unwrap_with(
+                    &identity,
+                    &ticket,
+                    request,
+                    by.clone(),
+                    member.as_ref(),
+                    another.take(),
+                )
+                .await;
+            match unwrapped {
+                Ok(Unwrapped::Reply(reply)) => return reply,
+                Ok(Unwrapped::Another(last_word)) => another = Some(last_word),
+                Err(error) => {
+                    let refusal = refusal_of(&error, &ticket);
+                    tracing::warn!(
+                        reason = %format!("{error:#}"),
+                        ?refusal,
+                        "refused to decrypt"
+                    );
+                    return UnwrapReply::Refused(refusal);
+                }
             }
         }
+        // Every try makes one identity known, so there are never this many.
+        tracing::warn!("refused to decrypt: tried more identities than there are");
+        UnwrapReply::Refused(Refusal::Failed)
     }
 
     /// The age identity a request is for, and the ticket that authorizes
@@ -825,6 +866,9 @@ impl AgentSession {
         }
     }
 
+    /// Has `identity`'s security key derive its secret, and unwraps with
+    /// it. `follows`: the popup of the identity tried right before, which
+    /// wasn't the one named.
     async fn unwrap_with(
         &self,
         identity: &AgeIdentity,
@@ -832,7 +876,8 @@ impl AgentSession {
         request: &UnwrapRequest,
         by: Requester,
         member: Option<&Member>,
-    ) -> Result<UnwrapReply> {
+        follows: Option<LastWord>,
+    ) -> Result<Unwrapped> {
         let purpose = match member {
             Some(member) => format!(
                 "start the batch {} for \"{}\"",
@@ -842,13 +887,45 @@ impl AgentSession {
             None => decryption_purpose(&by),
         };
         // Only the device work is cut short when the client leaves.
-        let derived = Hangup::unless_closed(
+        let (derived, last_word) = Hangup::unless_closed(
             self.hangup.as_ref(),
             self.shared
                 .signer
-                .derive(identity, by, member.map(Offer::of), ticket.clone()),
+                .derive(identity, by, member.map(Offer::of), ticket.clone(), follows),
         )
         .await?;
+        // Only now is it known what the touch was good for.
+        match self
+            .open_with(identity, ticket, request, member, derived, &purpose)
+            .await
+        {
+            Ok(Opened::FileKey(file_key)) => {
+                last_word.done();
+                Ok(Unwrapped::Reply(UnwrapReply::FileKey(file_key)))
+            }
+            Ok(Opened::Nothing) => {
+                last_word.failed(Failure::NotForIdentity);
+                Ok(Unwrapped::Reply(UnwrapReply::NoMatch))
+            }
+            Ok(Opened::AnotherIdentity) => Ok(Unwrapped::Another(last_word)),
+            Err(error) => {
+                last_word.failed(Failure::Other);
+                Err(error)
+            }
+        }
+    }
+
+    /// What the answer of `identity`'s security key opens of `request`.
+    /// The identity's recipient is known from then on.
+    async fn open_with(
+        &self,
+        identity: &AgeIdentity,
+        ticket: &SigningTicket,
+        request: &UnwrapRequest,
+        member: Option<&Member>,
+        derived: Derived,
+        purpose: &str,
+    ) -> Result<Opened> {
         let seed = Seed::from_device_output(&derived.answer)?;
         let device = derived.device;
         drop(derived.answer);
@@ -866,12 +943,13 @@ impl AgentSession {
         if let Some(named) = request.identity.recipient()
             && *named != recipient
         {
-            tracing::warn!(
+            tracing::info!(
                 named = %named.abbreviated(),
                 derived = %recipient.abbreviated(),
-                "refused to decrypt: the security key holds another age identity than the one named"
+                "this age identity of the security key is another one than the one named; it is \
+                 known from now on"
             );
-            return Ok(UnwrapReply::Refused(Refusal::AnotherIdentity));
+            return Ok(Opened::AnotherIdentity);
         }
         let unwrapped = seed.unwrap(&request.stanzas)?;
         if let Some(member) = member {
@@ -915,7 +993,7 @@ impl AgentSession {
             matched = unwrapped.is_some(),
             "decrypted"
         );
-        Ok(unwrapped.map_or(UnwrapReply::NoMatch, UnwrapReply::FileKey))
+        Ok(unwrapped.map_or(Opened::Nothing, Opened::FileKey))
     }
 
     /// Answers `age-new@skagent`: creates an identity on a security key and
@@ -1122,6 +1200,26 @@ impl AgentSession {
             .map(Some)
             .map_err(|reason| refuse("an age request", &reason))
     }
+}
+
+/// What a security key's answer for an identity opened of a request.
+enum Opened {
+    /// One of the file's stanzas: the file key.
+    FileKey(FileKey),
+    /// None of them.
+    Nothing,
+    /// Nothing was tried: the identity is another one than the one the
+    /// request names.
+    AnotherIdentity,
+}
+
+/// How one identity's part of a decryption ended.
+enum Unwrapped {
+    /// With an answer for the requester.
+    Reply(UnwrapReply),
+    /// The security key's answer made it another identity than the one the
+    /// request names. Its popup is still open, without a last word.
+    Another(LastWord),
 }
 
 /// Why a decryption that failed with `error` is refused, as far as the

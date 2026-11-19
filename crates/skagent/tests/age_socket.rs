@@ -241,16 +241,19 @@ async fn the_plugin_may_ask_for_file_keys_and_nothing_else() -> Result<()> {
 
 #[tokio::test]
 async fn which_identity_is_meant_is_settled_before_any_security_key_is_asked() -> Result<()> {
-    // Two identities nothing tells apart: no security key is at hand here,
-    // and none is waited for.
+    // Two identities nothing tells apart. A request that names none is
+    // refused before any security key is asked.
     let agent = Running::start(TakenFor::Plugin, &[(1, false), (2, false)]).await?;
     ensure!(refused(agent.unwrap(&agent.age, Identity::AtHand).await?)? == Refusal::Ambiguous);
+    // One that names its identity is for the security key to settle: the
+    // first of the two is tried. No security key is at hand here, and none
+    // is waited for.
     ensure!(
         refused(
             agent
                 .unwrap(&agent.age, Identity::Named(recipient(9)?))
                 .await?
-        )? == Refusal::Ambiguous
+        )? == Refusal::TimedOut
     );
     agent.stop().await?;
 

@@ -111,17 +111,39 @@ fn a_named_request_takes_its_identity_or_one_that_could_be_it() -> Result<()> {
         .choose(Some(&recipient(9)?), |_| false)
         .map_err(anyhow::Error::new)?;
     ensure!(is(&chosen, 3));
-    // Two of them: the one at hand, else nobody knows.
+    // Two of them: the one at hand. With both at hand, or none, the first:
+    // the security key's answer says whether it was the one.
     known.found(&[credential(4)?]);
-    ensure!(known.choose(Some(&recipient(9)?), |_| false) == Err(NotChosen::Ambiguous));
     let chosen = known
         .choose(Some(&recipient(9)?), |identity| is(identity, 4))
         .map_err(anyhow::Error::new)?;
     ensure!(is(&chosen, 4));
+    for at_hand in [true, false] {
+        let chosen = known
+            .choose(Some(&recipient(9)?), |_| at_hand)
+            .map_err(anyhow::Error::new)?;
+        ensure!(is(&chosen, 3), "at hand: {at_hand}");
+    }
     // An identity with a known recipient is never a candidate for another's.
-    ensure!(
-        known.choose(Some(&recipient(9)?), |identity| is(identity, 1)) == Err(NotChosen::Ambiguous)
-    );
+    let chosen = known
+        .choose(Some(&recipient(9)?), |identity| is(identity, 1))
+        .map_err(anyhow::Error::new)?;
+    ensure!(is(&chosen, 3));
+
+    // It wasn't the one named. Its recipient is known now, so the next
+    // choice is the other one, and after that nothing is left to try.
+    known.derived(&credential(3)?, &recipient(3)?);
+    let chosen = known
+        .choose(Some(&recipient(9)?), |_| true)
+        .map_err(anyhow::Error::new)?;
+    ensure!(is(&chosen, 4));
+    known.derived(&credential(4)?, &recipient(4)?);
+    ensure!(known.choose(Some(&recipient(9)?), |_| true) == Err(NotChosen::NoIdentity));
+    // What the tries taught serves the requests that name those identities.
+    let chosen = known
+        .choose(Some(&recipient(3)?), |_| false)
+        .map_err(anyhow::Error::new)?;
+    ensure!(is(&chosen, 3));
     Ok(())
 }
 

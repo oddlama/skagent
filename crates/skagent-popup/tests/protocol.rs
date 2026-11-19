@@ -261,6 +261,8 @@ fn failure_reasons_have_their_names_on_the_wire() -> Result<()> {
         (Failure::NotPluggedIn, "not-plugged-in"),
         (Failure::Duplicate, "duplicate"),
         (Failure::Unrecognized, "unrecognized"),
+        (Failure::NotForIdentity, "not-for-identity"),
+        (Failure::AnotherIdentity, "another-identity"),
         (Failure::Other, "other"),
     ] {
         let state = State::Failed {

@@ -202,6 +202,7 @@ VARIANTS: list[tuple[str, dict, list[dict], str]] = [
     ("decrypt-pin-unverified", pin(IDENTITY, forwarded(UNVERIFIED)), [], ""),
     ("decrypt-touch", touch(IDENTITY, AGENIX), [], ""),
     ("decrypt-touch-forwarded", touch(IDENTITY, forwarded(JUMP_KEY)), [], ""),
+    ("decrypt-touch-again", touch(IDENTITY, AGENIX, again=True), [], ""),
     ("decrypted", signed(IDENTITY, AGENIX), [], ""),
     # A batch: named with the PIN and with every touch.
     ("batch-pin", pin(IDENTITY, REKEY), [], ""),
@@ -218,6 +219,8 @@ VARIANTS: list[tuple[str, dict, list[dict], str]] = [
     ("decrypt-timeout", {"name": "timeout", "key": IDENTITY, "security_key": DESK}, [], ""),
     ("decrypt-failed-unplugged", failed("unplugged", IDENTITY, request=AGENIX), [], ""),
     ("decrypt-failed-not-on-key", failed("not-on-key", IDENTITY, request=AGENIX), [], ""),
+    ("decrypt-failed-not-for-identity", failed("not-for-identity", IDENTITY, request=AGENIX), [], ""),
+    ("decrypt-failed-another-identity", failed("another-identity", IDENTITY, request=AGENIX), [], ""),
     ("batch-failed-refused", failed("refused", IDENTITY, request=REKEY), [], ""),
     ("create-failed-unplugged", failed("unplugged", NEW_IDENTITY, request=CREATE), [], ""),
 ]

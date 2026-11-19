@@ -12,8 +12,8 @@
 mod age;
 mod batch;
 
-pub(crate) use age::Offer;
 pub use age::purpose as decryption_purpose;
+pub(crate) use age::{Derived, Offer};
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -219,6 +219,58 @@ pub(crate) trait Job: Sync {
     -> Result<Self::Done>;
     /// What the popup shows last, after the request succeeded.
     fn done(&self) -> Shown;
+    /// Whether the request follows another one that was just touched for:
+    /// then the popup asks to touch once more.
+    fn again(&self) -> bool {
+        false
+    }
+}
+
+/// A request's popup once the security key did its part, for a caller that
+/// learns only then how the request ends: what the popup shows last is the
+/// caller's to say. Dropped without a word, the popup just goes.
+#[derive(Debug)]
+pub(crate) struct LastWord {
+    session: Option<PopupSession>,
+    key: Key,
+    request: Request,
+    security_key: Option<SecurityKey>,
+}
+
+impl LastWord {
+    /// The request did what was asked.
+    pub fn done(mut self) {
+        if let Some(session) = self.session.as_mut() {
+            show_best_effort(
+                session,
+                Shown::Signed {
+                    key: self.key,
+                    request: self.request,
+                },
+            );
+        }
+    }
+
+    /// The security key did its part, and the request still came to
+    /// nothing, for `reason`.
+    pub fn failed(mut self, reason: Failure) {
+        if let Some(session) = self.session.as_mut() {
+            show_best_effort(
+                session,
+                Shown::Failed {
+                    key: Some(self.key),
+                    security_key: self.security_key,
+                    reason,
+                    request: Some(self.request),
+                },
+            );
+        }
+    }
+
+    /// The popup, for a request that follows this one at once.
+    fn into_session(self) -> Option<PopupSession> {
+        self.session
+    }
 }
 
 /// A signature with an SSH key.
@@ -929,30 +981,65 @@ impl Signer {
     /// Returns an error if device selection or the PIN prompt fails, the
     /// device refuses, or the job doesn't accept what the device returned.
     pub(crate) async fn run<J: Job>(&self, job: &J, ticket: SigningTicket) -> Result<J::Done> {
-        let queued = Queued {
-            key: Some(job.popup_key()),
+        let (done, mut last_word) = self.run_open(job, ticket, None).await?;
+        if let Some(session) = last_word.session.as_mut() {
+            show_best_effort(session, job.done());
+        }
+        Ok(done)
+    }
+
+    /// [`Signer::run`] up to the security key's answer: the popup comes
+    /// back with it, still showing the touch, and the caller says how the
+    /// request ended. A failure on the way is shown here, like `run` does.
+    /// `follows`: the popup of a request this one follows at once, to go on
+    /// in the same window.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error where [`Signer::run`] does.
+    pub(crate) async fn run_open<J: Job>(
+        &self,
+        job: &J,
+        ticket: SigningTicket,
+        follows: Option<LastWord>,
+    ) -> Result<(J::Done, LastWord)> {
+        let mut session = if let Some(session) = follows.and_then(LastWord::into_session) {
+            Some(session)
+        } else {
+            let queued = Queued {
+                key: Some(job.popup_key()),
+            };
+            self.popup_session(&ticket, queued).await?
         };
-        let mut session = self.popup_session(&ticket, queued).await?;
         let mut security_key = None;
         let done = self
             .run_on_device(job, &ticket, session.as_mut(), &mut security_key)
             .await;
-        if let Some(session) = session.as_mut() {
-            let last = match &done {
-                Ok(_) => Some(job.done()),
-                Err(error) => final_state(
-                    error,
-                    &ticket,
-                    Some(job.popup_key()),
+        match done {
+            Ok(done) => Ok((
+                done,
+                LastWord {
+                    session,
+                    key: job.popup_key(),
+                    request: job.popup_request(),
                     security_key,
-                    Some(job.popup_request()),
-                ),
-            };
-            if let Some(state) = last {
-                show_best_effort(session, state);
+                },
+            )),
+            Err(error) => {
+                if let Some(session) = session.as_mut()
+                    && let Some(state) = final_state(
+                        &error,
+                        &ticket,
+                        Some(job.popup_key()),
+                        security_key,
+                        Some(job.popup_request()),
+                    )
+                {
+                    show_best_effort(session, state);
+                }
+                Err(error)
             }
         }
-        done
     }
 
     /// Waits for the popup, if there is one, and starts it.
@@ -1025,7 +1112,7 @@ impl Signer {
             security_key: security_key.clone(),
         };
         let mut round = Round {
-            again: routed.selected_by_touch,
+            again: routed.selected_by_touch || job.again(),
             wrong_pin: false,
             kept: None,
         };
