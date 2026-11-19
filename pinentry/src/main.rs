@@ -52,6 +52,13 @@ enum ThemeArg {
     Dark,
 }
 
+/// What is logged unless `SKAGENT_PINENTRY_LOG` says otherwise: warnings,
+/// but zbus's only as errors. Without a desktop portal on the session bus
+/// (where GPUI asks for light or dark) zbus warns that it can't cache its
+/// properties, every time the popup starts: nothing is wrong then, the
+/// popup just can't follow the desktop's appearance.
+const DEFAULT_LOG: &str = "warn,zbus=error";
+
 /// A line from the agent, or the end of them.
 enum Input {
     Message(Message),
@@ -69,7 +76,7 @@ fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("SKAGENT_PINENTRY_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(DEFAULT_LOG)),
         )
         .try_init();
     match run(Cli::parse()) {

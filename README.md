@@ -218,8 +218,9 @@ and takes the keyboard. Elsewhere it's an ordinary window.
 
 ### Styling the popup
 
-The popup comes in light and dark, following your desktop. Both are presets
-you can adjust: colours, fonts and size.
+The popup comes in light and dark, following your desktop (it asks the
+desktop portal; without one, set `appearance`). Both are presets you can
+adjust: colours, fonts and size.
 
 <p align="center">
   <img alt="The popup in four styles: Catppuccin Mocha asking for a PIN, Solarized Light waiting for a touch, Gruvbox Dark in IBM Plex Sans listing loaded keys, and green on black in a monospaced font after a wrong PIN" width="880" src="https://github.com/user-attachments/assets/REPLACE-skagent-popup-styles">
