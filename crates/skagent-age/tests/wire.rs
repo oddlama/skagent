@@ -7,9 +7,10 @@ mod support;
 
 use anyhow::{Context as _, Result, bail, ensure};
 use skagent_age::wire::{
-    LIST_EXTENSION, ListReply, MAX_LISTED, MAX_REPLY_BYTES, MAX_STANZAS, NEW_EXTENSION, NewReply,
-    Refusal, UNWRAP_EXTENSION, UnwrapReply, UnwrapRequest, check_simple_request,
-    decode_new_request, new_request, reply_details, reply_length, request_frame, simple_request,
+    BATCH_EXTENSION, BatchReply, BatchRequest, LIST_EXTENSION, ListReply, MAX_COMMAND_BYTES,
+    MAX_LISTED, MAX_REPLY_BYTES, MAX_STANZAS, NEW_EXTENSION, NewReply, Refusal, UNWRAP_EXTENSION,
+    UnwrapReply, UnwrapRequest, check_simple_request, decode_new_request, new_request,
+    reply_details, reply_length, request_frame, simple_request,
 };
 use skagent_age::{FileKey, Identity, STANZA_BYTES, Stanza, WRAP_RANDOM_BYTES};
 
@@ -30,7 +31,12 @@ fn request(stanzas: usize, identity: Identity) -> Result<UnwrapRequest> {
 
 #[test]
 fn the_extensions_carry_skagents_name() {
-    for name in [UNWRAP_EXTENSION, NEW_EXTENSION, LIST_EXTENSION] {
+    for name in [
+        UNWRAP_EXTENSION,
+        NEW_EXTENSION,
+        LIST_EXTENSION,
+        BATCH_EXTENSION,
+    ] {
         assert!(
             name.starts_with("age-") && name.ends_with("@skagent"),
             "{name}"
@@ -305,5 +311,56 @@ fn a_reply_is_the_extensions_response_or_a_failure() -> Result<()> {
     ensure!(reply_length([0, 0, 0, 0]).is_err());
     ensure!(reply_length(u32::try_from(MAX_REPLY_BYTES)?.to_be_bytes()).is_ok());
     ensure!(reply_length(u32::try_from(MAX_REPLY_BYTES + 1)?.to_be_bytes()).is_err());
+    Ok(())
+}
+
+#[test]
+fn a_batch_is_asked_for_with_a_duration_and_the_command_to_show() -> Result<()> {
+    let request = BatchRequest {
+        seconds: 300,
+        command: "agenix rekey".to_owned(),
+    };
+    let details = request.encode()?;
+    ensure!(details.len() == 1 + 4 + 4 + 12);
+    ensure!(BatchRequest::decode(&details)? == request);
+    for length in 0..details.len() {
+        ensure!(
+            BatchRequest::decode(details.get(..length).context("cut")?).is_err(),
+            "{length}"
+        );
+    }
+    let mut longer = details.clone();
+    longer.push(0);
+    ensure!(BatchRequest::decode(&longer).is_err(), "trailing byte");
+
+    let limit = BatchRequest {
+        seconds: 0,
+        command: "x".repeat(MAX_COMMAND_BYTES),
+    };
+    ensure!(BatchRequest::decode(&limit.encode()?)? == limit);
+    let too_long = BatchRequest {
+        seconds: 0,
+        command: "x".repeat(MAX_COMMAND_BYTES + 1),
+    };
+    ensure!(too_long.encode().is_err());
+    // What a client that doesn't check sends: too long, or not text.
+    let mut raw = vec![1, 0, 0, 0, 0];
+    raw.extend_from_slice(&u32::try_from(MAX_COMMAND_BYTES + 1)?.to_be_bytes());
+    raw.extend(std::iter::repeat_n(b'x', MAX_COMMAND_BYTES + 1));
+    ensure!(
+        BatchRequest::decode(&raw).is_err(),
+        "a long command was decoded"
+    );
+    ensure!(
+        BatchRequest::decode(&[1, 0, 0, 0, 0, 0, 0, 0, 1, 0xff]).is_err(),
+        "not UTF-8"
+    );
+
+    let reply = BatchReply { seconds: 600 };
+    ensure!(reply.encode() == [1, 0, 0, 2, 0x58]);
+    ensure!(BatchReply::decode(&reply.encode())? == reply);
+    ensure!(
+        BatchReply::decode(&[1, 0, 0, 2]).is_err() && BatchReply::decode(&[2, 0, 0, 2, 0]).is_err()
+    );
     Ok(())
 }

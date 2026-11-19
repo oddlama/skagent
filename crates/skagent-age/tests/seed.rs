@@ -9,7 +9,7 @@ use anyhow::{Result, ensure};
 use skagent_age::{
     BATCH_SALT_LABEL, DEVICE_OUTPUT_BYTES, FILE_KEY_BYTES, FileKey, SEED_BYTES, Seed, batch_salt,
 };
-use skagent_secret::SecretBuffer;
+use skagent_secret::{Backend, SecretBuffer, strongest_backend};
 
 #[test]
 fn the_salt_is_the_sha256_of_its_label() -> Result<()> {
@@ -63,5 +63,16 @@ fn answers_seeds_and_file_keys_have_one_size_each() -> Result<()> {
         );
     }
     ensure!(FileKey::from_bytes(&[5; FILE_KEY_BYTES])?.expose() == [5; FILE_KEY_BYTES]);
+    Ok(())
+}
+
+#[test]
+fn a_kept_seed_is_the_same_key_in_other_memory() -> Result<()> {
+    let answer = SecretBuffer::from_slice(&[5; DEVICE_OUTPUT_BYTES])?;
+    let seed = Seed::from_device_output(&answer)?;
+    for backend in [Backend::Locked, strongest_backend()] {
+        let kept = seed.copy_in(backend)?;
+        ensure!(kept.recipient()? == seed.recipient()?, "{backend:?}");
+    }
     Ok(())
 }

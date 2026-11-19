@@ -25,6 +25,13 @@ pub const NEW_EXTENSION: &str = "age-new@skagent";
 /// with a [`ListReply`].
 pub const LIST_EXTENSION: &str = "age-list@skagent";
 
+/// Starts a batch: a [`BatchRequest`], answered with a [`BatchReply`]. The
+/// batch lasts as long as the connection it was asked for on.
+pub const BATCH_EXTENSION: &str = "age-batch@skagent";
+
+/// Longest command line shown for a batch, in bytes.
+pub const MAX_COMMAND_BYTES: usize = 256;
+
 /// The version every message starts with.
 const VERSION: u8 = 1;
 
@@ -142,6 +149,95 @@ pub fn decode_new_request(details: &[u8]) -> Result<bool> {
     };
     reader.end()?;
     Ok(another)
+}
+
+/// Asks for a batch: decryptions asked for by the requester's descendants
+/// take one touch together, for a limited time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchRequest {
+    /// How long the batch may last at most. Zero: as long as the agent
+    /// allows. The agent never grants more than it allows.
+    pub seconds: u32,
+    /// The command the batch is for, to show to the user. At most
+    /// [`MAX_COMMAND_BYTES`] of UTF-8.
+    pub command: String,
+}
+
+impl BatchRequest {
+    /// The request's details.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the command is longer than
+    /// [`MAX_COMMAND_BYTES`].
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        ensure!(
+            self.command.len() <= MAX_COMMAND_BYTES,
+            "a command of {} bytes; at most {MAX_COMMAND_BYTES} are shown",
+            self.command.len()
+        );
+        let mut out = vec![VERSION];
+        out.extend_from_slice(&self.seconds.to_be_bytes());
+        put_string(&mut out, self.command.as_bytes())?;
+        Ok(out)
+    }
+
+    /// A request from its details.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for anything but one well-formed request.
+    pub fn decode(details: &[u8]) -> Result<Self> {
+        let mut reader = Reader(details);
+        reader.version()?;
+        let seconds: [u8; 4] = reader.take(4)?.try_into().context("no duration")?;
+        let command = reader.string()?;
+        ensure!(
+            command.len() <= MAX_COMMAND_BYTES,
+            "a command of {} bytes; at most {MAX_COMMAND_BYTES} are shown",
+            command.len()
+        );
+        let command = std::str::from_utf8(command)
+            .context("the command isn't UTF-8")?
+            .to_owned();
+        reader.end()?;
+        Ok(Self {
+            seconds: u32::from_be_bytes(seconds),
+            command,
+        })
+    }
+}
+
+/// What the agent answers to a [`BatchRequest`] it grants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchReply {
+    /// How long the batch lasts at most.
+    pub seconds: u32,
+}
+
+impl BatchReply {
+    /// The reply's details.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = vec![VERSION];
+        out.extend_from_slice(&self.seconds.to_be_bytes());
+        out
+    }
+
+    /// A reply from its details.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for anything but one well-formed reply.
+    pub fn decode(details: &[u8]) -> Result<Self> {
+        let mut reader = Reader(details);
+        reader.version()?;
+        let seconds: [u8; 4] = reader.take(4)?.try_into().context("no duration")?;
+        reader.end()?;
+        Ok(Self {
+            seconds: u32::from_be_bytes(seconds),
+        })
+    }
 }
 
 /// Asks for the file key of one file.

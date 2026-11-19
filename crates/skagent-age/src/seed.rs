@@ -6,7 +6,7 @@ use std::fmt;
 use anyhow::{Context as _, Result, anyhow, ensure};
 use hkdf::Hkdf;
 use sha2::{Digest as _, Sha256};
-use skagent_secret::SecretBuffer;
+use skagent_secret::{Backend, SecretBuffer};
 use zeroize::Zeroizing;
 
 use crate::recipient::Recipient;
@@ -82,6 +82,18 @@ impl Seed {
         SecretBuffer::from_slice(bytes)
             .map(Self)
             .context("keeping the seed in locked memory")
+    }
+
+    /// A copy of the seed in memory of `backend`, for a seed that is kept
+    /// longer than one decryption.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if that memory can't be had.
+    pub fn copy_in(&self, backend: Backend) -> Result<Self> {
+        SecretBuffer::from_slice_in(self.0.expose(), backend)
+            .map(Self)
+            .context("keeping the seed in protected memory")
     }
 
     fn expand(&self) -> Result<xwing::ExpandedKey> {
