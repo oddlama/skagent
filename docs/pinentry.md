@@ -104,8 +104,9 @@ protocol is the `skagent-popup` crate, shared with the popup.
   can't be reversed), else a short fingerprint (`host SHA256:+DiY3…`).
 - **Names and emoji** from the config file: per SSH key (fingerprint) an emoji
   and a label, per YubiKey (serial) a name.
-- **Touch timeout.** The countdown needs the key's own timeout; YubiKeys seem to
-  give up after about 15 s. To be measured on hardware.
+- **Touch timeout.** The countdown needs the key's own timeout. A YubiKey 5.8
+  gives up 28.6 s after the request went to it, so the ring runs for 28 s.
+  Older firmware isn't measured yet.
 
 ## states
 

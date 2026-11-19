@@ -349,7 +349,9 @@ pub enum Host {
 pub enum Failure {
     /// The security key was unplugged, replaced or stopped answering.
     Unplugged,
-    /// The security key refused the operation.
+    /// The security key refused the operation. The agent doesn't send it:
+    /// a security key answers a touch that was declined like one that
+    /// never came, and both are shown as `timeout`.
     Refused,
     /// The security key doesn't hold the SSH key, e.g. another one was
     /// touched, or it was reset since.

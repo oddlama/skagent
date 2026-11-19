@@ -315,7 +315,7 @@ pkgs.testers.runNixOSTest {
         bound_sign("personal", "personal-after-replacement")
 
     with subtest("a key that gives up waiting drops out of selection, the others still count"):
-        # Like a YubiKey that stops blinking: answers USER_ACTION_TIMEOUT after 1s.
+        # Like a YubiKey that stops blinking: answers OPERATION_DENIED after 1s.
         start_key("impatient", "424242", "--touch-timeout 1")
         alice("SSH_AUTH_SOCK=${socket} ssh-add -d ~/personal && SSH_AUTH_SOCK=${socket} ssh-add ~/personal")
         timed_out = gave_up("impatient")

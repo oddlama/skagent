@@ -42,14 +42,12 @@ const HMAC_SECRET: &str = "hmac-secret";
 pub const STATUS_OK: u8 = 0x00;
 /// CTAP2 status: the request parameters aren't valid CBOR.
 pub const STATUS_INVALID_CBOR: u8 = 0x12;
-/// CTAP2 status: the user refused (touch denied).
+/// CTAP2 status: the user refused, or didn't touch in time.
 pub const STATUS_OPERATION_DENIED: u8 = 0x27;
 /// CTAP2 status: the request was cancelled with `CTAPHID_CANCEL`.
 pub const STATUS_KEEPALIVE_CANCEL: u8 = 0x2d;
 /// Empty `pinUvAuthParam`: touch first, then `PIN_AUTH_INVALID` (no retry used).
 pub const STATUS_PIN_AUTH_INVALID: u8 = 0x33;
-/// CTAP2 status: no touch within the timeout.
-pub const STATUS_USER_ACTION_TIMEOUT: u8 = 0x2f;
 /// CTAP2 status: the request needs a touch and asked for none.
 pub const STATUS_UP_REQUIRED: u8 = 0x3b;
 

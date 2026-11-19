@@ -21,10 +21,13 @@ pub enum ErrorKind {
     PinPolicyViolation,
     /// The device doesn't hold the credential, or hides it without user verification.
     NoCredentials,
-    /// The user didn't touch the device in time.
+    /// Nobody touched the device in time, or the touch was declined. CTAP
+    /// has one answer for both (`OPERATION_DENIED`: "if the user declines
+    /// permission, or the operation times out"), which is what a YubiKey
+    /// gives when its light stops blinking. A security key without a way to
+    /// decline only ever means the timeout; some have a code of their own
+    /// for it.
     TouchTimeout,
-    /// The user (or the device) refused the operation.
-    OperationDenied,
     /// The request was cancelled (`CTAPHID_CANCEL`) while it waited.
     Cancelled,
     /// The device was unplugged or stopped answering.
@@ -45,8 +48,9 @@ impl ErrorKind {
             sys::FIDO_ERR_PIN_NOT_SET => Self::PinNotSet,
             sys::FIDO_ERR_PIN_POLICY_VIOLATION => Self::PinPolicyViolation,
             sys::FIDO_ERR_NO_CREDENTIALS => Self::NoCredentials,
-            sys::FIDO_ERR_ACTION_TIMEOUT | sys::FIDO_ERR_USER_ACTION_TIMEOUT => Self::TouchTimeout,
-            sys::FIDO_ERR_OPERATION_DENIED => Self::OperationDenied,
+            sys::FIDO_ERR_OPERATION_DENIED
+            | sys::FIDO_ERR_ACTION_TIMEOUT
+            | sys::FIDO_ERR_USER_ACTION_TIMEOUT => Self::TouchTimeout,
             sys::FIDO_ERR_KEEPALIVE_CANCEL => Self::Cancelled,
             sys::FIDO_ERR_TX | sys::FIDO_ERR_RX => Self::Transport,
             _ => Self::Other,

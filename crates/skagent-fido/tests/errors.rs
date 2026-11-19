@@ -19,9 +19,11 @@ fn pin_failures_are_told_apart() {
             ErrorKind::PinPolicyViolation,
         ),
         (sys::FIDO_ERR_NO_CREDENTIALS, ErrorKind::NoCredentials),
+        // What a key answers when nobody touched it: the code CTAP has for
+        // it, which a YubiKey 5.8 gives, and the ones of other firmware.
+        (sys::FIDO_ERR_OPERATION_DENIED, ErrorKind::TouchTimeout),
         (sys::FIDO_ERR_ACTION_TIMEOUT, ErrorKind::TouchTimeout),
         (sys::FIDO_ERR_USER_ACTION_TIMEOUT, ErrorKind::TouchTimeout),
-        (sys::FIDO_ERR_OPERATION_DENIED, ErrorKind::OperationDenied),
         (sys::FIDO_ERR_TX, ErrorKind::Transport),
         (sys::FIDO_ERR_RX, ErrorKind::Transport),
         (sys::FIDO_ERR_INTERNAL, ErrorKind::Other),
@@ -45,7 +47,6 @@ fn only_pin_failures_invalidate_the_pin() {
         ErrorKind::PinRequired,
         ErrorKind::NoCredentials,
         ErrorKind::TouchTimeout,
-        ErrorKind::OperationDenied,
         ErrorKind::Transport,
         ErrorKind::Other,
     ] {

@@ -1551,8 +1551,9 @@ fn still_plugged_in(device: &DeviceIdentity) -> bool {
 }
 
 /// About how long a YubiKey waits for a touch, for the popup's countdown.
-/// To be measured on hardware (`docs/pinentry.md`).
-const TOUCH_TIMEOUT_HINT: Duration = Duration::from_secs(15);
+/// A YubiKey 5.8 gave up 28.6 s after the request went to it
+/// (`docs/pinentry.md`).
+const TOUCH_TIMEOUT_HINT: Duration = Duration::from_secs(28);
 
 /// PIN tries the security key has left, attached to PIN errors.
 #[derive(Debug, Clone, Copy)]
@@ -1841,7 +1842,6 @@ fn failure(error: &anyhow::Error, kind: Option<ErrorKind>) -> Failure {
     }
     match kind {
         Some(ErrorKind::Transport) => Failure::Unplugged,
-        Some(ErrorKind::OperationDenied) => Failure::Refused,
         Some(ErrorKind::NoCredentials) => Failure::NotOnKey,
         Some(ErrorKind::PinNotSet) => Failure::NoPin,
         _ => Failure::Other,

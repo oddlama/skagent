@@ -25,10 +25,10 @@ The test key therefore decides about touch itself, in front of soft-fido2 (`src/
 
 - `makeCredential`, and `getAssertion` unless its `up` option is `false`, need a touch.
 - The touch is asked for **after** the request succeeded, since a YubiKey rejects invalid requests (missing PIN, unknown credential) without blinking. OpenSSH's enrollment first tries without a PIN and retries with it; a touch before running would have counted two touches for one enrollment.
-- If the touch is refused or times out, the response is replaced by `CTAP2_ERR_OPERATION_DENIED` / `CTAP2_ERR_USER_ACTION_TIMEOUT`, and credentials the request created are removed again.
+- If the touch is refused or times out, the response is replaced by `CTAP2_ERR_OPERATION_DENIED`, and credentials the request created are removed again. One code for both, as CTAP has it and as a YubiKey 5.8 answers when nobody touches it (see [`hmac-secret.md`](hmac-secret.md)).
 - soft-fido2's own `request_up` callback always accepts.
 
-Every touch request is logged as `touch requested`, so tests count touches in the journal. `--touch auto|deny|file` selects the policy; `file` waits for a trigger file and consumes it, one file per touch. It gives up after `--touch-timeout` seconds (default 10) and answers `USER_ACTION_TIMEOUT`, like a key that stops blinking; the multi-key VM test uses a 1 s key to check that selection survives a key giving up.
+Every touch request is logged as `touch requested`, so tests count touches in the journal. `--touch auto|deny|file` selects the policy; `file` waits for a trigger file and consumes it, one file per touch. It gives up after `--touch-timeout` seconds (default 10) and answers `OPERATION_DENIED`, like a key that stops blinking; the multi-key VM test uses a 1 s key to check that selection survives a key giving up.
 
 ### touch selection and cancellation
 

@@ -15,8 +15,8 @@ use skagent_testkey::callbacks::{Callbacks, UndoHandle};
 use skagent_testkey::catalog::Catalog;
 use skagent_testkey::ctap::{
     STATUS_INVALID_CBOR, STATUS_KEEPALIVE_CANCEL, STATUS_OK, STATUS_OPERATION_DENIED,
-    STATUS_PIN_AUTH_INVALID, STATUS_UP_REQUIRED, STATUS_USER_ACTION_TIMEOUT, TouchRequirement,
-    list_hmac_secret, touch_requirement,
+    STATUS_PIN_AUTH_INVALID, STATUS_UP_REQUIRED, TouchRequirement, list_hmac_secret,
+    touch_requirement,
 };
 use skagent_testkey::touch::{DEFAULT_TOUCH_TIMEOUT, Touch, TouchOutcome};
 use skagent_testkey::vendor;
@@ -284,12 +284,15 @@ fn cancel_arrived(device: &UhidDevice) -> bool {
     }
 }
 
-/// CTAP2 response for a touch that didn't happen.
+/// CTAP2 response for a touch that didn't happen. A touch that never came
+/// is answered like one that was refused: "If the user declines permission,
+/// or the operation times out, then end the operation by returning
+/// `CTAP2_ERR_OPERATION_DENIED`" (CTAP 2.1, 6.2.2), and a YubiKey 5.8 does
+/// just that after 28 s.
 fn touch_failure(outcome: TouchOutcome) -> Option<Vec<u8>> {
     match outcome {
         TouchOutcome::Touched => None,
-        TouchOutcome::Refused => Some(vec![STATUS_OPERATION_DENIED]),
-        TouchOutcome::TimedOut => Some(vec![STATUS_USER_ACTION_TIMEOUT]),
+        TouchOutcome::Refused | TouchOutcome::TimedOut => Some(vec![STATUS_OPERATION_DENIED]),
         TouchOutcome::Cancelled => Some(vec![STATUS_KEEPALIVE_CANCEL]),
     }
 }
