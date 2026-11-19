@@ -475,7 +475,7 @@ Protected:
 - **A stolen laptop with the key** still needs the PIN once skagent forgot it (lock, suspend, reboot)
 - **Other users** can't use the agent: its socket is private, and skagent checks every client's user id
 - **A hostile host with your forwarded agent** still needs a touch for every signature, and `ssh-add -h` limits where keys work
-- **Other processes of yours** can't read the agent's memory, since core dumps and ptrace are disabled
+- **Other processes of yours** can't read the memory of the agent or of its popup, since core dumps and ptrace are disabled
 - **A fake security key** swapped in for yours, or plugged in next to it, gets no PIN once skagent paired with your key
 - **age files** need the security key, its PIN and a touch per file, and stay safe against a future quantum computer if all their recipients are post-quantum
 

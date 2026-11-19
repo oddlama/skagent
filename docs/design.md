@@ -23,7 +23,7 @@ Protected:
 - **Other local users:** socket is `0600` in `$XDG_RUNTIME_DIR`, and the peer uid is checked on accept (own uid or root, same as OpenSSH).
 - **Forwarded agent on a hostile remote host:** every signature still needs a touch on your machine, so no silent use. Keys added with `ssh-add -h` are additionally limited to the listed hops, verified through `session-bind@openssh.com` (see destinations). A key the remote host adds with a leaked key handle can't borrow a loaded key's cached PIN or binding: it's refused, and a signature that doesn't verify with the requesting identity's public key is never returned or cached. A forwarded agent can't make this machine load resident keys or evict its cached PINs: a remote host can only cause a PIN prompt with a signature request while no PIN is cached, and that prompt names what is signed.
 - **A fake security key swapped in for a paired one, or plugged in next to it:** it can't sign skagent's pairing challenge, so it gets no PIN, whatever serial it reports (see multiple keys).
-- **Core dumps / ptrace by other processes of the same user:** `RLIMIT_CORE=0`, `PR_SET_DUMPABLE=0`. The PIN sits in a zeroizing, mlocked buffer.
+- **Core dumps / ptrace by other processes of the same user:** `RLIMIT_CORE=0`, `PR_SET_DUMPABLE=0`, in the agent and in the popup (`skagent_secret::harden_process`). The PIN sits in a zeroizing, mlocked buffer. While it is typed into the popup, each key passes through the toolkit's ordinary memory, the whole PIN never does; see [`pinentry.md`](pinentry.md), the typed PIN's way. A stock pinentry or askpass program is its own process with its own care.
 
 Not protected:
 

@@ -191,6 +191,12 @@ pkgs.testers.runNixOSTest {
         wait_for(lambda: logged(mark, "opened a layer-shell overlay"))
         settle()
         assert screenshot("pin") > 0.8, "the popup isn't showing"
+        # The process the PIN is typed into is hardened like the agent: no
+        # core file, and not even the same user reads its memory.
+        popup_pid = machine.succeed("pgrep -u alice -x skagent-pinentr").strip()
+        machine.succeed(f"grep -E '^Max core file size +0 +0 ' /proc/{popup_pid}/limits")
+        status, _ = alice(f"cat /proc/{popup_pid}/environ")
+        assert status != 0, "alice could read the popup's environment"
         type_keys("${pin} -k Return")
         wait_for_state(mark, "touch")
         settle()

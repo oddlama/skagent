@@ -84,6 +84,38 @@ protocol is the `skagent-popup` crate, shared with the popup.
   names wrap once, then end in `…`; in a subtitle only the last piece gives
   way. A style setting that can't be used is a warning, never fatal.
 
+## the typed PIN's way
+
+Where a PIN is while it is typed into the popup, read in GPUI at the pinned
+rev (`6983685`, `gpui_linux/src/linux/wayland/client.rs`, `gpui/src/window.rs`)
+and in the popup. Look again when the rev changes.
+
+- **Key by key through ordinary memory.** The compositor sends key codes,
+  which pass through the Wayland client library's read buffer. xkbcommon
+  turns each into a character, and GPUI makes a `Keystroke` of it: two small
+  `String`s (the key's name and its character), cloned a few times while the
+  event is dispatched, one copy kept by the key-repeat timer until the
+  repeat delay has passed. All of it is ordinary heap memory: freed, not
+  wiped, not locked. Nothing can be done about that from outside the
+  toolkit; every graphical prompt gets its keys as such events.
+- **Never as a whole.** GPUI is given no text field, no input handler (so no
+  input method text either) and no key bindings, which is what would make it
+  collect keystrokes (`pending_input`). It logs no keystrokes. The popup
+  takes each character in `Popup::key_down` and appends it to `PinInput`, a
+  `SecretBuffer`: the only place the PIN is in one piece.
+- **Out through the descriptor.** Enter builds `PIN <seq> <data>` in another
+  `SecretBuffer` and writes it to the pipe through a duplicate of stdout's
+  descriptor, not through the standard library's `Stdout`, which has a
+  buffer nothing wipes. The agent reads it one byte at a time into locked
+  memory.
+- **A hardened process.** `skagent-pinentry` calls
+  `skagent_secret::harden_process` first, like the agent: `RLIMIT_CORE=0`
+  and `PR_SET_DUMPABLE=0`. So what lingers in its heap reaches no core file,
+  and no other process of the user reads it. It can still be swapped out;
+  the `SecretBuffer`s can't.
+- **Not in reach:** the compositor, the kernel's input layer and an input
+  method see every key, and root reads anything.
+
 ## what the agent has to learn
 
 - **YubiKey serials.** YubiKeys report their serial over the FIDO interface

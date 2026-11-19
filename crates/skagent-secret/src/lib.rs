@@ -10,8 +10,8 @@
 //!   mapping because `munlock` isn't reference counted: locking pages that
 //!   are shared with unrelated heap data would let the first unlock expose
 //!   the others.
-//! - **`MADV_DONTDUMP`**: left out of core dumps, in addition to the agent's
-//!   `RLIMIT_CORE=0`.
+//! - **`MADV_DONTDUMP`**: left out of core dumps, in addition to the
+//!   process's `RLIMIT_CORE=0` ([`harden_process`]).
 //! - **`MADV_WIPEONFORK`**: a forked child (e.g. before `exec`ing pinentry)
 //!   sees zeros instead of the secret.
 //! - **Guard pages**: an overflow faults instead of silently reading or writing
@@ -38,6 +38,7 @@
 
 #[allow(unsafe_code)]
 mod mapping;
+mod process;
 
 use std::fmt;
 use std::ops::Range;
@@ -48,6 +49,7 @@ use subtle::ConstantTimeEq as _;
 use zeroize::Zeroize as _;
 
 use crate::mapping::LockedPages;
+pub use crate::process::{disable_core_dumps, harden_process};
 
 /// Where a process keeps its secret buffers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

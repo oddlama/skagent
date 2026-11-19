@@ -89,6 +89,11 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<()> {
+    // First, before a PIN can be typed. A key event passes through the
+    // compositor's client library, xkbcommon and GPUI as ordinary memory:
+    // no core file gets any of this process, and no other process of the
+    // user reads it.
+    skagent_secret::harden_process()?;
     let mode = cli.theme.map(|theme| match theme {
         ThemeArg::Light => Mode::Light,
         ThemeArg::Dark => Mode::Dark,
