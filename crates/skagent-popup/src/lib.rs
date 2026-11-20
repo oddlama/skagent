@@ -8,11 +8,17 @@
 //! - **Agent → popup:** one JSON object per line, a [`Message`]: first how to
 //!   look ([`Message::Style`]), then the states to show and which other
 //!   requests wait for the popup. Never a secret.
-//! - **Popup → agent:** text lines, each an [`Intent`]: `PIN <seq> <data>`,
-//!   `CANCEL <seq>` or `RETRY <seq>`. `seq` names the state the user acted on,
-//!   so the agent can ignore answers to states it already replaced. The PIN
-//!   is percent-escaped like Assuan data (`%`, CR and LF become `%25`, `%0D`
-//!   and `%0A`), and the agent reads the line into locked memory.
+//! - **Popup → agent:** text lines, each an [`Intent`]: `SHOWN <seq>`,
+//!   `PIN <seq> <data>`, `CANCEL <seq>` or `RETRY <seq>`. `seq` names the
+//!   state the user acted on, so the agent can ignore answers to states it
+//!   already replaced. The PIN is percent-escaped like Assuan data (`%`, CR
+//!   and LF become `%25`, `%0D` and `%0A`), and the agent reads the line
+//!   into locked memory.
+//! - **`SHOWN <seq>`** says that state `seq` is on the screen: drawn, faded
+//!   in, and that frame taken by the display server. The agent waits for it
+//!   before it lets a security key blink or takes an answer, so nobody is
+//!   asked to touch for a prompt that isn't there. A popup that can't say
+//!   it within a few seconds is taken for broken.
 //! - **The agent closes stdin** when it doesn't need the popup any more. The
 //!   popup then exits, after showing a final state such as
 //!   [`State::Signed`] for a moment. Until the first state arrives the popup
@@ -31,8 +37,9 @@ use skagent_secret::SecretBuffer;
 pub mod style;
 
 /// The protocol version in `READY`. Changes that alter the meaning of a
-/// message bump it; new optional fields don't.
-pub const VERSION: u32 = 1;
+/// message bump it; new optional fields don't. Version 2 has `SHOWN`,
+/// which the agent waits for.
+pub const VERSION: u32 = 2;
 
 /// The longest a popup keeps a final state up after the agent closed its
 /// input: a failure stays that long, to be read. The agent waits this long
@@ -391,6 +398,11 @@ pub enum Intent {
         /// [`VERSION`] of the popup.
         version: u32,
     },
+    /// State `seq` is on the screen for the user to read.
+    Shown {
+        /// The state that is shown.
+        seq: u64,
+    },
     /// The user entered `pin` in state `seq`.
     Pin {
         /// The state the PIN was entered in.
@@ -443,6 +455,9 @@ pub fn parse_intent(line: &[u8]) -> Result<Intent> {
         b"READY" => Ok(Intent::Ready {
             version: parse_number(rest).context("a READY line without a version")?,
         }),
+        b"SHOWN" => Ok(Intent::Shown {
+            seq: parse_number(rest).context("a SHOWN line without a sequence number")?,
+        }),
         b"CANCEL" => Ok(Intent::Cancel {
             seq: parse_number(rest).context("a CANCEL line without a sequence number")?,
         }),
@@ -465,6 +480,12 @@ pub fn parse_intent(line: &[u8]) -> Result<Intent> {
 #[must_use]
 pub fn ready_line() -> String {
     format!("READY {VERSION}\n")
+}
+
+/// The `SHOWN` line for state `seq`, with its newline.
+#[must_use]
+pub fn shown_line(seq: u64) -> String {
+    format!("SHOWN {seq}\n")
 }
 
 /// The `CANCEL` line for state `seq`, with its newline.

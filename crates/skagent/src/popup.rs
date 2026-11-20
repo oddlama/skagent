@@ -10,6 +10,12 @@
 //!   request; the last one closes its stdin, and the popup exits.
 //! - **Fail closed.** A popup that doesn't start, exits or sends garbage
 //!   cancels the request it serves.
+//! - **Nothing is asked for that isn't on the screen.** The popup says when
+//!   a state is shown (`SHOWN`), and whatever needs the user to see it waits
+//!   for that ([`PopupSession::show_visibly`]): a security key doesn't
+//!   blink, and no answer is taken, for a prompt nobody can read. A popup
+//!   that doesn't say so in time is broken: the request fails, and the
+//!   popup is killed instead of being handed to the next one.
 //!
 //! Lines from the popup are read one byte at a time into locked memory, like
 //! pinentry's: they can hold the PIN.
@@ -18,7 +24,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
@@ -36,13 +42,19 @@ use zeroize::Zeroizing;
 
 use crate::prompt::{PROMPT_TIMEOUT, checked_pin, prompt_command};
 
-/// Longest wait for a starting popup to say it's ready. Generous: a GPU
-/// popup initializes its renderer first.
+/// Longest wait for a starting popup to say it's ready: once it is
+/// connected to the display server. Generous, for a busy machine.
 pub const START_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long a closed popup may take to exit before it is killed: as long
 /// as it may keep a final state up, and some more to get out.
 pub const CLOSE_TIMEOUT: Duration = LONGEST_LINGER.saturating_add(Duration::from_secs(3));
+
+/// Longest wait for the popup to say that a state is on the screen. The
+/// request before may have left a final state that still has its moment,
+/// and the first state of a popup opens its window; some more for a busy
+/// machine. Nothing is at stake while waiting: no key blinks yet.
+pub const SHOW_TIMEOUT: Duration = LONGEST_LINGER.saturating_add(Duration::from_secs(5));
 
 /// Intents buffered between the reader and the session.
 const INTENT_QUEUE: usize = 16;
@@ -67,6 +79,31 @@ pub fn cancelled_in_popup(error: &anyhow::Error) -> bool {
         .any(<dyn std::error::Error>::is::<CancelledInPopup>)
 }
 
+/// The popup didn't say in time that it shows what it was told to.
+#[derive(Debug, Clone, Copy)]
+pub struct NotShown {
+    /// How long the agent waited.
+    waited: Duration,
+}
+
+impl fmt::Display for NotShown {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "the popup didn't show the request within {} s; nothing was asked of the security key",
+            self.waited.as_secs()
+        )
+    }
+}
+
+impl std::error::Error for NotShown {}
+
+/// Whether `error` comes from a popup that didn't show a state in time.
+#[must_use]
+pub fn not_shown(error: &anyhow::Error) -> bool {
+    error.chain().any(<dyn std::error::Error>::is::<NotShown>)
+}
+
 /// The popup program and the one session that uses it at a time.
 #[derive(Debug)]
 pub struct Popup {
@@ -81,6 +118,8 @@ pub struct Popup {
     seq: AtomicU64,
     /// The next waiting request's number.
     arrivals: AtomicU64,
+    /// How long a state may take to be on the screen.
+    shows_within: Duration,
 }
 
 impl Popup {
@@ -94,7 +133,16 @@ impl Popup {
             waiting: watch::channel(Vec::new()).0,
             seq: AtomicU64::new(1),
             arrivals: AtomicU64::new(0),
+            shows_within: SHOW_TIMEOUT,
         }
+    }
+
+    /// The same popup, taken for broken once a state isn't on the screen
+    /// within `patience` instead of [`SHOW_TIMEOUT`].
+    #[must_use]
+    pub fn showing_within(mut self, patience: Duration) -> Self {
+        self.shows_within = patience;
+        self
     }
 
     /// The popup program.
@@ -198,13 +246,34 @@ impl PopupSession {
     }
 
     /// Shows `state` and returns its sequence number. Doesn't wait for the
-    /// popup.
+    /// popup: for what the user only reads, like a result.
     ///
     /// # Errors
     ///
     /// Returns an error if the popup isn't running or exited.
     pub fn show(&mut self, state: State) -> Result<u64> {
         self.shower()?.show(state)
+    }
+
+    /// Shows `state` and waits until the popup says it is on the screen:
+    /// for what the user has to see before something happens, like a
+    /// security key that starts to blink. Returns the state's sequence
+    /// number.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NotShown`] if the popup doesn't say so in time (it is
+    /// killed once this session ends), [`CancelledInPopup`] if the user
+    /// cancelled or the popup exited meanwhile, or an error if the popup
+    /// isn't running.
+    pub async fn show_visibly(&mut self, state: State) -> Result<u64> {
+        let shower = self.shower()?;
+        let seq = shower.show(state)?;
+        tokio::select! {
+            biased;
+            shown = shower.visible(seq) => shown.map(|()| seq),
+            () = self.cancelled() => Err(anyhow::Error::new(CancelledInPopup)),
+        }
     }
 
     /// A handle that shows states without borrowing the session, e.g. from a
@@ -218,6 +287,8 @@ impl PopupSession {
         Ok(Shower {
             popup: Arc::clone(&self.popup),
             lines: running.lines.downgrade(),
+            shown: running.shown.clone(),
+            broken: Arc::clone(&running.broken),
         })
     }
 
@@ -229,7 +300,7 @@ impl PopupSession {
     /// Returns [`CancelledInPopup`] if the user cancelled, or an error if the
     /// popup exited, the answer isn't a valid FIDO PIN or nobody answered.
     pub async fn ask_pin(&mut self, state: State) -> Result<SecretBuffer> {
-        let seq = self.show(state)?;
+        let seq = self.show_visibly(state).await?;
         let first_seq = self.first_seq;
         let intents = &mut self
             .guard
@@ -266,7 +337,7 @@ impl PopupSession {
     /// Returns [`CancelledInPopup`] if the user cancelled, or an error if the
     /// popup exited or nobody answered.
     pub async fn ask_retry(&mut self, state: State) -> Result<()> {
-        let seq = self.show(state)?;
+        let seq = self.show_visibly(state).await?;
         let first_seq = self.first_seq;
         let intents = &mut self
             .guard
@@ -314,6 +385,17 @@ impl PopupSession {
 
 impl Drop for PopupSession {
     fn drop(&mut self) {
+        let broken = self
+            .guard
+            .as_ref()
+            .is_some_and(|running| running.broken.load(Ordering::SeqCst));
+        if broken {
+            // Not for the next request: that one starts a popup of its own.
+            if let Some(running) = self.guard.take() {
+                running.kill();
+            }
+            return;
+        }
         // A request that starts waiting after this check starts a new popup.
         if self.popup.waiting.borrow().is_empty()
             && let Some(running) = self.guard.take()
@@ -328,10 +410,49 @@ impl Drop for PopupSession {
 pub struct Shower {
     popup: Arc<Popup>,
     lines: mpsc::WeakUnboundedSender<Vec<u8>>,
+    /// The highest state the popup said it shows.
+    shown: watch::Receiver<u64>,
+    /// Set when the popup didn't show a state in time.
+    broken: Arc<AtomicBool>,
 }
 
 impl Shower {
-    /// Shows `state` and returns its sequence number.
+    /// Shows `state` and waits until the popup says it is on the screen,
+    /// like [`PopupSession::show_visibly`], but without noticing a cancel.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NotShown`] if the popup doesn't say so in time, or an error
+    /// if it exited.
+    pub async fn show_visibly(&self, state: State) -> Result<u64> {
+        let seq = self.show(state)?;
+        self.visible(seq).await?;
+        Ok(seq)
+    }
+
+    /// Waits until the popup says that state `seq`, or one sent after it,
+    /// is on the screen.
+    async fn visible(&self, seq: u64) -> Result<()> {
+        let patience = self.popup.shows_within;
+        let mut shown = self.shown.clone();
+        match tokio::time::timeout(patience, shown.wait_for(|latest| *latest >= seq)).await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(_closed)) => bail!("the popup exited before it showed the request"),
+            Err(_elapsed) => {
+                self.broken.store(true, Ordering::SeqCst);
+                tracing::error!(
+                    popup = %self.popup.program.display(),
+                    seconds = patience.as_secs(),
+                    "the popup didn't say that the request is on the screen (it can't draw, or \
+                     the screen shows something else, like a lock); ending it"
+                );
+                Err(anyhow::Error::new(NotShown { waited: patience }))
+            }
+        }
+    }
+
+    /// Shows `state` and returns its sequence number. Doesn't wait for the
+    /// popup.
     ///
     /// # Errors
     ///
@@ -358,8 +479,13 @@ struct Running {
     child: Child,
     /// Lines for the popup's stdin. Dropping the last sender closes it.
     lines: mpsc::UnboundedSender<Vec<u8>>,
-    /// What the popup sent. Closed when its stdout is.
+    /// What the popup sent, but for `SHOWN`. Closed when its stdout is.
     intents: mpsc::Receiver<Intent>,
+    /// The highest state the popup said it shows. Closed when its stdout
+    /// is.
+    shown: watch::Receiver<u64>,
+    /// The popup didn't show a state in time: it isn't used again.
+    broken: Arc<AtomicBool>,
     /// Forwards changes of the waiting count.
     queue: JoinHandle<()>,
 }
@@ -378,7 +504,12 @@ impl Running {
         let (lines, pending) = mpsc::unbounded_channel();
         drop(tokio::spawn(write_lines(stdin, pending)));
         let (intents_sender, mut intents) = mpsc::channel(INTENT_QUEUE);
-        drop(tokio::spawn(read_intents(stdout, intents_sender)));
+        let (shown_sender, shown) = watch::channel(0);
+        drop(tokio::spawn(read_intents(
+            stdout,
+            intents_sender,
+            shown_sender,
+        )));
 
         let ready = tokio::time::timeout(START_TIMEOUT, intents.recv())
             .await
@@ -410,8 +541,18 @@ impl Running {
             child,
             lines,
             intents,
+            shown,
+            broken: Arc::default(),
             queue,
         })
+    }
+
+    /// Ends the popup at once: it showed nothing when it was told to, so
+    /// there is nothing on the screen to wait for.
+    fn kill(self) {
+        self.queue.abort();
+        // kill_on_drop.
+        drop(self.child);
     }
 
     /// Closes the popup's stdin and lets it exit, killing it if it takes too
@@ -422,6 +563,7 @@ impl Running {
             lines,
             intents,
             queue,
+            ..
         } = self;
         queue.abort();
         drop(lines);
@@ -455,9 +597,14 @@ async fn write_lines(mut stdin: ChildStdin, mut pending: mpsc::UnboundedReceiver
 }
 
 /// Reads the popup's lines into locked memory and passes them on as
-/// intents. Ends at EOF, on an error or on a malformed line, which closes
-/// the intent channel.
-async fn read_intents(mut stdout: ChildStdout, intents: mpsc::Sender<Intent>) {
+/// intents; what the popup says it shows goes to `shown` instead, where
+/// whoever waits for it finds it without taking the answers. Ends at EOF,
+/// on an error or on a malformed line, which closes both.
+async fn read_intents(
+    mut stdout: ChildStdout,
+    intents: mpsc::Sender<Intent>,
+    shown: watch::Sender<u64>,
+) {
     let mut line = match SecretBuffer::with_capacity(MAX_INTENT_LINE) {
         Ok(line) => line,
         Err(error) => {
@@ -482,6 +629,16 @@ async fn read_intents(mut stdout: ChildStdout, intents: mpsc::Sender<Intent>) {
                 return;
             }
         };
+        if let Intent::Shown { seq } = intent {
+            shown.send_if_modified(|latest| {
+                let newer = seq > *latest;
+                if newer {
+                    *latest = seq;
+                }
+                newer
+            });
+            continue;
+        }
         if intents.send(intent).await.is_err() {
             return;
         }

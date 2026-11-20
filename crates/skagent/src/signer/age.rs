@@ -251,16 +251,19 @@ impl Touches<'_> {
         work: impl FnOnce(&mut skagent_fido::Device, &SecretBuffer) -> Result<T> + Send + 'static,
     ) -> Result<(RoutedDevice, SecretBuffer, T)> {
         if let Some(session) = session.as_deref_mut() {
-            show_best_effort(
-                session,
-                Shown::Touch {
-                    key: self.key.clone(),
-                    request: Request::Create,
-                    security_key: self.security_key.clone(),
-                    timeout_ms: u64::try_from(TOUCH_TIMEOUT_HINT.as_millis()).unwrap_or(u64::MAX),
-                    again,
-                },
-            );
+            let touch = Shown::Touch {
+                key: self.key.clone(),
+                request: Request::Create,
+                security_key: self.security_key.clone(),
+                timeout_ms: u64::try_from(TOUCH_TIMEOUT_HINT.as_millis()).unwrap_or(u64::MAX),
+                again,
+            };
+            // The security key blinks once the user was told what for.
+            tokio::select! {
+                biased;
+                () = self.ticket.revoked() => bail!("creating an age identity cancelled by PIN eviction"),
+                shown = session.show_visibly(touch) => shown?,
+            };
         }
         let (interrupt, finished) = DeviceInterrupt::new(routed.device.canceller());
         let worker = tokio::task::spawn_blocking(move || {

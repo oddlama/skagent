@@ -195,6 +195,33 @@ pkgs.testers.runNixOSTest {
         closed()
         assert names(mark) == ["touch", "signed"], names(mark)
 
+    with subtest("a popup that shows nothing: the key isn't asked, the request fails, the popup is replaced"):
+        # It takes the states and nobody sees them, like a popup whose window
+        # never appears. The PIN is cached: all that is left is the touch.
+        alice_ok("touch ${dir}/blind")
+        mark = len(popup_log())
+        requested = touches()
+        # A touch is on offer the whole time.
+        touch()
+        start_sign("blind")
+        retry(lambda _last_try: names(mark) == ["touch"], timeout_seconds=10)
+        machine.succeed("pgrep -x fake-popup")
+        finished("blind", success=False)
+        assert touches() == requested, "the key was asked for a touch nobody was told about"
+        machine.succeed("test -e ${touchFile}")
+        assert names(mark)[0] == "touch" and "signed" not in names(mark), names(mark)
+        assert "the popup didn't show the request within 10 s; nothing was asked of the security key" in journal("skagent")
+        assert "the popup didn't say that the request is on the screen" in journal("skagent")
+        # Killed, not asked to leave, and not kept for the next request.
+        machine.wait_until_fails("pgrep -x fake-popup", timeout=10)
+        assert "exit" not in popup_log()[mark:], popup_log()[mark:]
+        alice_ok("rm ${dir}/blind")
+        mark = len(popup_log())
+        sign_ok()
+        closed()
+        assert names(mark) == ["touch", "signed"], names(mark)
+        assert popup_log()[mark:].count("start") == 1
+
     with subtest("a wrong PIN is asked for again in the same popup"):
         alice_ok("skagent forget --socket ${socket}")
         alice_ok("echo 000000 > ${dir}/answers")

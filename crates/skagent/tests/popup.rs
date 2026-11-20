@@ -9,16 +9,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail, ensure};
-use skagent::popup::{Popup, cancelled_in_popup};
+use skagent::popup::{Popup, cancelled_in_popup, not_shown};
 use skagent_popup::style::Style;
 use skagent_popup::{Key, Message, Queued, Request, State, decode_message};
 
 const SOON: Duration = Duration::from_secs(5);
 
 /// A fake popup in `dir` that logs every line it gets to `dir/log`. It says
-/// READY unless `dir/exit` exists (then it exits right away), answers PIN
-/// states with `1234%` (sent escaped) and timeouts with RETRY or, if
-/// `dir/cancel` exists, cancels them and touch states.
+/// READY unless `dir/exit` exists (then it exits right away), says of every
+/// state that it is shown (not with `dir/blind`, and with `dir/slow` only
+/// after 400 ms), answers PIN states with `1234%` (sent escaped) and
+/// timeouts with RETRY or, if `dir/cancel` exists, cancels them and touch
+/// states.
 fn fake_popup(dir: &Path) -> Result<PathBuf> {
     let dir = dir.display();
     support::executable_script(
@@ -27,10 +29,15 @@ fn fake_popup(dir: &Path) -> Result<PathBuf> {
         &format!(
             r#"echo start >> {dir}/log
 [ -e {dir}/exit ] && exit 1
-if [ -e {dir}/version-two ]; then echo "READY 2"; else echo "READY 1"; fi
+if [ -e {dir}/old-version ]; then echo "READY 1"; else echo "READY 2"; fi
 while IFS= read -r line; do
   printf '%s\n' "$line" >> {dir}/log
   seq=$(printf '%s\n' "$line" | sed -n 's/.*"seq":\([0-9]*\).*/\1/p')
+  case "$line" in
+    *'"type":"show"'*)
+      if [ -e {dir}/slow ]; then sleep 0.4; fi
+      if [ ! -e {dir}/blind ]; then echo "SHOWN $seq"; fi ;;
+  esac
   case "$line" in
     *'"name":"pin"'*)
       if [ -e {dir}/garbage ]; then echo "hunter2"
@@ -201,7 +208,7 @@ async fn a_timeout_is_retried_or_cancelled_in_the_popup() -> Result<()> {
 
 #[tokio::test]
 async fn a_popup_that_fails_to_start_fails_the_request() -> Result<()> {
-    for flag in ["exit", "version-two"] {
+    for flag in ["exit", "old-version"] {
         let dir = tempfile::tempdir()?;
         std::fs::write(dir.path().join(flag), "")?;
         let popup = popup(dir.path())?;
@@ -289,6 +296,115 @@ async fn a_busy_popup_makes_others_give_up_in_time() -> Result<()> {
         "waited past the timeout"
     );
     Ok(())
+}
+
+/// What the user has to see before something happens isn't taken for
+/// shown because it was sent.
+#[tokio::test]
+async fn what_has_to_be_seen_waits_until_the_popup_says_it_shows_it() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    std::fs::write(dir.path().join("slow"), "")?;
+    let popup = popup(dir.path())?;
+    let mut session = popup.session(SOON, queued()).await?;
+    session.start().await?;
+    let sent = std::time::Instant::now();
+    session.show_visibly(touch_state()).await?;
+    ensure!(
+        sent.elapsed() >= Duration::from_millis(300),
+        "went on {} ms after sending the state, before the popup showed it",
+        sent.elapsed().as_millis()
+    );
+    // A result is only read: nothing waits for it.
+    let sent = std::time::Instant::now();
+    session.show(touch_state())?;
+    ensure!(sent.elapsed() < Duration::from_millis(300));
+    Ok(())
+}
+
+/// A popup that takes the states and shows nothing (its window can't open,
+/// its drawing thread is gone): the request fails instead of asking for a
+/// touch or a PIN nobody was told about, and the popup isn't used again.
+#[tokio::test]
+async fn a_popup_that_shows_nothing_fails_the_request_and_is_replaced() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    std::fs::write(dir.path().join("blind"), "")?;
+    let popup = Arc::new(
+        Popup::new(fake_popup(dir.path())?, Style::default())
+            .showing_within(Duration::from_millis(300)),
+    );
+    let mut first = popup.session(SOON, queued()).await?;
+    first.start().await?;
+    let error = first
+        .show_visibly(touch_state())
+        .await
+        .err()
+        .context("a state nobody showed counted as shown")?;
+    ensure!(not_shown(&error), "{error:#}");
+    ensure!(!cancelled_in_popup(&error), "{error:#}");
+    // The fake popup answers every PIN state: an answer to a prompt that
+    // isn't on the screen is no answer.
+    let error = first
+        .ask_pin(pin_state())
+        .await
+        .err()
+        .context("took a PIN for a prompt nobody showed")?;
+    ensure!(not_shown(&error), "{error:#}");
+
+    // A request that waits doesn't inherit the broken popup.
+    let waiting = {
+        let popup = Arc::clone(&popup);
+        tokio::spawn(async move {
+            let mut second = popup.session(SOON, queued()).await?;
+            second.start().await?;
+            second.show_visibly(touch_state()).await?;
+            Ok::<_, anyhow::Error>(second)
+        })
+    };
+    log_until(dir.path(), |text| {
+        text.contains(r#"{"type":"queue","waiting":[{"#)
+    })
+    .await?;
+    std::fs::remove_file(dir.path().join("blind"))?;
+    drop(first);
+    let second = waiting.await??;
+    let text = log(dir.path());
+    ensure!(
+        text.matches("start\n").count() == 2,
+        "the popup that showed nothing was used again: {text}"
+    );
+    // The first one was killed, not asked to leave.
+    ensure!(!text.contains("exit\n"), "{text}");
+    drop(second);
+    log_until(dir.path(), |text| text.ends_with("exit\n")).await?;
+    Ok(())
+}
+
+/// Cancelling doesn't have to wait for a popup that is slow to show.
+#[tokio::test]
+async fn a_cancel_ends_the_wait_for_a_state_to_be_shown() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    std::fs::write(dir.path().join("blind"), "")?;
+    std::fs::write(dir.path().join("cancel"), "")?;
+    let popup = popup(dir.path())?;
+    let mut session = popup.session(SOON, queued()).await?;
+    session.start().await?;
+    let error = tokio::time::timeout(SOON, session.show_visibly(touch_state()))
+        .await
+        .context("the cancel went unnoticed until the popup was given up")?
+        .err()
+        .context("a cancelled state counted as shown")?;
+    ensure!(cancelled_in_popup(&error), "{error:#}");
+    Ok(())
+}
+
+#[test]
+fn a_state_gets_longer_to_be_shown_than_the_one_before_may_stay() {
+    // A failure of the request before stays for `LONGEST_LINGER`, and the
+    // next request's first state only follows it.
+    assert!(
+        skagent::popup::SHOW_TIMEOUT
+            >= skagent_popup::LONGEST_LINGER.saturating_add(Duration::from_secs(3))
+    );
 }
 
 #[test]

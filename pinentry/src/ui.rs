@@ -59,6 +59,11 @@ pub struct Popup {
     pending: Option<(u64, State)>,
     /// The agent closed the input: nothing follows.
     ended: bool,
+    /// The state whose `SHOWN` is on its way: sent with the next frame.
+    shown_due: Option<u64>,
+    /// The state the agent was told is on the screen. Answers come after
+    /// that: the agent takes none for a prompt it can't know is there.
+    shown_said: Option<u64>,
 }
 
 impl Popup {
@@ -90,6 +95,8 @@ impl Popup {
             answers,
             pending: None,
             ended: false,
+            shown_due: None,
+            shown_said: None,
         }
     }
 
@@ -194,6 +201,10 @@ impl Popup {
         let Some(shown) = self.shown.as_ref() else {
             return;
         };
+        // Not while the screen still fades in: see `shown_said`.
+        if self.shown_said != Some(shown.seq) {
+            return;
+        }
         match shown.screen.body {
             Body::Pin { .. } => {
                 let seq = shown.seq;
@@ -305,6 +316,7 @@ impl Render for Popup {
             // CSS's `normal` for Inter, which the design was drawn with.
             .line_height(relative(1.21))
             .text_color(theme.text);
+        self.tell_shown(window, cx);
         let Some(shown) = self.shown.as_ref() else {
             return root;
         };
@@ -347,6 +359,33 @@ impl Render for Popup {
             .children(close_button(screen, &theme, cx))
             .children(queue_pill(&self.waiting, &theme));
         root.child(content)
+    }
+}
+
+impl Popup {
+    /// Tells the agent that the state is on the screen, once per state:
+    /// when it has faded in (a screen starts transparent), and the frame
+    /// drawn now was taken. The display server asks for the next frame only
+    /// once it took this one, and never for a window it doesn't show.
+    fn tell_shown(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some((seq, faded)) = self
+            .shown
+            .as_ref()
+            .map(|shown| (shown.seq, shown.since.elapsed()))
+            .filter(|(_, faded)| *faded >= CROSSFADE)
+            .filter(|(seq, _)| self.shown_due != Some(*seq))
+        else {
+            return;
+        };
+        self.shown_due = Some(seq);
+        let answers = self.answers;
+        let this = cx.weak_entity();
+        window.on_next_frame(move |_, cx| {
+            answers.send(skagent_popup::shown_line(seq).as_bytes());
+            tracing::debug!(seq, faded_ms = faded.as_millis(), "shown");
+            // Gone with its window: nothing left to answer.
+            let _gone = this.update(cx, |popup, _| popup.shown_said = Some(seq));
+        });
     }
 }
 

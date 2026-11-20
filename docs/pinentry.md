@@ -46,7 +46,7 @@ protocol is the `skagent-popup` crate, shared with the popup.
 - **Agent = controller, popup = view.** The agent owns the flow, because it
   sees the devices, the PIN retries and the requests. It sends the complete
   state to show; the popup only reports what the user did.
-- **Handshake.** The popup's first line is `READY 1` (protocol version), within
+- **Handshake.** The popup's first line is `READY 2` (protocol version), within
   10 s of starting. The agent answers with `{"type":"style","style":…}`: the
   colours of both themes (presets with the `[popup]` overrides of the
   configuration, mixed as `skagent_popup::style` says), fonts, OpenType
@@ -58,10 +58,18 @@ protocol is the `skagent-popup` crate, shared with the popup.
   (emoji, label, fingerprint), the request (login with host and `via`, SSHSIG
   namespace, unknown), the YubiKey's name and, after a wrong PIN, the tries
   left. Text is sanitized by the agent. Never a secret.
-- **Popup → agent:** `PIN <seq> <data>` (percent-escaped like Assuan data),
-  `CANCEL <seq>`, `RETRY <seq>`. `seq` names the state acted on; answers to
-  replaced states are ignored. Lines are read one byte at a time into locked
-  memory.
+- **Popup → agent:** `SHOWN <seq>`, `PIN <seq> <data>` (percent-escaped like
+  Assuan data), `CANCEL <seq>`, `RETRY <seq>`. `seq` names the state acted
+  on; answers to replaced states are ignored. Lines are read one byte at a
+  time into locked memory.
+- **Nothing is asked for that isn't on the screen.** `SHOWN <seq>` says that
+  the state is there to be read: faded in, and the display server asked for
+  the frame after that one, which it doesn't do for a window it doesn't show
+  (behind a lock screen, say). The agent waits for it before a security key
+  is asked for a touch (signing, pairing, selecting, creating an identity)
+  and before it takes a PIN or a retry; the popup sends neither earlier.
+  Without it after 10 s the popup is ended, the request fails, and the next
+  one starts a new popup. Results aren't waited for.
 - **Session.** A request takes the popup before any device lock and keeps it
   to the end; others wait (up to 2 minutes) and see the count. The first
   request starts the popup; when one ends while others wait, the popup stays

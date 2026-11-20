@@ -1206,10 +1206,17 @@ impl Signer {
         let retry_guard = matches!(source, PinSource::Cache(_))
             .then_some(retries)
             .flatten();
+        // The security key blinks once the user was told what for.
+        let notification = tokio::select! {
+            biased;
+            () = ticket.revoked() => bail!("the request was cancelled by PIN eviction or key removal"),
+            shown = self.show_touch(running, session.as_deref_mut(), again) => {
+                shown.with_context(|| format!("{} with {}", job.doing(), job.described()))?
+            }
+        };
         // Revocation, a cancel in the popup or a dropped request cancels the
         // request on the device, which ends the wait for a touch and with
         // it the PIN copy.
-        let notification = self.show_touch(running, session.as_deref_mut(), again)?;
         let (interrupt, finished) = DeviceInterrupt::new(routed.device.canceller());
         let worker = {
             let device = running.device.clone();
@@ -1286,9 +1293,10 @@ impl Signer {
         Err(error.context(format!("{} with {}", job.doing(), job.described())))
     }
 
-    /// Tells the user to touch the key: in the popup, or with a desktop
-    /// notification that lasts until the returned guard is dropped.
-    fn show_touch<J: Job>(
+    /// Tells the user to touch the key: in the popup, which has it on the
+    /// screen when this returns, or with a desktop notification that lasts
+    /// until the returned guard is dropped.
+    async fn show_touch<J: Job>(
         &self,
         running: &Running<'_, J>,
         session: Option<&mut PopupSession>,
@@ -1296,13 +1304,15 @@ impl Signer {
     ) -> Result<Option<Notification>> {
         let job = running.job;
         if let Some(session) = session {
-            session.show(Shown::Touch {
-                key: job.popup_key(),
-                request: job.popup_request(),
-                security_key: running.security_key.clone(),
-                timeout_ms: u64::try_from(TOUCH_TIMEOUT_HINT.as_millis()).unwrap_or(u64::MAX),
-                again,
-            })?;
+            session
+                .show_visibly(Shown::Touch {
+                    key: job.popup_key(),
+                    request: job.popup_request(),
+                    security_key: running.security_key.clone(),
+                    timeout_ms: u64::try_from(TOUCH_TIMEOUT_HINT.as_millis()).unwrap_or(u64::MAX),
+                    again,
+                })
+                .await?;
             return Ok(None);
         }
         Ok(self.notifier.as_ref().map(|notifier| {
@@ -1348,7 +1358,7 @@ impl Signer {
         &self,
         key: Option<&CredentialKey>,
         ticket: &SigningTicket,
-        mut session: Option<&mut PopupSession>,
+        session: Option<&mut PopupSession>,
         routed: RoutedDevice,
         pin: &SecretBuffer,
     ) -> Result<(RoutedDevice, Option<PairingCredential>)> {
@@ -1367,7 +1377,7 @@ impl Signer {
             }
         };
         // Looking takes only the PIN: on another machine this is all.
-        let (mut routed, pin, found) = tokio::task::spawn_blocking(move || {
+        let (routed, pin, found) = tokio::task::spawn_blocking(move || {
             let mut routed = routed;
             let found = routed.device.find_pairing(&pin);
             (routed, pin, found)
@@ -1393,11 +1403,46 @@ impl Signer {
                 return Ok((routed, None));
             }
         }
+        self.create_pairing(ticket, session, routed, pin).await
+    }
+
+    /// Creates skagent's pairing credential on the security key `routed`,
+    /// which takes a touch: the second half of [`Signer::pair`].
+    async fn create_pairing(
+        &self,
+        ticket: &SigningTicket,
+        mut session: Option<&mut PopupSession>,
+        mut routed: RoutedDevice,
+        pin: SecretBuffer,
+    ) -> Result<(RoutedDevice, Option<PairingCredential>)> {
         tracing::info!(
             security_key = %self.device_name(&routed),
             "touch the security key once more to pair skagent with it"
         );
-        let notification = self.show_pair(session.as_deref_mut(), &routed);
+        // Like any touch: asked for once the popup says why.
+        let (security_key, name) = (self.security_key(&routed), self.device_name(&routed));
+        let shown = tokio::select! {
+            biased;
+            () = ticket.revoked() => return Ok((routed, None)),
+            shown = self.show_pair(session.as_deref_mut(), security_key, &name) => shown,
+        };
+        let notification = match shown {
+            Ok(notification) => notification,
+            Err(error) if cancelled_in_popup(&error) => {
+                tracing::info!("pairing declined in the popup");
+                self.skip_pairing(&routed.identity);
+                return Ok((routed, None));
+            }
+            // Not the security key's fault: asked again next time.
+            Err(error) => {
+                tracing::warn!(
+                    security_key = %self.device_name(&routed),
+                    error = %format!("{error:#}"),
+                    "not pairing: the popup doesn't show the request"
+                );
+                return Ok((routed, None));
+            }
+        };
         let (interrupt, finished) = DeviceInterrupt::new(routed.device.canceller());
         let worker = tokio::task::spawn_blocking(move || {
             let _finished = finished;
@@ -1453,31 +1498,30 @@ impl Signer {
         skipped.insert(device.clone());
     }
 
-    /// Asks for the pairing touch: in the popup, else in a notification.
-    fn show_pair(
+    /// Asks for the pairing touch of the security key `name`: in the
+    /// popup, which has it on the screen when this returns, else in a
+    /// notification.
+    async fn show_pair(
         &self,
         session: Option<&mut PopupSession>,
-        routed: &RoutedDevice,
-    ) -> Option<Notification> {
+        security_key: Option<SecurityKey>,
+        name: &str,
+    ) -> Result<Option<Notification>> {
         if let Some(session) = session {
-            show_best_effort(
-                session,
-                Shown::Pair {
-                    security_key: self.security_key(routed),
+            session
+                .show_visibly(Shown::Pair {
+                    security_key,
                     timeout_ms: u64::try_from(TOUCH_TIMEOUT_HINT.as_millis()).unwrap_or(u64::MAX),
-                },
-            );
-            return None;
+                })
+                .await?;
+            return Ok(None);
         }
-        self.notifier.as_ref().map(|notifier| {
+        Ok(self.notifier.as_ref().map(|notifier| {
             notifier.show(
                 "Touch your security key once more",
-                &format!(
-                    "To pair {} with skagent. Only this once.",
-                    self.device_name(routed)
-                ),
+                &format!("To pair {name} with skagent. Only this once."),
             )
-        })
+        }))
     }
 
     /// The PIN to use: cached if allowed, otherwise asked for, in the popup
@@ -1793,18 +1837,22 @@ async fn popup_cancelled(session: Option<&mut PopupSession>) {
     }
 }
 
-/// Shows the selection in the popup once the router starts one.
+/// Shows the selection in the popup once the router starts one, which
+/// waits until it is on the screen.
 fn select_in_popup(session: &PopupSession, key: Option<Key>) -> Result<OnSelect> {
     let shower = session.shower()?;
     let timeout_ms = u64::try_from(SELECTION_TIMEOUT.as_millis()).unwrap_or(u64::MAX);
     Ok(Box::new(move |devices| {
-        if let Err(error) = shower.show(Shown::Select {
-            key,
-            devices,
-            timeout_ms,
-        }) {
-            tracing::debug!(error = %format!("{error:#}"), "showing the selection in the popup failed");
-        }
+        Box::pin(async move {
+            shower
+                .show_visibly(Shown::Select {
+                    key,
+                    devices,
+                    timeout_ms,
+                })
+                .await
+                .map(|_seq| ())
+        })
     }))
 }
 

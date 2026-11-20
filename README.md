@@ -209,6 +209,9 @@ own takes it with `--popup PATH`.
   loads no GPU driver, so it never wakes a sleeping second GPU. NixOS has
   lavapipe with Mesa; elsewhere it may be a package of its own
   (`vulkan-swrast`, `mesa-vulkan-drivers`).
+- **Your key only blinks once the prompt is on the screen.** If the popup
+  can't show it within 10 seconds, behind a lock screen for example, the
+  request fails instead.
 - **Without it,** skagent asks for PINs with pinentry or an askpass program,
   and a desktop notification tells you while a key waits for a touch.
 - **Every prompt** says which key is used and what for: a login and its host,

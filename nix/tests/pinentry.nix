@@ -76,6 +76,7 @@ pkgs.testers.runNixOSTest {
       pkgs.imagemagick
       pkgs.libfido2
       pkgs.openssh
+      pkgs.swaylock
       pkgs.wtype
       # What loads every graphics driver there is, to see the traps work.
       pkgs.mesa-demos
@@ -140,6 +141,21 @@ pkgs.testers.runNixOSTest {
     def wait_for_state(since: int, name: str, count: int = 1) -> None:
         wait_for(lambda: states(since).count(name) >= count)
 
+    def on_screen(since: int) -> list[str]:
+        """The states the popup said it has on the screen."""
+        lines = popup_lines()[since:]
+        names: dict[str, str] = {}
+        for line in lines:
+            showing = re.search(r'showing seq=(\d+) state="([a-z-]+)"', line)
+            if showing:
+                names[showing.group(1)] = showing.group(2)
+        said = [re.search(r"shown seq=(\d+)", line) for line in lines]
+        return [names[match.group(1)] for match in said if match and match.group(1) in names]
+
+    def wait_until_shown(since: int, name: str, count: int = 1) -> None:
+        """Waits until the popup has the state on the screen: from then on it can be looked at and typed into, however slow the machine."""
+        wait_for(lambda: on_screen(since).count(name) >= count)
+
     def popup_running() -> bool:
         # By the name the process list has: its first 15 bytes.
         return machine.execute("pgrep -u alice -x skagent-pinentr")[0] == 0
@@ -187,6 +203,10 @@ pkgs.testers.runNixOSTest {
     def settle() -> None:
         """Lets the crossfade and intro animations end before a screenshot."""
         machine.sleep(2)
+
+    def together() -> list[str]:
+        """What the agent, its popup and the security key logged, in the order it happened."""
+        return machine.succeed("journalctl -u skagent -u testkey --no-pager -o cat").splitlines()
 
     def trapped() -> list[str]:
         """The graphics drivers loaded that tell: `<vulkan or egl>-<process>-<pid>` each."""
@@ -246,8 +266,8 @@ pkgs.testers.runNixOSTest {
     with subtest("a signature goes through the popup: PIN, touch, pairing declined, signed"):
         mark = len(popup_lines())
         start_sign("first")
-        wait_for_state(mark, "pin")
-        wait_for(lambda: logged(mark, "opened a layer-shell overlay"))
+        wait_until_shown(mark, "pin")
+        assert logged(mark, "opened a layer-shell overlay"), popup_lines()[mark:]
         settle()
         assert screenshot("pin") > 0.8, "the popup isn't showing"
         # The process the PIN is typed into is hardened like the agent: no
@@ -256,15 +276,31 @@ pkgs.testers.runNixOSTest {
         machine.succeed(f"grep -E '^Max core file size +0 +0 ' /proc/{popup_pid}/limits")
         status, _ = alice(f"cat /proc/{popup_pid}/environ")
         assert status != 0, "alice could read the popup's environment"
+        asking = 'touch requested operation="getAssertion" rp_id="ssh:example"'
+        asked_before = journal("testkey").count(asking)
         type_keys("${pin} -k Return")
-        wait_for_state(mark, "touch")
+        wait_until_shown(mark, "touch")
         # Nothing of the Wayland protocol is in the journal, so no key is.
         assert "wl_keyboard" not in journal("skagent"), "the keys typed into the popup were logged"
         settle()
         assert screenshot("touch") > 0.8, "the popup isn't showing"
+        # The key was asked for the touch once the popup had it on the
+        # screen, faded in, and not before.
+        wait_for(lambda: journal("testkey").count(asking) > asked_before)
+        happened = together()
+        showing = next(n for n, line in enumerate(happened) if 'state="touch"' in line)
+        number = re.search(r"showing seq=(\d+)", happened[showing])
+        assert number, happened[showing]
+        said = next(n for n, line in enumerate(happened) if f"shown seq={number.group(1)}" in line)
+        asked = next(n for n, line in enumerate(happened) if asking in line and n > showing)
+        assert showing < said < asked, (showing, said, asked)
+        # Faded in first (180 ms): a screen starts out transparent, and what
+        # is drawn isn't yet what is seen.
+        faded = re.search(r"faded_ms=(\d+)", happened[said])
+        assert faded and int(faded.group(1)) >= 180, happened[said]
         touch()
         # The first signature on the key offers to pair; Escape declines.
-        wait_for_state(mark, "pair")
+        wait_until_shown(mark, "pair")
         settle()
         assert screenshot("pair") > 0.8, "the popup isn't showing"
         type_keys("-k Escape")
@@ -283,10 +319,10 @@ pkgs.testers.runNixOSTest {
         alice_ok("skagent forget --socket ${socket}")
         mark = len(popup_lines())
         start_sign("wrong")
-        wait_for_state(mark, "pin")
+        wait_until_shown(mark, "pin")
         settle()
         type_keys("000000 -k Return")
-        wait_for_state(mark, "pin", count=2)
+        wait_until_shown(mark, "pin", count=2)
         time.sleep(0.5)
         screenshot("wrong-pin")
         type_keys("${pin} -k Return")
@@ -301,7 +337,7 @@ pkgs.testers.runNixOSTest {
         alice_ok("skagent forget --socket ${socket}")
         mark = len(popup_lines())
         start_sign("cancelled")
-        wait_for_state(mark, "pin")
+        wait_until_shown(mark, "pin")
         settle()
         type_keys("1357 -k Escape")
         finished("cancelled", success=False)
@@ -312,6 +348,27 @@ pkgs.testers.runNixOSTest {
         assert "cancelled in the popup" in journal("skagent")
         assert "pin retries: 8" in tries()
 
+    with subtest("behind a lock screen the popup isn't on the screen, and doesn't say it is"):
+        # The compositor shows the lock and nothing else. The popup draws,
+        # and nobody sees it: no PIN is waited for, no key would blink.
+        machine.succeed(
+            f"systemd-run --unit swaylock --uid alice --setenv XDG_RUNTIME_DIR=${runtime}"
+            f" --setenv WAYLAND_DISPLAY={display} ${pkgs.swaylock}/bin/swaylock -c 000000"
+        )
+        retry(lambda _last_try: screenshot("locked") < 0.05, timeout_seconds=10)
+        mark = len(popup_lines())
+        requested = journal("testkey").count("touch requested")
+        start_sign("locked")
+        wait_for_state(mark, "pin")
+        finished("locked", success=False)
+        assert not logged(mark, "shown seq="), popup_lines()[mark:]
+        assert "the popup didn't show the request within 10 s" in journal("skagent")
+        assert journal("testkey").count("touch requested") == requested
+        closed()
+        # SIGUSR1 unlocks.
+        machine.succeed("systemctl kill --signal USR1 swaylock")
+        machine.wait_until_fails("systemctl is-active swaylock", timeout=10)
+
     with subtest("a failure stays to be read, and the popup leaves by itself"):
         # A key the security key doesn't hold: the PIN is right, and the key
         # says that it has no such credential.
@@ -320,14 +377,16 @@ pkgs.testers.runNixOSTest {
         alice_ok("SSH_AUTH_SOCK=${socket} ssh-add -L | grep -F 'not on the key' > ~/missing.pub")
         mark = len(popup_lines())
         start_sign("missing", "missing.pub")
-        wait_for_state(mark, "pin")
+        wait_until_shown(mark, "pin")
         settle()
         type_keys("${pin} -k Return")
-        wait_for_state(mark, "failed")
+        wait_until_shown(mark, "failed")
         # The agent closed its input when it showed the failure, which stays
         # for five seconds. The popup goes then; the agent doesn't kill it.
         assert popup_running(), "the failure was gone before it could be read"
-        settle()
+        # Its badge has popped after half a second. Not the two seconds of
+        # the other pictures: on a busy machine the five were over by then.
+        time.sleep(0.7)
         assert screenshot("failed") > 0.8, "the popup isn't showing"
         finished("missing", success=False)
         closed()
@@ -351,7 +410,7 @@ pkgs.testers.runNixOSTest {
         machine.wait_for_file("${socket}")
         mark = len(popup_lines())
         start_sign("styled")
-        wait_for_state(mark, "pin")
+        wait_until_shown(mark, "pin")
         settle()
         # 450 px instead of 360, centred: the card's top edge, between the
         # border and the anchor, is where a 360 px popup has no window.

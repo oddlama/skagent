@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::pin::Pin;
 use std::sync::{Arc, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
@@ -27,8 +28,11 @@ use crate::signer::SigningTicket;
 /// How long a touch selection waits.
 pub(crate) const SELECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Called with the number of candidates when a touch selection starts.
-pub(crate) type OnSelect = Box<dyn FnOnce(usize) + Send>;
+/// Called with the number of candidates when a touch selection starts. The
+/// selection waits for what it returns: the security keys blink once the
+/// user was told why, and not at all if that failed.
+pub(crate) type OnSelect =
+    Box<dyn FnOnce(usize) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send>;
 
 /// Called when a request starts waiting for its security key, and whenever
 /// what it waits for changes (e.g. the wrong one was plugged in).
@@ -491,7 +495,7 @@ impl Router {
             .as_ref()
             .map(|notifier| notifier.show("Touch the security key to use", &body));
         if let Some(on_select) = on_select {
-            on_select(candidates.len());
+            on_select(candidates.len()).await?;
         }
         // Set when this request is dropped (client gone): the selection then
         // stops at its next round instead of blocking everyone for 30 s.

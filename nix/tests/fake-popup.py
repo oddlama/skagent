@@ -2,6 +2,8 @@
 like a user would, as the files in $SKAGENT_TEST_POPUP_DIR say:
 
 - log: every line received, plus "start" and "exit"
+- blind: take the states without saying that they are shown, like a popup
+  whose window never appears
 - answers: PINs to enter, one line each, used up in order; then pin
 - cancel-pin: cancel PIN prompts
 - hold-pin: wait with the answer to a PIN prompt while this exists
@@ -51,7 +53,7 @@ def next_pin():
 
 
 log("start")
-say("READY 1")
+say("READY 2")
 for line in sys.stdin:
     line = line.rstrip("\n")
     log(line)
@@ -60,6 +62,9 @@ for line in sys.stdin:
         continue
     seq = message["seq"]
     name = message["state"]["name"]
+    if os.path.exists(path("blind")):
+        continue
+    say(f"SHOWN {seq}")
     if name in ("pin", "load-pin"):
         while os.path.exists(path("hold-pin")):
             time.sleep(0.1)

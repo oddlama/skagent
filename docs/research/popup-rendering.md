@@ -1,6 +1,6 @@
-# what the popup draws with
+# what the popup draws with, and whether it is on the screen
 
-Findings behind a rule of skagent's popup: it draws on the CPU and loads no GPU driver. They come from one afternoon on one machine. Sources: that machine's journal, GPUI at `6983685` (`gpui_wgpu/src/wgpu_context.rs`, `gpui_linux/src/linux/wayland/window.rs`, `gpui/src/window.rs`), wgpu `cddb2f5` (30.0.0), Vulkan-Loader 1.4.363 (`loader/loader.c`, `docs/LoaderInterfaceArchitecture.md`), libglvnd 1.7.0 (`src/EGL/libeglvendor.c`).
+Findings behind two rules of skagent's popup: it draws on the CPU and loads no GPU driver, and the agent asks for nothing before the popup says a prompt is on the screen. Both come from one afternoon on one machine. Sources: that machine's journal, GPUI at `6983685` (`gpui_wgpu/src/wgpu_context.rs`, `gpui_linux/src/linux/wayland/window.rs`, `gpui/src/window.rs`), wgpu `cddb2f5` (30.0.0), Vulkan-Loader 1.4.363 (`loader/loader.c`, `docs/LoaderInterfaceArchitecture.md`), libglvnd 1.7.0 (`src/EGL/libeglvendor.c`).
 
 ## what GPUI loads to draw a window
 
@@ -34,5 +34,7 @@ The crashes are the NVIDIA driver's: it doesn't survive a failed allocation whil
   - `LIBGL_ALWAYS_SOFTWARE=true`, for an EGL that isn't libglvnd's.
 - **With that, in the VM:** no stand-in driver or vendor library is loaded by any popup, the popup reports `llvmpipe`, and its window opens 80 to 260 ms after the first state arrives. The pictures in the README were always drawn this way.
 - **What it costs:** the popup needs Mesa's software Vulkan driver (in Mesa's package on NixOS, `vulkan-swrast` or `mesa-vulkan-drivers` elsewhere), and drawing takes CPU time: 1.4 s of it over the first 3.4 s of a popup on average, starting included (69 popups of `nix build .#screenshots`, in a VM at twice the size, 720 pixels square).
+- **The agent waits for `SHOWN`** (`skagent-popup`, protocol version 2; `PopupSession::show_visibly`): the popup says when a state is on the screen, and before that no security key is asked for a touch and no answer is taken. The popup says it once the state has faded in and the display server asked for the frame after that one, which it only does for a window it shows. A popup that hasn't said so after 10 s is ended, and the request fails.
+- **Seen with the real popup:** behind a lock screen (swaylock) it draws and never says `SHOWN`; the request fails after 10 s and the key is never asked.
 
 Not looked at: a real machine with two GPUs after the change, a Vulkan loader older than 1.3.234 (the popup then warns that it draws on a GPU), and an EGL library that isn't libglvnd's.

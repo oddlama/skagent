@@ -6,7 +6,7 @@ use anyhow::{Result, bail, ensure};
 use skagent_popup::{
     Failure, Host, Intent, Key, Message, Mistake, Queued, Request, Requester, SecurityKey, State,
     VERSION, cancel_line, decode_message, encode_message, parse_intent, pin_line, ready_line,
-    retry_line,
+    retry_line, shown_line,
 };
 
 fn key() -> Key {
@@ -103,6 +103,10 @@ fn the_other_intents_parse() -> Result<()> {
         Intent::Ready { version } if version == VERSION
     ));
     ensure!(matches!(
+        parse_intent(without_newline(shown_line(8).as_bytes()))?,
+        Intent::Shown { seq: 8 }
+    ));
+    ensure!(matches!(
         parse_intent(without_newline(cancel_line(9).as_bytes()))?,
         Intent::Cancel { seq: 9 }
     ));
@@ -117,9 +121,11 @@ fn the_other_intents_parse() -> Result<()> {
 /// the PIN.
 #[test]
 fn malformed_intents_are_refused_without_their_content() {
-    let malformed: [&[u8]; 9] = [
+    let malformed: [&[u8]; 11] = [
         b"",
         b"hunter22",
+        b"SHOWN",
+        b"SHOWN hunter22",
         b"PIN",
         b"PIN 1",
         b"PIN x hunter22",
