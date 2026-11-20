@@ -19,12 +19,16 @@ popups when your key needs your attention.
 - 🤝 **Pairs with your security keys**, so a fake key that pretends to be yours can never extract your PIN accidentally
 - 📥 **No stub files**, it can load the resident keys from the security key directly
 - 🔒 **Forgets your PIN** after a time delay, when the screen locks, the machine sleeps or the key is unplugged (all configurable)
-- 🗄️ **Age support** with a custom age plugin post-quantum key derived from your security key
+- 🗄️ **Age support** with a custom age plugin and post-quantum keys
 - ⏩ **Agent forwarding** with support for destination constraints, including forwarding for aforementioned `age` keys
 - 🗝️ **Multiple security keys** with separate PIN caches, recognized by their serial number
 - 💬 **Custom pinentry** based on GPUI which is aware of the operation and state of your security key
 
 ## 📦 Installation
+
+skagent requires kernel version 5.11 or newer. The recommended way to install is via nix and home-manager which
+creates a socket activated systemd user service and does the necessary environment setup. You can also install
+it manually of course.
 
 ### home-manager
 
@@ -46,19 +50,6 @@ popups when your key needs your attention.
      };
    }
    ```
-
-This runs skagent as a socket-activated user service. The socket at
-`$XDG_RUNTIME_DIR/skagent.sock` exists from login on, and the agent starts with
-its first client. A second socket next to it, `skagent-age.sock`, is for
-[age](#age) (`services.skagent.age.enable`, on by default). It stops together with your graphical session, so logging out
-drops all PINs. Your keys stay, see below. Your compositor or desktop has to import the
-display variables into the systemd user manager so pinentry and notifications
-can show up. Most do that already.
-
-The module also points `SSH_AUTH_SOCK` at skagent, except in sessions that use
-a forwarded agent. This needs a home-manager version with `sshAuthSock` (26.11
-or unstable) and conflicts with other modules that set it, like
-`services.ssh-agent` or gpg-agent's SSH support.
 
 <details>
 <summary>Using skagent only for some hosts</summary>
