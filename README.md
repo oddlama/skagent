@@ -38,12 +38,12 @@ it manually of course.
    ```
 2. Import the home-manager module and enable it
    ```nix
-   { inputs, pkgs, ... }:
+   { inputs, ... }:
    {
      imports = [ inputs.skagent.homeModules.default ];
      services.skagent = {
        enable = true;
-       pinentry.package = pkgs.pinentry-gnome3; # default: pinentry-qt
+       popup.enable = true; # skagent's own popup; without it, pinentry-qt asks for PINs
        loadAtLogin = true; # runs `skagent load` when your graphical session starts
        pinPolicies = [ { application = "ssh:personal"; lifetime = "1h"; } ];
        age.batchLifetime = "5m"; # default: 10m, see age below
@@ -67,9 +67,16 @@ Host github.com
 
 ### Without home-manager
 
-With nix, `nix shell github:oddlama/skagent` puts you in a shell with skagent.
-Otherwise you can build it with `nix build github:oddlama/skagent` or directly with cargo, which needs the libfido2 and OpenSSL
-headers, pkg-config and libclang:
+With nix, get the agent and its popup:
+
+```sh
+nix shell github:oddlama/skagent # a shell with skagent
+nix build github:oddlama/skagent#pinentry # the popup, in result/bin/skagent-pinentry
+```
+
+Without nix, build the agent with cargo, which needs the libfido2 and OpenSSL
+headers, pkg-config and libclang. It then asks for PINs with a graphical
+pinentry from your PATH instead of the popup (leave out `--popup` below):
 
 ```sh
 cargo install --locked --git https://github.com/oddlama/skagent skagent
@@ -78,7 +85,7 @@ cargo install --locked --git https://github.com/oddlama/skagent skagent
 Then start the agent and point ssh at it:
 
 ```sh
-skagent serve # needs a graphical pinentry on your PATH
+skagent serve --popup result/bin/skagent-pinentry
 # In another terminal:
 export SSH_AUTH_SOCK=$XDG_RUNTIME_DIR/skagent.sock
 skagent load # loads the resident keys of your security key, asks for the PIN once
