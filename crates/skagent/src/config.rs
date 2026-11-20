@@ -9,6 +9,7 @@
 //! name = "Desk 5C NFC"
 //!
 //! [popup]
+//! renderer = "gpu"
 //! appearance = "dark"
 //! scale = 1.25
 //!
@@ -18,9 +19,9 @@
 //!
 //! Everything is optional, and nothing in it is secret. Unknown settings are
 //! refused, so a typo can't silently do nothing. The exception is `[popup]`
-//! (see `skagent_popup::style`): how the popup looks is cosmetic, so a setting
-//! there that can't be used is skipped with a warning instead of stopping
-//! the agent. home-manager generates the file from `services.skagent.keys`,
+//! (see `skagent_popup::style`): how the popup looks and what it draws with
+//! is cosmetic, so a setting there that can't be used is skipped with a
+//! warning instead of stopping the agent. home-manager generates the file from `services.skagent.keys`,
 //! `services.skagent.securityKeys` and `services.skagent.popup`.
 
 use std::collections::BTreeMap;

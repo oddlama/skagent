@@ -209,6 +209,11 @@ own takes it with `--popup PATH`.
   loads no GPU driver, so it never wakes a sleeping second GPU. NixOS has
   lavapipe with Mesa; elsewhere it may be a package of its own
   (`vulkan-swrast`, `mesa-vulkan-drivers`).
+- **Or on your compositor's GPU,** with `services.skagent.popup.renderer =
+  "gpu"` (`renderer = "gpu"` under `[popup]`): the GPU your Wayland
+  compositor draws on, with that GPU's driver alone. A second GPU is still
+  left alone, and where the popup can't tell which GPU the compositor uses,
+  it draws on the CPU.
 - **Your key only blinks once the prompt is on the screen.** If the popup
   can't show it within 10 seconds, behind a lock screen for example, the
   request fails instead.

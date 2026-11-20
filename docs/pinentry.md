@@ -21,6 +21,14 @@ yet unless a section says so.
   its own environment, and starts itself again with it if it has to
   (`pinentry/src/rendering.rs`); the day this comes from is in
   [`research/popup-rendering.md`](research/popup-rendering.md).
+- **Or on the display server's GPU,** if the configuration asks for it
+  (`[popup] renderer = "gpu"`, which the agent passes on as `--renderer`:
+  the popup has to know before it starts). The popup asks the Wayland
+  compositor which device it draws on and lets the loader load that GPU's
+  Vulkan driver next to lavapipe, and no other. It stays on the CPU where it
+  can't keep to that one GPU: no compositor that names its device, no
+  Vulkan driver known for it, or a driver that serves a second GPU here and
+  would open that too.
 - **Wayland first, compositor-agnostic.** A layer-shell overlay with exclusive
   keyboard focus where the compositor offers it (sway, Hyprland, niri, river,
   labwc, KDE), an ordinary window elsewhere. No compositor-specific code.

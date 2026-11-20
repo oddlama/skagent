@@ -2,6 +2,7 @@
 like a user would, as the files in $SKAGENT_TEST_POPUP_DIR say:
 
 - log: every line received, plus "start" and "exit"
+- args: the arguments it was started with
 - blind: take the states without saying that they are shown, like a popup
   whose window never appears
 - answers: PINs to enter, one line each, used up in order; then pin
@@ -52,6 +53,8 @@ def next_pin():
         return file.read().strip()
 
 
+with open(path("args"), "w") as file:
+    file.write(" ".join(sys.argv[1:]) + "\n")
 log("start")
 say("READY 2")
 for line in sys.stdin:

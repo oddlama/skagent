@@ -2,7 +2,9 @@
 //!
 //! The agent reads them from the `[popup]` table of its configuration and
 //! sends them to the popup as a [`crate::Message::Style`] before anything
-//! else. A popup that gets none uses the design's presets.
+//! else. A popup that gets none uses the design's presets. What the popup
+//! draws with ([`Renderer`]) is in that table too, and goes another way: the
+//! popup has to know when it starts, so it is an argument of its.
 //!
 //! Light and dark each start from the design's preset, and the configuration
 //! overrides single colours. A colour the configuration doesn't set is the
@@ -562,10 +564,44 @@ pub enum Appearance {
     Dark,
 }
 
+/// What the popup draws its window with.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Renderer {
+    /// The CPU alone: the popup loads no GPU driver.
+    #[default]
+    Cpu,
+    /// The GPU the display server draws on, if the popup can tell which
+    /// that is and can keep away from every other one; else the CPU.
+    Gpu,
+}
+
+impl Renderer {
+    /// The name in the configuration and in the popup's `--renderer`.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Cpu => "cpu",
+            Self::Gpu => "gpu",
+        }
+    }
+
+    /// The renderer called `name`.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::Cpu, Self::Gpu]
+            .into_iter()
+            .find(|renderer| renderer.name() == name)
+    }
+}
+
 /// How the popup looks.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Style {
+    /// What the popup draws with. Not part of the message: the popup can't
+    /// change it once it runs, so the agent starts it with `--renderer`.
+    #[serde(skip)]
+    pub renderer: Renderer,
     /// Light, dark or the desktop's choice.
     pub appearance: Appearance,
     /// The font family for text; `None` is the bundled Inter.
@@ -588,6 +624,7 @@ pub struct Style {
 impl Default for Style {
     fn default() -> Self {
         Self {
+            renderer: Renderer::Cpu,
             appearance: Appearance::System,
             font: None,
             monospace_font: None,
@@ -610,6 +647,7 @@ impl Style {
         for (key, value) in table {
             let setting = format!("popup.{key}");
             let applied = match key.as_str() {
+                "renderer" => parse_renderer(value).map(|renderer| style.renderer = renderer),
                 "appearance" => parse_appearance(value).map(|appearance| {
                     style.appearance = appearance;
                 }),
@@ -624,9 +662,11 @@ impl Style {
                     .map(|overrides| style.light = Palette::resolve(&Palette::LIGHT, &overrides)),
                 "dark" => parse_colors(value, &setting, &mut warnings)
                     .map(|overrides| style.dark = Palette::resolve(&Palette::DARK, &overrides)),
-                _ => Err("no such setting (known: appearance, font, monospace-font, \
+                _ => Err(
+                    "no such setting (known: renderer, appearance, font, monospace-font, \
                           font-features, monospace-font-features, scale, light, dark)"
-                    .to_owned()),
+                        .to_owned(),
+                ),
             };
             if let Err(problem) = applied {
                 warnings.push(format!("{setting}: {problem}"));
@@ -634,6 +674,13 @@ impl Style {
         }
         (style, warnings)
     }
+}
+
+fn parse_renderer(value: &toml::Value) -> Result<Renderer, String> {
+    value
+        .as_str()
+        .and_then(Renderer::named)
+        .ok_or_else(|| format!("{} isn't \"cpu\" or \"gpu\"", shown(value)))
 }
 
 fn parse_appearance(value: &toml::Value) -> Result<Appearance, String> {

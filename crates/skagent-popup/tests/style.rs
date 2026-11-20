@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context as _, Result, ensure};
-use skagent_popup::style::{Appearance, Color, Palette, Rule, Style, Token};
+use skagent_popup::style::{Appearance, Color, Palette, Renderer, Rule, Style, Token};
 use skagent_popup::{Message, decode_message, encode_message};
 
 fn table(text: &str) -> Result<toml::Table> {
@@ -114,6 +114,8 @@ fn without_settings_the_popup_looks_as_designed() -> Result<()> {
     ensure!(style == Style::default());
     ensure!(style.light == Palette::LIGHT && style.dark == Palette::DARK);
     ensure!(style.scale_percent == 100 && style.appearance == Appearance::System);
+    // And is drawn on the CPU.
+    ensure!(style.renderer == Renderer::Cpu);
     for preset in [Palette::LIGHT, Palette::DARK] {
         ensure!(Palette::resolve(&preset, &BTreeMap::new()) == preset);
         // Setting a colour to the preset's own changes nothing else.
@@ -206,6 +208,7 @@ fn unusable_settings_are_skipped_with_a_warning_and_the_rest_applies() -> Result
     let (style, warnings) = Style::from_table(&table(
         r##"
         [popup]
+        renderer = "fast"
         appearance = "dim"
         font = ""
         monospace-font = "Mono\u0007"
@@ -220,6 +223,7 @@ fn unusable_settings_are_skipped_with_a_warning_and_the_rest_applies() -> Result
         "##,
     )?);
     let expected = [
+        "popup.renderer: \"fast\" isn't \"cpu\" or \"gpu\"",
         "popup.appearance: \"dim\" isn't",
         "popup.font: the font family name is empty",
         "popup.monospace-font: \"Mono\\u{7}\" isn't a font family name",
@@ -238,10 +242,39 @@ fn unusable_settings_are_skipped_with_a_warning_and_the_rest_applies() -> Result
     }
     ensure!(warnings.len() == expected.len(), "{warnings:#?}");
     ensure!(style.appearance == Appearance::System && style.font.is_none());
+    ensure!(style.renderer == Renderer::Cpu);
     ensure!(style.monospace_font.is_none() && style.scale_percent == 100);
     ensure!(style.font_features == BTreeMap::from([("cv11".to_owned(), 1)]));
     ensure!(style.light.accent == Palette::LIGHT.accent);
     ensure!(style.light.surface == Color::rgb(0x00fa_fafa));
+    Ok(())
+}
+
+/// What the popup draws with is the configuration's to say, and the popup's
+/// to know before it starts: the agent passes it as an argument, and the
+/// style message, which comes when the popup runs, doesn't carry it.
+#[test]
+fn the_renderer_is_read_from_the_table_and_not_sent_with_the_style() -> Result<()> {
+    let (style, warnings) = Style::from_table(&table("[popup]\nrenderer = \"gpu\"")?);
+    ensure!(warnings.is_empty(), "{warnings:?}");
+    ensure!(style.renderer == Renderer::Gpu);
+    for renderer in [Renderer::Cpu, Renderer::Gpu] {
+        ensure!(Renderer::named(renderer.name()) == Some(renderer));
+    }
+    ensure!(Renderer::named("GPU").is_none() && Renderer::named("").is_none());
+
+    let line = encode_message(&Message::Style {
+        style: Box::new(style),
+    })?;
+    let text = std::str::from_utf8(&line)?;
+    ensure!(
+        !text.contains("renderer") && !text.contains("gpu"),
+        "{text}"
+    );
+    let Message::Style { style: received } = decode_message(text.trim_end())? else {
+        anyhow::bail!("not a style message: {text}");
+    };
+    ensure!(received.renderer == Renderer::Cpu);
     Ok(())
 }
 

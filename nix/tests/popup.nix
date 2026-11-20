@@ -145,7 +145,7 @@ pkgs.testers.runNixOSTest {
         alice_ok(
             f"printf '[keys.\"%s\"]\\nemoji = \"🦊\"\\nlabel = \"github-work\"\\n"
             f"[security-keys.12345678]\\nname = \"Desk 5C NFC\"\\n"
-            f"[popup]\\nscale = 1.25\\nsurprise = 1\\n[popup.dark]\\naccent = \"#88c0d0\"\\n'"
+            f"[popup]\\nrenderer = \"gpu\"\\nscale = 1.25\\nsurprise = 1\\n[popup.dark]\\naccent = \"#88c0d0\"\\n'"
             f" '{fingerprint}' > ${dir}/config.toml"
         )
         machine.succeed("${agent "skagent" "/run/current-system/sw/bin/fake-popup"}")
@@ -185,6 +185,8 @@ pkgs.testers.runNixOSTest {
         style = first["style"]
         assert style["scale-percent"] == 125 and style["dark"]["accent"] == "#88c0d0", style
         assert style["light"]["accent"] == "#1c71d8", style
+        # What to draw with can't follow later: it is an argument.
+        assert alice_ok("cat ${dir}/args").strip() == "--renderer gpu"
         # A setting it can't use is skipped with a warning, not fatal.
         assert "skipped a setting: popup.surprise: no such setting" in journal("skagent")
 

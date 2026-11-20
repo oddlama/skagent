@@ -493,6 +493,10 @@ struct Running {
 impl Running {
     async fn start(popup: &Popup) -> Result<Self> {
         let mut child = prompt_command(&popup.program)
+            // What it draws with can't change once it runs, unlike the rest
+            // of the style, which follows `READY`.
+            .arg("--renderer")
+            .arg(popup.style.renderer.name())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

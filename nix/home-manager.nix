@@ -112,6 +112,7 @@ let
   features = types.attrsOf (types.either types.bool types.ints.unsigned);
 
   popupSettings = lib.filterAttrs (_: value: value != null && value != { }) {
+    renderer = if cfg.popup.renderer == "cpu" then null else cfg.popup.renderer;
     appearance = if cfg.popup.appearance == "system" then null else cfg.popup.appearance;
     inherit (cfg.popup) font scale;
     monospace-font = cfg.popup.monospaceFont;
@@ -224,6 +225,20 @@ in
       package = mkOption {
         type = types.package;
         description = "The skagent-pinentry package.";
+      };
+      renderer = mkOption {
+        type = types.enum [
+          "cpu"
+          "gpu"
+        ];
+        default = "cpu";
+        description = ''
+          What the popup draws with. `cpu`: Mesa's software renderer, and no
+          GPU driver is loaded. `gpu`: the GPU the Wayland compositor draws
+          on, with that GPU's driver alone; the CPU where the popup can't
+          tell which GPU that is, or can't keep to it. Never another GPU: a
+          second one that sleeps is left asleep either way.
+        '';
       };
       appearance = mkOption {
         type = types.enum [

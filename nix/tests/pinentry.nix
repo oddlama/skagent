@@ -398,7 +398,7 @@ pkgs.testers.runNixOSTest {
         machine.succeed("systemctl stop skagent")
         machine.wait_until_fails("test -e ${socket}")
         alice_ok(
-            "printf '[popup]\\nappearance = \"dark\"\\nscale = 1.25\\nfont = \"Comic Neue\"\\n"
+            "printf '[popup]\\nrenderer = \"gpu\"\\nappearance = \"dark\"\\nscale = 1.25\\nfont = \"Comic Neue\"\\n"
             "[popup.dark]\\nsurface = \"#2e3440\"\\naccent = \"#88c0d0\"\\n' >> ${dir}/config.toml"
         )
         machine.succeed(
@@ -422,6 +422,14 @@ pkgs.testers.runNixOSTest {
         ).strip()
         assert top == "2E3440", top
         assert logged(mark, 'font="Comic Neue" instead="Inter"'), popup_lines()
+        # Asked to draw on the display server's GPU, it was started so. This
+        # compositor draws without one and names none: the CPU it is, with
+        # the reason, and still without another vendor's driver (below).
+        popup_pid = machine.succeed("pgrep -u alice -x skagent-pinentr").strip()
+        started = machine.succeed(f"tr '\\0' ' ' < /proc/{popup_pid}/cmdline")
+        assert started.strip().endswith("--renderer gpu"), started
+        assert logged(mark, "drawing on the CPU, not on a GPU"), popup_lines()[mark:]
+        assert logged(mark, "why=the display server doesn't say which GPU it draws on"), popup_lines()[mark:]
         type_keys("-k Escape")
         finished("styled", success=False)
         closed()

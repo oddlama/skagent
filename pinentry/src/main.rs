@@ -19,7 +19,7 @@ use gpui::{
 };
 use skagent_pinentry::answers::Answers;
 use skagent_pinentry::assets::Assets;
-use skagent_pinentry::rendering;
+use skagent_pinentry::rendering::{self, Drawing, Renderer};
 use skagent_pinentry::theme::{self, Fonts, Mode};
 use skagent_pinentry::ui::{Popup, SIZE};
 use skagent_pinentry::{fixtures, fonts};
@@ -45,12 +45,24 @@ struct Cli {
     /// screen. Default: `$XDG_CONFIG_HOME/skagent/config.toml`, if it exists.
     #[arg(long, value_name = "FILE", requires = "preview")]
     config: Option<PathBuf>,
+
+    /// What to draw the window with: the CPU, or the GPU the display server
+    /// draws on where the popup can keep to that one. Default: cpu, with
+    /// --preview what the configuration says (`[popup] renderer`).
+    #[arg(long, value_enum)]
+    renderer: Option<RendererArg>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ThemeArg {
     Light,
     Dark,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum RendererArg {
+    Cpu,
+    Gpu,
 }
 
 /// What is logged unless `SKAGENT_PINENTRY_LOG` says otherwise: warnings,
@@ -95,9 +107,16 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<()> {
+    // What to draw with: as told, and a preview as its configuration says.
+    let renderer = match (cli.renderer, &cli.preview) {
+        (Some(RendererArg::Cpu), _) => Renderer::Cpu,
+        (Some(RendererArg::Gpu), _) => Renderer::Gpu,
+        (None, Some(_)) => configured_renderer(cli.config.as_deref()),
+        (None, None) => Renderer::default(),
+    };
     // First of all, while nothing is loaded and nothing is held: this may
     // start the program again.
-    rendering::on_the_cpu()?;
+    let drawing = rendering::prepare(renderer)?;
     // Then, before a PIN can be typed. A key event passes through the
     // compositor's client library, xkbcommon and GPUI as ordinary memory:
     // no core file gets any of this process, and no other process of the
@@ -121,7 +140,7 @@ fn run(cli: Cli) -> Result<()> {
         app.run(move |cx: &mut App| {
             fonts::load_bundled(cx);
             let fonts = fonts::available(&style, cx);
-            match open(cx, Answers::Preview, mode, style, fonts) {
+            match open(cx, Answers::Preview, mode, style, fonts, &drawing) {
                 Ok(popup) => popup.update(cx, |popup, cx| popup.show(1, state, waiting, cx)),
                 Err(error) => {
                     tracing::error!(error = %format!("{error:#}"), "{CANT_OPEN}");
@@ -140,7 +159,7 @@ fn run(cli: Cli) -> Result<()> {
     app.run(move |cx: &mut App| {
         fonts::load_bundled(cx);
         Answers::Agent.send(ready_line().as_bytes());
-        cx.spawn(async move |cx| serve(receiver, mode, cx).await)
+        cx.spawn(async move |cx| serve(receiver, mode, &drawing, cx).await)
             .detach();
     });
     Ok(())
@@ -169,6 +188,7 @@ fn read_input(sender: &mpsc::UnboundedSender<Input>) {
 async fn serve(
     mut receiver: mpsc::UnboundedReceiver<Input>,
     mode: Option<Mode>,
+    drawing: &Drawing,
     cx: &mut AsyncApp,
 ) {
     let mut popup: Option<Entity<Popup>> = None;
@@ -203,7 +223,7 @@ async fn serve(
                 );
                 if popup.is_none() {
                     let (style, fonts) = (style.clone(), fonts.clone());
-                    match cx.update(|cx| open(cx, Answers::Agent, mode, style, fonts)) {
+                    match cx.update(|cx| open(cx, Answers::Agent, mode, style, fonts, drawing)) {
                         Ok(opened) => popup = Some(opened),
                         Err(error) => {
                             tracing::error!(error = %format!("{error:#}"), "{CANT_OPEN}");
@@ -233,39 +253,59 @@ async fn serve(
     }
 }
 
-/// The `[popup]` table of the configuration at `path`, or at the default
-/// path if there is a file. Settings that can't be used are logged and
-/// skipped, as the agent does.
+/// The style in the `[popup]` table of the configuration at `path`, or at
+/// the default path if there is a file. Settings that can't be used are
+/// logged and skipped, as the agent does.
 fn preview_style(path: Option<&Path>) -> Result<Style> {
+    let Some((path, popup)) = popup_table(path)? else {
+        return Ok(Style::default());
+    };
+    let (style, warnings) = Style::from_table(&popup);
+    for warning in warnings {
+        tracing::warn!(config = %path.display(), "skipped a setting: {warning}");
+    }
+    Ok(style)
+}
+
+/// What the configuration [`preview_style`] reads says to draw with. Read
+/// before anything else, and without a word: whatever is wrong with the
+/// file is said when the style is read, once.
+fn configured_renderer(path: Option<&Path>) -> Renderer {
+    popup_table(path)
+        .ok()
+        .flatten()
+        .map(|(_, popup)| Style::from_table(&popup).0.renderer)
+        .unwrap_or_default()
+}
+
+/// The `[popup]` table of the configuration at `path`, or at the default
+/// path if there is a file, and the file it is from. `None` without one.
+fn popup_table(path: Option<&Path>) -> Result<Option<(PathBuf, toml::Table)>> {
     let (path, required) = if let Some(path) = path {
         (path.to_path_buf(), true)
     } else {
         let Some(path) = default_config_path() else {
-            return Ok(Style::default());
+            return Ok(None);
         };
         (path, false)
     };
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required => {
-            return Ok(Style::default());
+            return Ok(None);
         }
         Err(error) => {
             return Err(error)
                 .with_context(|| format!("reading the configuration {}", path.display()));
         }
     };
-    let config: toml::Table = toml::from_str(&text)
+    let mut config: toml::Table = toml::from_str(&text)
         .with_context(|| format!("parsing the configuration {}", path.display()))?;
-    let (style, warnings) = match config.get("popup") {
-        Some(toml::Value::Table(popup)) => Style::from_table(popup),
+    match config.remove("popup") {
+        Some(toml::Value::Table(popup)) => Ok(Some((path, popup))),
         Some(_) => bail!("in {}: popup isn't a table", path.display()),
-        None => (Style::default(), Vec::new()),
-    };
-    for warning in warnings {
-        tracing::warn!(config = %path.display(), "skipped a setting: {warning}");
+        None => Ok(None),
     }
-    Ok(style)
 }
 
 /// `$XDG_CONFIG_HOME/skagent/config.toml`, else `$HOME/.config/…`, as the
@@ -289,6 +329,7 @@ fn open(
     mode: Option<Mode>,
     style: Style,
     fonts: Fonts,
+    drawing: &Drawing,
 ) -> Result<Entity<Popup>> {
     let side = SIZE * theme::scale(&style);
     let square = size(px(side), px(side));
@@ -345,7 +386,7 @@ fn open(
     };
     opened
         .update(cx, |_, window, cx| {
-            rendering::report(window.gpu_specs().as_ref());
+            rendering::report(drawing, window.gpu_specs().as_ref());
             cx.entity()
         })
         .map_err(|error| anyhow::anyhow!("{error}"))

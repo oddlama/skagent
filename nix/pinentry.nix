@@ -65,7 +65,7 @@ rustPlatform.buildRustPackage (
     buildAndTestSubdir = "pinentry";
     # Every dependency of pinentry/Cargo.lock, Zed's git checkout included.
     # Update it whenever the lockfile changes.
-    cargoHash = "sha256-ZQXVJc+69Oy4YeTl9YMhfelfIQMc0pXCiH0Ht7NEZn8=";
+    cargoHash = "sha256-y+EednS81JUZA413qmFHhFlkvbZq4diD/UaKFD+kcPs=";
 
     nativeBuildInputs = [ pkg-config ];
     buildInputs = [

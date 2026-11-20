@@ -10,12 +10,13 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail, ensure};
 use skagent::popup::{Popup, cancelled_in_popup, not_shown};
-use skagent_popup::style::Style;
+use skagent_popup::style::{Renderer, Style};
 use skagent_popup::{Key, Message, Queued, Request, State, decode_message};
 
 const SOON: Duration = Duration::from_secs(5);
 
-/// A fake popup in `dir` that logs every line it gets to `dir/log`. It says
+/// A fake popup in `dir` that logs every line it gets to `dir/log`, and its
+/// arguments to `dir/args`. It says
 /// READY unless `dir/exit` exists (then it exits right away), says of every
 /// state that it is shown (not with `dir/blind`, and with `dir/slow` only
 /// after 400 ms), answers PIN states with `1234%` (sent escaped) and
@@ -27,7 +28,8 @@ fn fake_popup(dir: &Path) -> Result<PathBuf> {
         Path::new(&dir.to_string()),
         "popup",
         &format!(
-            r#"echo start >> {dir}/log
+            r#"echo "$*" > {dir}/args
+echo start >> {dir}/log
 [ -e {dir}/exit ] && exit 1
 if [ -e {dir}/old-version ]; then echo "READY 1"; else echo "READY 2"; fi
 while IFS= read -r line; do
@@ -138,6 +140,28 @@ async fn every_started_popup_first_learns_how_to_look() -> Result<()> {
             bail!("the first line wasn't the style: {first}");
         };
         ensure!(style.scale_percent == 150 && style.dark.accent.to_string() == "#88c0d0");
+    }
+    Ok(())
+}
+
+/// What the popup draws with is decided before it draws anything: the
+/// agent says it when it starts the popup.
+#[tokio::test]
+async fn the_popup_is_started_with_the_renderer_of_the_configuration() -> Result<()> {
+    for (renderer, arguments) in [
+        (Renderer::Cpu, "--renderer cpu\n"),
+        (Renderer::Gpu, "--renderer gpu\n"),
+    ] {
+        let dir = tempfile::tempdir()?;
+        let style = Style {
+            renderer,
+            ..Style::default()
+        };
+        let popup = Arc::new(Popup::new(fake_popup(dir.path())?, style));
+        let mut session = popup.session(SOON, queued()).await?;
+        session.start().await?;
+        let passed = std::fs::read_to_string(dir.path().join("args"))?;
+        ensure!(passed == arguments, "{passed:?}");
     }
     Ok(())
 }

@@ -45,6 +45,7 @@ let
   styled = {
     popup = {
       enable = true;
+      renderer = "gpu";
       appearance = "dark";
       font = "IBM Plex Sans";
       monospaceFont = "Iosevka";
@@ -202,6 +203,7 @@ pkgs.runCommand "home-manager-options" { } (
       # Building ${styledConfig} ran `skagent check-config` on it.
       grep -qx 'scale = 1.25' ${styledConfig}
       grep -qx 'appearance = "dark"' ${styledConfig}
+      grep -qx 'renderer = "gpu"' ${styledConfig}
       grep -qx 'muted-text = "#88c0d0"' ${styledConfig}
       echo "${toString (lib.length (lib.attrNames checks))} checks passed"
       touch $out
