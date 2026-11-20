@@ -205,6 +205,10 @@ own takes it with `--popup PATH`.
 - **On Wayland** compositors with layer shell (sway, Hyprland, niri, KDE) it
   appears on top of everything and takes the keyboard. Elsewhere it's an
   ordinary window.
+- **It draws on the CPU** with Mesa's software Vulkan driver (lavapipe) and
+  loads no GPU driver, so it never wakes a sleeping second GPU. NixOS has
+  lavapipe with Mesa; elsewhere it may be a package of its own
+  (`vulkan-swrast`, `mesa-vulkan-drivers`).
 - **Without it,** skagent asks for PINs with pinentry or an askpass program,
   and a desktop notification tells you while a key waits for a touch.
 - **Every prompt** says which key is used and what for: a login and its host,

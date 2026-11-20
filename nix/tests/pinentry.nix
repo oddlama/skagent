@@ -22,6 +22,45 @@ let
     default_border none
     xwayland disable
   '';
+  # Where the graphics drivers below say that they were loaded.
+  trapDir = "/run/gpu-trap";
+  # A Vulkan driver and an EGL vendor library as a GPU vendor installs them,
+  # which do nothing but leave a file named after the process that loaded
+  # them: stand-ins for the driver of a GPU the popup has to stay away from.
+  gpuTrap = pkgs.runCommandCC "gpu-trap" { } ''
+    mkdir -p $out/lib $out/share/vulkan/icd.d $out/share/glvnd/egl_vendor.d
+    cat > trap.c <<'EOF'
+    #include <fcntl.h>
+    #include <stdio.h>
+    #include <string.h>
+    #include <unistd.h>
+
+    __attribute__((constructor)) static void loaded(void) {
+        char name[32] = "unknown";
+        char path[128];
+        FILE *comm = fopen("/proc/self/comm", "r");
+        if (comm != NULL) {
+            if (fgets(name, sizeof name, comm) != NULL) {
+                name[strcspn(name, "\n")] = 0;
+            }
+            fclose(comm);
+        }
+        snprintf(path, sizeof path, "${trapDir}/" KIND "-%s-%d", name, (int)getpid());
+        int file = open(path, O_CREAT | O_WRONLY, 0644);
+        if (file >= 0) {
+            close(file);
+        }
+    }
+    EOF
+    $CC -shared -fPIC -DKIND='"vulkan"' -o $out/lib/libtrap_vulkan.so trap.c
+    $CC -shared -fPIC -DKIND='"egl"' -o $out/lib/libtrap_egl.so trap.c
+    cat > $out/share/vulkan/icd.d/trap_icd.json <<EOF
+    {"file_format_version": "1.0.1", "ICD": {"library_path": "$out/lib/libtrap_vulkan.so", "api_version": "1.3.0"}}
+    EOF
+    cat > $out/share/glvnd/egl_vendor.d/10_trap.json <<EOF
+    {"file_format_version": "1.0.0", "ICD": {"library_path": "$out/lib/libtrap_egl.so"}}
+    EOF
+  '';
 in
 pkgs.testers.runNixOSTest {
   name = "skagent-pinentry";
@@ -38,10 +77,16 @@ pkgs.testers.runNixOSTest {
       pkgs.libfido2
       pkgs.openssh
       pkgs.wtype
+      # What loads every graphics driver there is, to see the traps work.
+      pkgs.mesa-demos
+      pkgs.vulkan-tools
     ];
-    # Mesa's software renderers for GPUI (Vulkan or GL) and the system's
-    # colour emoji font, as on a desktop.
-    hardware.graphics.enable = true;
+    # Mesa's lavapipe, which the popup draws with, next to a driver it
+    # mustn't load; and the system's colour emoji font, as on a desktop.
+    hardware.graphics = {
+      enable = true;
+      extraPackages = [ gpuTrap ];
+    };
     fonts.packages = [ pkgs.noto-fonts-color-emoji ];
     security.polkit.enable = true;
     users.users.alice.isNormalUser = true;
@@ -143,6 +188,10 @@ pkgs.testers.runNixOSTest {
         """Lets the crossfade and intro animations end before a screenshot."""
         machine.sleep(2)
 
+    def trapped() -> list[str]:
+        """The graphics drivers loaded that tell: `<vulkan or egl>-<process>-<pid>` each."""
+        return machine.succeed("ls ${trapDir}").split()
+
     machine.wait_for_unit("multi-user.target")
     machine.succeed(
         "systemd-run --unit testkey --setenv SKAGENT_TESTKEY_PIN=${pin}"
@@ -150,6 +199,13 @@ pkgs.testers.runNixOSTest {
         " --name 'pinentry key' --serial 12345678"
     )
     machine.wait_until_succeeds("fido2-token -L | grep -F 'pinentry key' >/dev/null")
+
+    with subtest("another vendor's graphics drivers are installed, and tell when they are loaded"):
+        machine.succeed("install -d -m 1777 ${trapDir}")
+        # Programs that ask for every device there is load them, as GPUI does.
+        alice("vulkaninfo --summary")
+        alice("eglinfo")
+        assert [name.rsplit("-", 1)[0] for name in trapped()] == ["egl-eglinfo", "vulkan-vulkaninfo"], trapped()
 
     with subtest("set up a key, a compositor and the agent with the popup"):
         touch()
@@ -310,5 +366,12 @@ pkgs.testers.runNixOSTest {
         type_keys("-k Escape")
         finished("styled", success=False)
         closed()
+
+    with subtest("the popup drew on the CPU, and loaded no other graphics driver"):
+        # Every popup of this test: several, with a PIN, a touch, a failure.
+        assert len([line for line in popup_lines() if "drawing on the CPU" in line]) >= 4, popup_lines()
+        assert logged(0, "drawing on the CPU renderer=llvmpipe"), popup_lines()
+        assert not logged(0, "drawing on a GPU"), popup_lines()
+        assert not [name for name in trapped() if "pinentr" in name], trapped()
   '';
 }

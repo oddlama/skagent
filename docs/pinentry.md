@@ -10,10 +10,17 @@ yet unless a section says so.
 ## decisions
 
 - **Own process, own protocol.** `skagent-pinentry` is a separate binary (GPUI),
-  spawned by the agent. GPU drivers, fonts and a Wayland client never enter the
+  spawned by the agent. A renderer, fonts and a Wayland client never enter the
   process that holds the cached PINs. It's not an Assuan pinentry: the agent
   decides what to show and the popup only renders it and reports what the user
   did. Stock pinentries (`--pinentry`, `--askpass`) keep working as before.
+- **Drawn on the CPU.** The popup renders with Mesa's lavapipe and loads no
+  GPU driver, whatever the machine has: GPUI would load every vendor's to
+  pick one, which wakes a sleeping second GPU and puts a PIN prompt at the
+  mercy of that driver. It gives the graphics loaders their orders through
+  its own environment, and starts itself again with it if it has to
+  (`pinentry/src/rendering.rs`); the day this comes from is in
+  [`research/popup-rendering.md`](research/popup-rendering.md).
 - **Wayland first, compositor-agnostic.** A layer-shell overlay with exclusive
   keyboard focus where the compositor offers it (sway, Hyprland, niri, river,
   labwc, KDE), an ordinary window elsewhere. No compositor-specific code.

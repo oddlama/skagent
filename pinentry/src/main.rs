@@ -19,6 +19,7 @@ use gpui::{
 };
 use skagent_pinentry::answers::Answers;
 use skagent_pinentry::assets::Assets;
+use skagent_pinentry::rendering;
 use skagent_pinentry::theme::{self, Fonts, Mode};
 use skagent_pinentry::ui::{Popup, SIZE};
 use skagent_pinentry::{fixtures, fonts};
@@ -59,6 +60,11 @@ enum ThemeArg {
 /// popup just can't follow the desktop's appearance.
 const DEFAULT_LOG: &str = "warn,zbus=error";
 
+/// Logged with the reason when the popup's window doesn't open. What it
+/// draws with is the one thing the popup needs that a desktop may lack.
+const CANT_OPEN: &str = "can't open the window (the popup draws with Mesa's software Vulkan driver, \
+                         lavapipe, which has to be installed)";
+
 /// A line from the agent, or the end of them.
 enum Input {
     Message(Message),
@@ -89,7 +95,10 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<()> {
-    // First, before a PIN can be typed. A key event passes through the
+    // First of all, while nothing is loaded and nothing is held: this may
+    // start the program again.
+    rendering::on_the_cpu()?;
+    // Then, before a PIN can be typed. A key event passes through the
     // compositor's client library, xkbcommon and GPUI as ordinary memory:
     // no core file gets any of this process, and no other process of the
     // user reads it.
@@ -115,7 +124,7 @@ fn run(cli: Cli) -> Result<()> {
             match open(cx, Answers::Preview, mode, style, fonts) {
                 Ok(popup) => popup.update(cx, |popup, cx| popup.show(1, state, waiting, cx)),
                 Err(error) => {
-                    tracing::error!(error = %format!("{error:#}"), "can't open the window");
+                    tracing::error!(error = %format!("{error:#}"), "{CANT_OPEN}");
                     cx.quit();
                 }
             }
@@ -197,7 +206,7 @@ async fn serve(
                     match cx.update(|cx| open(cx, Answers::Agent, mode, style, fonts)) {
                         Ok(opened) => popup = Some(opened),
                         Err(error) => {
-                            tracing::error!(error = %format!("{error:#}"), "can't open the window");
+                            tracing::error!(error = %format!("{error:#}"), "{CANT_OPEN}");
                             cx.update(|cx| cx.quit());
                             return;
                         }
@@ -335,7 +344,10 @@ fn open(
         Err(error) => bail!(error),
     };
     opened
-        .update(cx, |_, _, cx| cx.entity())
+        .update(cx, |_, window, cx| {
+            rendering::report(window.gpu_specs().as_ref());
+            cx.entity()
+        })
         .map_err(|error| anyhow::anyhow!("{error}"))
         .context("reading the popup's view")
 }

@@ -9,6 +9,7 @@ pub mod assets;
 pub mod fixtures;
 pub mod fonts;
 pub mod pin;
+pub mod rendering;
 pub mod screen;
 pub mod theme;
 pub mod ui;
