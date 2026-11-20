@@ -8,12 +8,18 @@
 {
   config,
   lib,
+  options,
   pkgs,
   ...
 }:
 let
   cfg = config.services.skagent;
   inherit (lib) mkOption types;
+
+  # Whether the configuration names a pinentry itself: then that one asks,
+  # not the popup. The option's own default has the lowest priority there is.
+  pinentryChosen =
+    options.services.skagent.pinentry.package.highestPrio < (lib.mkOptionDefault null).priority;
 
   socketName = "skagent.sock";
   ageSocketName = "skagent-age.sock";
@@ -191,19 +197,30 @@ in
 
     pinentry.package = lib.mkPackageOption pkgs "pinentry-qt" {
       extraDescription = ''
-        It runs without a terminal, so it must be a graphical one, e.g.
+        Setting it makes this pinentry ask for PINs instead of skagent's
+        popup; so does `popup.enable = false`, with pinentry-qt. It runs
+        without a terminal, so it must be a graphical one, e.g.
         `pkgs.pinentry-gnome3` on GNOME.
       '';
     };
 
     popup = {
-      enable = lib.mkEnableOption ''
-        skagent's own popup (`skagent-pinentry`): PIN, touch and result of a
-        request in one window, instead of pinentry and the touch
-        notification. An overlay that takes the keyboard on Wayland
-        compositors with layer shell (sway, Hyprland, niri, KDE), an ordinary
-        window elsewhere
-      '';
+      enable = mkOption {
+        type = types.bool;
+        default = cfg.askpass == null && !pinentryChosen;
+        defaultText = lib.literalMD "`true`, unless `askpass` or `pinentry.package` is set";
+        example = false;
+        description = ''
+          Whether to use skagent's own popup (`skagent-pinentry`): PIN, touch
+          and result of a request in one window, instead of pinentry and the
+          touch notification. An overlay that takes the keyboard on Wayland
+          compositors with layer shell (sway, Hyprland, niri, KDE), an
+          ordinary window elsewhere.
+
+          On unless the configuration names another prompt: with `askpass` or
+          `pinentry.package` set, that one asks.
+        '';
+      };
       package = mkOption {
         type = types.package;
         description = "The skagent-pinentry package.";
@@ -268,8 +285,8 @@ in
       default = null;
       example = lib.literalExpression ''"''${pkgs.lxqt.lxqt-openssh-askpass}/bin/lxqt-openssh-askpass"'';
       description = ''
-        Ask for PINs with this askpass program instead of pinentry, like
-        OpenSSH's {env}`SSH_ASKPASS`.
+        Ask for PINs with this askpass program instead of the popup or
+        pinentry, like OpenSSH's {env}`SSH_ASKPASS`.
       '';
     };
 

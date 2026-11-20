@@ -43,7 +43,6 @@ it manually of course.
      imports = [ inputs.skagent.homeModules.default ];
      services.skagent = {
        enable = true;
-       popup.enable = true; # skagent's own popup; without it, pinentry-qt asks for PINs
        loadAtLogin = true; # runs `skagent load` when your graphical session starts
        pinPolicies = [ { application = "ssh:personal"; lifetime = "1h"; } ];
        age.batchLifetime = "5m"; # default: 10m, see age below
@@ -124,9 +123,9 @@ a wrong PIN on that key in the meantime, skagent asks again.
 | `--pin-lifetime 2h` | `pinLifetime` | `8h` | How long a PIN stays cached. `0` disables caching. |
 | `--pin-idle 30m` | `pinIdle` | off | Also drop a PIN that wasn't used for this long. |
 | `--pin-policy RULE` | `pinPolicies` | | Lifetime and idle timeout for some keys, see below. |
-| `--popup PATH` | `popup.enable` | | Ask in skagent's own [popup](#the-popup). |
-| `--pinentry PATH` | `pinentry.package` | `pinentry`, home-manager: `pinentry-qt` | The pinentry program that asks for PINs. |
-| `--askpass PATH` | `askpass` | | Ask with an askpass program instead of pinentry. |
+| `--popup PATH` | `popup.enable` | home-manager: on | Ask in skagent's own [popup](#the-popup). |
+| `--pinentry PATH` | `pinentry.package` | `pinentry`, home-manager: `pinentry-qt` | Ask with this pinentry program instead. |
+| `--askpass PATH` | `askpass` | | Ask with an askpass program instead. |
 | `--no-touch-notification` | `touchNotification` | | No notification while a key waits for a touch. |
 | `--plug-in-timeout 1m` | `plugInTimeout` | `15s` | How long a request waits for its security key to be plugged in. `0` fails right away. |
 | `--no-pairing` | `pairing` | on | Don't [pair](#pairing) with security keys on first use. |
@@ -199,8 +198,9 @@ name = "Desk 5C NFC"
 
 skagent's own popup, the one in the picture at the top, is one window that
 takes you from the PIN to the touch to the result, and tells you what went
-wrong if something does. Turn it on with `services.skagent.popup.enable` or
-`skagent serve --popup PATH`.
+wrong if something does. The home-manager module uses it unless you set
+`pinentry.package`, `askpass` or `popup.enable = false`. `skagent serve` on its
+own takes it with `--popup PATH`.
 
 - **On Wayland** compositors with layer shell (sway, Hyprland, niri, KDE) it
   appears on top of everything and takes the keyboard. Elsewhere it's an

@@ -87,16 +87,44 @@ let
     lib.getExe (home { }).services.skagent.popup.package
   );
 
+  # Whether the popup is among the packages of a home with `settings`,
+  # without building it.
+  installsPopup =
+    settings:
+    lib.any (package: lib.getName package == "skagent-pinentry") (home settings).home.packages;
+
   checks = {
-    "pinentry by default" =
-      lib.hasInfix ''"--pinentry"'' (execStart { }) && !lib.hasInfix ''"--popup"'' (execStart { });
-    "the popup replaces pinentry" =
-      lib.hasInfix ''"--popup" "${popupExe}"'' (execStart {
-        popup.enable = true;
-      })
-      && !lib.hasInfix ''"--pinentry"'' (execStart {
-        popup.enable = true;
+    "the popup by default" =
+      lib.hasInfix ''"--popup" "${popupExe}"'' (execStart { })
+      && !lib.hasInfix ''"--pinentry"'' (execStart { })
+      && installsPopup { };
+    # Who names a prompt gets that one, without having to turn the popup off.
+    "a pinentry that is named asks instead of the popup" =
+      let
+        settings.pinentry.package = pkgs.pinentry-gnome3;
+      in
+      lib.hasInfix ''"--pinentry" "${builtins.unsafeDiscardStringContext (lib.getExe pkgs.pinentry-gnome3)}"'' (
+        execStart settings
+      )
+      && !lib.hasInfix ''"--popup"'' (execStart settings)
+      && !installsPopup settings;
+    "without the popup, pinentry-qt asks" =
+      lib.hasInfix ''"--pinentry" "${builtins.unsafeDiscardStringContext (lib.getExe pkgs.pinentry-qt)}"''
+        (execStart {
+          popup.enable = false;
+        })
+      && !lib.hasInfix ''"--popup"'' (execStart {
+        popup.enable = false;
       });
+    "the popup that is turned on wins over a named pinentry" =
+      let
+        settings = {
+          popup.enable = true;
+          pinentry.package = pkgs.pinentry-gnome3;
+        };
+      in
+      lib.hasInfix ''"--popup" "${popupExe}"'' (execStart settings)
+      && !lib.hasInfix ''"--pinentry"'' (execStart settings);
     "the popup defaults to this flake's skagent-pinentry" =
       lib.hasSuffix "/bin/skagent-pinentry" popupExe;
     "requests wait 15 s for their security key by default" =
@@ -105,9 +133,15 @@ let
     "the plug-in timeout reaches the agent" = lib.hasInfix ''"--plug-in-timeout" "0"'' (execStart {
       plugInTimeout = "0";
     });
-    "askpass replaces pinentry" = lib.hasInfix ''"--askpass" "/bin/askpass"'' (execStart {
-      askpass = "/bin/askpass";
-    });
+    "askpass asks instead of the popup and pinentry" =
+      let
+        command = execStart {
+          askpass = "/bin/askpass";
+        };
+      in
+      lib.hasInfix ''"--askpass" "/bin/askpass"'' command
+      && !lib.hasInfix ''"--popup"'' command
+      && !lib.hasInfix ''"--pinentry"'' command;
     # Built by the check below: `skagent check-config` passes on the result.
     "the popup style lands in the configuration file" =
       lib.hasInfix "skagent-config.toml" (execStart styled)
