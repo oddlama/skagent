@@ -19,7 +19,7 @@ use gpui::{
 };
 use skagent_pinentry::answers::Answers;
 use skagent_pinentry::assets::Assets;
-use skagent_pinentry::rendering::{self, Drawing, Renderer};
+use skagent_pinentry::rendering::{self, Renderer};
 use skagent_pinentry::theme::{self, Fonts, Mode};
 use skagent_pinentry::ui::{Popup, SIZE};
 use skagent_pinentry::{fixtures, fonts};
@@ -46,9 +46,10 @@ struct Cli {
     #[arg(long, value_name = "FILE", requires = "preview")]
     config: Option<PathBuf>,
 
-    /// What to draw the window with: the CPU, or the GPU the display server
-    /// draws on where that is the machine's only GPU. Default: cpu, with
-    /// --preview what the configuration says (`[popup] renderer`).
+    /// What to draw the window with. auto: a GPU if one takes the window,
+    /// else the CPU. gpu: a GPU, never the CPU. cpu: the CPU, and no GPU
+    /// driver is loaded. Default: auto, with --preview what the
+    /// configuration says (`[popup] renderer`).
     #[arg(long, value_enum)]
     renderer: Option<RendererArg>,
 }
@@ -64,8 +65,9 @@ enum ThemeArg {
 /// ([`Renderer`], by its names there).
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum RendererArg {
-    Cpu,
+    Auto,
     Gpu,
+    Cpu,
 }
 
 /// What is logged unless `SKAGENT_PINENTRY_LOG` says otherwise: warnings,
@@ -75,10 +77,9 @@ enum RendererArg {
 /// popup just can't follow the desktop's appearance.
 const DEFAULT_LOG: &str = "warn,zbus=error";
 
-/// Logged with the reason when the popup's window doesn't open. What it
-/// draws with is the one thing the popup needs that a desktop may lack.
-const CANT_OPEN: &str = "can't open the window (the popup draws with Mesa's software Vulkan driver, \
-                         lavapipe, which has to be installed)";
+/// Logged with the reason when the popup has no window to show: it didn't
+/// open, or isn't drawn with what the configuration asks for.
+const NOT_SHOWN: &str = "not showing the popup";
 
 /// A line from the agent, or the end of them.
 enum Input {
@@ -112,14 +113,15 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<()> {
     // What to draw with: as told, and a preview as its configuration says.
     let renderer = match (cli.renderer, &cli.preview) {
-        (Some(RendererArg::Cpu), _) => Renderer::Cpu,
+        (Some(RendererArg::Auto), _) => Renderer::Auto,
         (Some(RendererArg::Gpu), _) => Renderer::Gpu,
+        (Some(RendererArg::Cpu), _) => Renderer::Cpu,
         (None, Some(_)) => configured_renderer(cli.config.as_deref()),
         (None, None) => Renderer::default(),
     };
     // First of all, while nothing is loaded and nothing is held: this may
     // start the program again.
-    let drawing = rendering::prepare(renderer)?;
+    rendering::prepare(renderer)?;
     // Then, before a PIN can be typed. A key event passes through the
     // compositor's client library, xkbcommon and GPUI as ordinary memory:
     // no core file gets any of this process, and no other process of the
@@ -143,10 +145,10 @@ fn run(cli: Cli) -> Result<()> {
         app.run(move |cx: &mut App| {
             fonts::load_bundled(cx);
             let fonts = fonts::available(&style, cx);
-            match open(cx, Answers::Preview, mode, style, fonts, &drawing) {
+            match open(cx, Answers::Preview, mode, style, fonts, renderer) {
                 Ok(popup) => popup.update(cx, |popup, cx| popup.show(1, state, waiting, cx)),
                 Err(error) => {
-                    tracing::error!(error = %format!("{error:#}"), "{CANT_OPEN}");
+                    tracing::error!(error = %format!("{error:#}"), "{NOT_SHOWN}");
                     cx.quit();
                 }
             }
@@ -162,7 +164,7 @@ fn run(cli: Cli) -> Result<()> {
     app.run(move |cx: &mut App| {
         fonts::load_bundled(cx);
         Answers::Agent.send(ready_line().as_bytes());
-        cx.spawn(async move |cx| serve(receiver, mode, &drawing, cx).await)
+        cx.spawn(async move |cx| serve(receiver, mode, renderer, cx).await)
             .detach();
     });
     Ok(())
@@ -191,7 +193,7 @@ fn read_input(sender: &mpsc::UnboundedSender<Input>) {
 async fn serve(
     mut receiver: mpsc::UnboundedReceiver<Input>,
     mode: Option<Mode>,
-    drawing: &Drawing,
+    renderer: Renderer,
     cx: &mut AsyncApp,
 ) {
     let mut popup: Option<Entity<Popup>> = None;
@@ -226,10 +228,10 @@ async fn serve(
                 );
                 if popup.is_none() {
                     let (style, fonts) = (style.clone(), fonts.clone());
-                    match cx.update(|cx| open(cx, Answers::Agent, mode, style, fonts, drawing)) {
+                    match cx.update(|cx| open(cx, Answers::Agent, mode, style, fonts, renderer)) {
                         Ok(opened) => popup = Some(opened),
                         Err(error) => {
-                            tracing::error!(error = %format!("{error:#}"), "{CANT_OPEN}");
+                            tracing::error!(error = %format!("{error:#}"), "{NOT_SHOWN}");
                             cx.update(|cx| cx.quit());
                             return;
                         }
@@ -325,14 +327,15 @@ fn default_config_path() -> Option<PathBuf> {
 }
 
 /// Opens the popup: a centred overlay that takes the keyboard where the
-/// compositor offers layer shell, else an ordinary window.
+/// compositor offers layer shell, else an ordinary window. A window that
+/// isn't drawn with what `renderer` asks for is closed again, and an error.
 fn open(
     cx: &mut App,
     answers: Answers,
     mode: Option<Mode>,
     style: Style,
     fonts: Fonts,
-    drawing: &Drawing,
+    renderer: Renderer,
 ) -> Result<Entity<Popup>> {
     let side = SIZE * theme::scale(&style);
     let square = size(px(side), px(side));
@@ -357,6 +360,7 @@ fn open(
         show: true,
         ..Default::default()
     };
+    let cant_open = || format!("opening the window ({})", rendering::needs(renderer));
     let build = |style: Style, fonts: Fonts| {
         move |window: &mut gpui::Window, cx: &mut App| {
             let popup = cx.new(|cx| Popup::new(answers, mode, style, fonts, cx));
@@ -383,15 +387,21 @@ fn open(
                 show: true,
                 ..Default::default()
             };
-            cx.open_window(window, build(style, fonts))?
+            cx.open_window(window, build(style, fonts))
+                .with_context(cant_open)?
         }
-        Err(error) => bail!(error),
+        Err(error) => return Err(error.context(cant_open())),
     };
-    opened
+    let (drawn, popup) = opened
         .update(cx, |_, window, cx| {
-            rendering::report(drawing, window.gpu_specs().as_ref());
-            cx.entity()
+            let drawn = rendering::check(renderer, window.gpu_specs().as_ref());
+            if drawn.is_err() {
+                window.remove_window();
+            }
+            (drawn, cx.entity())
         })
         .map_err(|error| anyhow::anyhow!("{error}"))
-        .context("reading the popup's view")
+        .context("reading the popup's view")?;
+    drawn?;
+    Ok(popup)
 }

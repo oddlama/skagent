@@ -205,16 +205,17 @@ own takes it with `--popup PATH`.
 - **On Wayland** compositors with layer shell (sway, Hyprland, niri, KDE) it
   appears on top of everything and takes the keyboard. Elsewhere it's an
   ordinary window.
-- **It draws on the CPU** with Mesa's software Vulkan driver (lavapipe) and
-  loads no GPU driver, so it never wakes a sleeping second GPU. NixOS has
-  lavapipe with Mesa; elsewhere it may be a package of its own
-  (`vulkan-swrast`, `mesa-vulkan-drivers`).
-- **Or on your GPU,** with `services.skagent.popup.renderer = "gpu"`
-  (`renderer = "gpu"` under `[popup]`), where your Wayland compositor draws
-  on the machine's only GPU: with that GPU's driver alone. On a machine with
-  two GPUs it stays on the CPU, because a GPU's driver may open the other
-  GPU to see whose it is, and wake it. The log says why whenever it isn't
-  on the GPU.
+- **It draws on a GPU if there is one,** the one your compositor draws on
+  first, and on the CPU if there isn't, like any program with a window.
+- **You can pin that down** with `services.skagent.popup.renderer`
+  (`renderer` under `[popup]`): `"gpu"` never draws on the CPU, so without
+  a GPU that takes the window the request fails, and `"cpu"` never draws on
+  a GPU.
+- **`"cpu"` loads no GPU driver.** On a laptop with two GPUs, a program
+  that opens a window wakes the one that sleeps, and the popup opens one
+  for every prompt; on the CPU it doesn't. It then draws with Mesa's
+  software Vulkan driver (lavapipe): NixOS has it with Mesa, elsewhere it
+  may be a package of its own (`vulkan-swrast`, `mesa-vulkan-drivers`).
 - **Your key only blinks once the prompt is on the screen.** If the popup
   can't show it within 10 seconds, behind a lock screen for example, the
   request fails instead.

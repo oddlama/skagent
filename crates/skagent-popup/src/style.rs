@@ -567,12 +567,16 @@ pub enum Appearance {
 /// What the popup draws its window with.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Renderer {
-    /// The CPU alone: the popup loads no GPU driver.
+    /// A GPU if one takes the window, else the CPU: what any program with
+    /// a window does.
     #[default]
-    Cpu,
-    /// The GPU the display server draws on, if the popup can tell which
-    /// that is and it is the only GPU here; else the CPU.
+    Auto,
+    /// A GPU, never the CPU: without a GPU that takes the window, the popup
+    /// doesn't show.
     Gpu,
+    /// The CPU, never a GPU: the popup loads no GPU driver, and doesn't
+    /// show a window that a GPU draws all the same.
+    Cpu,
 }
 
 impl Renderer {
@@ -580,15 +584,16 @@ impl Renderer {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
-            Self::Cpu => "cpu",
+            Self::Auto => "auto",
             Self::Gpu => "gpu",
+            Self::Cpu => "cpu",
         }
     }
 
     /// The renderer called `name`.
     #[must_use]
     pub fn named(name: &str) -> Option<Self> {
-        [Self::Cpu, Self::Gpu]
+        [Self::Auto, Self::Gpu, Self::Cpu]
             .into_iter()
             .find(|renderer| renderer.name() == name)
     }
@@ -624,7 +629,7 @@ pub struct Style {
 impl Default for Style {
     fn default() -> Self {
         Self {
-            renderer: Renderer::Cpu,
+            renderer: Renderer::Auto,
             appearance: Appearance::System,
             font: None,
             monospace_font: None,
@@ -680,7 +685,7 @@ fn parse_renderer(value: &toml::Value) -> Result<Renderer, String> {
     value
         .as_str()
         .and_then(Renderer::named)
-        .ok_or_else(|| format!("{} isn't \"cpu\" or \"gpu\"", shown(value)))
+        .ok_or_else(|| format!("{} isn't \"auto\", \"gpu\" or \"cpu\"", shown(value)))
 }
 
 fn parse_appearance(value: &toml::Value) -> Result<Appearance, String> {

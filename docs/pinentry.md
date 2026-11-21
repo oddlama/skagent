@@ -14,23 +14,19 @@ yet unless a section says so.
   process that holds the cached PINs. It's not an Assuan pinentry: the agent
   decides what to show and the popup only renders it and reports what the user
   did. Stock pinentries (`--pinentry`, `--askpass`) keep working as before.
-- **Drawn on the CPU.** The popup renders with Mesa's lavapipe and loads no
-  GPU driver, whatever the machine has: GPUI would load every vendor's to
-  pick one, which wakes a sleeping second GPU and puts a PIN prompt at the
-  mercy of that driver. It gives the graphics loaders their orders through
-  its own environment, and starts itself again with it, once, if it has to
-  (`pinentry/src/rendering.rs`); the day this comes from is in
-  [`research/popup-rendering.md`](research/popup-rendering.md).
-- **Or on the display server's GPU,** if the configuration asks for it
-  (`[popup] renderer = "gpu"`, which the agent passes on as `--renderer`:
-  the popup has to know before it starts). The popup asks the Wayland
-  compositor which device it draws on and lets the loader load that GPU's
-  Vulkan driver next to lavapipe, and no other. Only where that GPU is the
-  machine's only one: a Vulkan driver looks for its GPU among all of them,
-  and some open each to ask whose it is, which wakes one that sleeps
-  ([`research/popup-rendering.md`](research/popup-rendering.md)). It stays
-  on the CPU too with no compositor that names its device and with no
-  Vulkan driver known for it.
+- **Drawn like any window, unless told otherwise.** `[popup] renderer` is
+  `auto` unless set: GPUI loads every driver there is and takes the first
+  device that can draw the window, the display server's GPU before a
+  discrete one, an integrated one and a software renderer. `gpu` is the
+  same, but a window that only software would draw isn't shown, and the
+  request fails. `cpu` is the other way around, and more: the popup draws
+  with Mesa's lavapipe and loads no GPU driver, which on a laptop with two
+  GPUs keeps the sleeping one asleep. For that it gives the graphics loaders
+  their orders through its own environment, and starts itself again with
+  it, once, if it has to (`pinentry/src/rendering.rs`). The agent passes
+  the setting on as `--renderer`: the popup has to know before it starts.
+  Where this comes from, and the stricter rules that were tried first, is
+  in [`research/popup-rendering.md`](research/popup-rendering.md).
 - **Wayland first, compositor-agnostic.** A layer-shell overlay with exclusive
   keyboard focus where the compositor offers it (sway, Hyprland, niri, river,
   labwc, KDE), an ordinary window elsewhere. No compositor-specific code.

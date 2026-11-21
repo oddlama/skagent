@@ -114,8 +114,8 @@ fn without_settings_the_popup_looks_as_designed() -> Result<()> {
     ensure!(style == Style::default());
     ensure!(style.light == Palette::LIGHT && style.dark == Palette::DARK);
     ensure!(style.scale_percent == 100 && style.appearance == Appearance::System);
-    // And is drawn on the CPU.
-    ensure!(style.renderer == Renderer::Cpu);
+    // And is drawn on a GPU if one takes it, else on the CPU.
+    ensure!(style.renderer == Renderer::Auto);
     for preset in [Palette::LIGHT, Palette::DARK] {
         ensure!(Palette::resolve(&preset, &BTreeMap::new()) == preset);
         // Setting a colour to the preset's own changes nothing else.
@@ -223,7 +223,7 @@ fn unusable_settings_are_skipped_with_a_warning_and_the_rest_applies() -> Result
         "##,
     )?);
     let expected = [
-        "popup.renderer: \"fast\" isn't \"cpu\" or \"gpu\"",
+        "popup.renderer: \"fast\" isn't \"auto\", \"gpu\" or \"cpu\"",
         "popup.appearance: \"dim\" isn't",
         "popup.font: the font family name is empty",
         "popup.monospace-font: \"Mono\\u{7}\" isn't a font family name",
@@ -242,7 +242,7 @@ fn unusable_settings_are_skipped_with_a_warning_and_the_rest_applies() -> Result
     }
     ensure!(warnings.len() == expected.len(), "{warnings:#?}");
     ensure!(style.appearance == Appearance::System && style.font.is_none());
-    ensure!(style.renderer == Renderer::Cpu);
+    ensure!(style.renderer == Renderer::Auto);
     ensure!(style.monospace_font.is_none() && style.scale_percent == 100);
     ensure!(style.font_features == BTreeMap::from([("cv11".to_owned(), 1)]));
     ensure!(style.light.accent == Palette::LIGHT.accent);
@@ -258,8 +258,12 @@ fn the_renderer_is_read_from_the_table_and_not_sent_with_the_style() -> Result<(
     let (style, warnings) = Style::from_table(&table("[popup]\nrenderer = \"gpu\"")?);
     ensure!(warnings.is_empty(), "{warnings:?}");
     ensure!(style.renderer == Renderer::Gpu);
-    for renderer in [Renderer::Cpu, Renderer::Gpu] {
-        ensure!(Renderer::named(renderer.name()) == Some(renderer));
+    for (renderer, name) in [
+        (Renderer::Auto, "auto"),
+        (Renderer::Gpu, "gpu"),
+        (Renderer::Cpu, "cpu"),
+    ] {
+        ensure!(renderer.name() == name && Renderer::named(name) == Some(renderer));
     }
     ensure!(Renderer::named("GPU").is_none() && Renderer::named("").is_none());
 
@@ -274,7 +278,7 @@ fn the_renderer_is_read_from_the_table_and_not_sent_with_the_style() -> Result<(
     let Message::Style { style: received } = decode_message(text.trim_end())? else {
         anyhow::bail!("not a style message: {text}");
     };
-    ensure!(received.renderer == Renderer::Cpu);
+    ensure!(received.renderer == Renderer::Auto);
     Ok(())
 }
 

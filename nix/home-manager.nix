@@ -112,7 +112,7 @@ let
   features = types.attrsOf (types.either types.bool types.ints.unsigned);
 
   popupSettings = lib.filterAttrs (_: value: value != null && value != { }) {
-    renderer = if cfg.popup.renderer == "cpu" then null else cfg.popup.renderer;
+    renderer = if cfg.popup.renderer == "auto" then null else cfg.popup.renderer;
     appearance = if cfg.popup.appearance == "system" then null else cfg.popup.appearance;
     inherit (cfg.popup) font scale;
     monospace-font = cfg.popup.monospaceFont;
@@ -228,17 +228,20 @@ in
       };
       renderer = mkOption {
         type = types.enum [
-          "cpu"
+          "auto"
           "gpu"
+          "cpu"
         ];
-        default = "cpu";
+        default = "auto";
         description = ''
-          What the popup draws with. `cpu`: Mesa's software renderer, and no
-          GPU driver is loaded. `gpu`: the GPU the Wayland compositor draws
-          on, with that GPU's driver alone, if it is the machine's only GPU;
-          the CPU on a machine with two, and where the popup can't tell.
-          Never another GPU: a second one that sleeps is left asleep either
-          way.
+          What the popup draws with. `auto`: a GPU if one takes the window,
+          the one your compositor draws on first, else the CPU, like any
+          program with a window. `gpu`: a GPU, never the CPU; without a GPU
+          that takes the window the popup doesn't show and the request
+          fails. `cpu`: Mesa's software renderer (lavapipe), never a GPU,
+          and no GPU driver is loaded. On a laptop with two GPUs, `auto` and
+          `gpu` wake the one that sleeps for every prompt, as any program
+          does when it starts; `cpu` doesn't.
         '';
       };
       appearance = mkOption {

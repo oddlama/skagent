@@ -32,10 +32,6 @@ toml = { version = "1.2", default-features = false, features = [
   "std",
 ] }
 tracing = "0.1"
-# For asking the compositor which GPU it draws on, before GPUI starts. GPUI
-# brings both; keep the versions its lockfile entry has.
-wayland-client = "0.31"
-wayland-protocols = { version = "0.32", features = ["client"] }
 tracing-subscriber = { version = "0.3", features = [
   "env-filter",
   "fmt",

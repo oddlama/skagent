@@ -149,8 +149,9 @@ async fn every_started_popup_first_learns_how_to_look() -> Result<()> {
 #[tokio::test]
 async fn the_popup_is_started_with_the_renderer_of_the_configuration() -> Result<()> {
     for (renderer, arguments) in [
-        (Renderer::Cpu, "--renderer cpu\n"),
+        (Renderer::Auto, "--renderer auto\n"),
         (Renderer::Gpu, "--renderer gpu\n"),
+        (Renderer::Cpu, "--renderer cpu\n"),
     ] {
         let dir = tempfile::tempdir()?;
         let style = Style {

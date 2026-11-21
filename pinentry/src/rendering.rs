@@ -1,22 +1,30 @@
-//! What the popup's window is drawn with: the CPU, or on request the GPU
-//! the display server draws on, where that is the only GPU. Never another
-//! GPU, and never its driver.
+//! What the popup's window is drawn with: a GPU if one takes it and else the
+//! CPU, a GPU or nothing, or the CPU alone ([`Renderer`]).
 //!
 //! GPUI renders through wgpu, which asks the Vulkan loader and EGL for
-//! every device there is before it picks one. Asking loads every vendor's
-//! driver into the process. On a laptop with two GPUs that wakes the one
-//! that sleeps, for a window of a few hundred pixels: a second or two before
-//! a prompt appears, and a PIN prompt at the mercy of that driver
-//! (`docs/research/popup-rendering.md` has the day one took the popup down).
+//! every device there is and takes the first that can draw the window: the
+//! GPU the display server draws on, then a discrete GPU, an integrated one,
+//! and last a software renderer. That is what any program with a window
+//! does, and what [`Renderer::Auto`] leaves as it is. [`Renderer::Gpu`] is
+//! the same, except that the popup doesn't show a window that ended up with
+//! the software renderer.
+//!
+//! Asking for every device loads every vendor's driver into the process. On
+//! a laptop with two GPUs that wakes the one that sleeps, for a window of a
+//! few hundred pixels: a second or two before a prompt appears, and a PIN
+//! prompt at the mercy of that driver (`docs/research/popup-rendering.md`
+//! has the day one took the popup down). [`Renderer::Cpu`] is for whoever
+//! would rather not: the popup draws with Mesa's lavapipe, a CPU
+//! rasterizer, and loads no GPU driver.
 //!
 //! The loaders take orders through their environment, read when they are
-//! loaded. So the popup makes sure of its own environment first thing
-//! ([`prepare`]), and starts itself again in the right one if it has to:
+//! loaded. So for the CPU the popup makes sure of its own environment first
+//! thing ([`prepare`]), and starts itself again in the right one if it has
+//! to ([`ON_THE_CPU`]):
 //!
-//! - **Vulkan** finds Mesa's lavapipe, a CPU rasterizer, and with
-//!   [`Renderer::Gpu`] the driver of the display server's GPU. The loader
-//!   skips every other driver before it would load it. It looks among the
-//!   drivers installed: a list of the session's own is taken away.
+//! - **Vulkan** finds lavapipe alone. The loader skips every other driver
+//!   before it would load it. It looks among the drivers installed: a list
+//!   of the session's own is taken away.
 //! - **No Vulkan layer** is loaded, whatever the system or the session
 //!   installed or asks for: overlays, capture, another vendor's device
 //!   switching.
@@ -24,234 +32,60 @@
 //!
 //! One order isn't in the environment: a settings file of the Vulkan
 //! configurator that orders the devices makes the loader ignore the
-//! selection of drivers. The popup can't help that; it warns if its window
-//! is then drawn on a GPU ([`report`]).
-//!
-//! [`Renderer::Gpu`] falls back to the CPU wherever there is a second GPU
-//! or the popup can't tell ([`choose`]), and by itself where the GPU's
-//! driver doesn't take the window: GPUI tries lavapipe next. What the
-//! window ends up drawn with is logged when it opens ([`report`]).
+//! selection of drivers. The popup can't help that, and an old loader
+//! doesn't know the selection. So the popup looks at what its window is
+//! drawn with once it is open ([`check`]), and doesn't show one that a GPU
+//! draws where the CPU was asked for.
 
 use std::ffi::{OsStr, OsString};
-use std::fmt;
 use std::os::unix::process::CommandExt as _;
-use std::path::Path;
 use std::process::Command;
 
 use anyhow::{Context as _, Result, bail};
 use gpui::GpuSpecs;
 pub use skagent_popup::style::Renderer;
-use wayland_client::globals::{GlobalListContents, registry_queue_init};
-use wayland_client::protocol::wl_registry;
-use wayland_client::{Connection, Dispatch, QueueHandle};
-use wayland_protocols::wp::linux_dmabuf::zv1::client::{
-    zwp_linux_dmabuf_feedback_v1, zwp_linux_dmabuf_v1,
-};
-
-/// Where the kernel describes its devices.
-pub const SYSFS: &str = "/sys";
 
 /// Set to the popup's process id when it starts itself again, which keeps
 /// the id: a popup that finds its own there doesn't start a third time.
 const STARTED_AGAIN: &str = "SKAGENT_PINENTRY_STARTED_AGAIN";
 
-/// Mesa's lavapipe, by its manifest's file name: `lvp_icd.<architecture>.json`
-/// everywhere.
-const LAVAPIPE: &str = "lvp_icd.*";
-
-/// The Vulkan drivers, by their manifests' file names, for the GPUs of
-/// kernel drivers: Mesa's, and NVIDIA's own. A kernel driver that isn't
-/// here has no GPU the popup would draw on.
-const VULKAN_DRIVERS: [(&[&str], &[&str]); 8] = [
-    (&["i915", "xe"], &["intel_icd.*", "intel_hasvk_icd.*"]),
-    (&["amdgpu"], &["radeon_icd.*"]),
-    (&["nouveau"], &["nouveau_icd.*"]),
-    (&["nvidia"], &["nvidia_icd.*"]),
-    (&["virtio_gpu"], &["virtio_icd.*"]),
-    (&["panfrost", "panthor"], &["panfrost_icd.*"]),
-    (&["v3d"], &["broadcom_icd.*"]),
-    (&["asahi"], &["asahi_icd.*"]),
-];
-
-/// What the popup's window is drawn with.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Drawing {
-    /// On the CPU, with Mesa's lavapipe.
-    Cpu(Why),
-    /// On the display server's GPU, the only one here, the one of this
-    /// kernel driver; on the CPU if its Vulkan driver doesn't take the
-    /// window.
-    Gpu(String),
-}
-
-/// What the display server says about the GPU it draws on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Compositor<'a> {
-    /// Nothing: it isn't a Wayland compositor, or draws without a GPU.
-    Silent,
-    /// A device, by its major and minor number, whose kernel driver sysfs
-    /// doesn't have.
-    Device(u64, u64),
-    /// A GPU of this kernel driver.
-    Gpu(&'a str),
-}
-
-/// Why the popup draws on the CPU.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Why {
-    /// It was told to, or not told otherwise.
-    Asked,
-    /// The display server didn't name the GPU it draws on: it isn't a
-    /// Wayland compositor, or draws without one.
-    NoGpuNamed,
-    /// The display server named a device whose kernel driver sysfs doesn't
-    /// have.
-    NoDriver {
-        /// The device's major number.
-        major: u64,
-        /// The device's minor number.
-        minor: u64,
-    },
-    /// The display server's GPU has this kernel driver, which the popup
-    /// knows no Vulkan driver for.
-    NoVulkanDriver(String),
-    /// The display server's GPU is one of `count` here: its Vulkan driver
-    /// could open the others while it looks for its own, and wake one.
-    NotAlone {
-        /// The kernel driver of the display server's GPU.
-        driver: String,
-        /// The devices here that can render.
-        count: usize,
-    },
-    /// The devices that can render can't be listed, or the only one isn't
-    /// the display server's: no telling what else is here.
-    NotSeen(String),
-}
-
-impl fmt::Display for Why {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Asked => formatter.write_str("as configured"),
-            Self::NoGpuNamed => {
-                formatter.write_str("the display server doesn't say which GPU it draws on")
-            }
-            Self::NoDriver { major, minor } => write!(
-                formatter,
-                "sysfs has no kernel driver for the device the display server draws on \
-                 ({major}:{minor})"
-            ),
-            Self::NoVulkanDriver(driver) => write!(
-                formatter,
-                "no Vulkan driver is known for the display server's GPU ({driver})"
-            ),
-            Self::NotAlone { driver, count } => write!(
-                formatter,
-                "the display server's GPU ({driver}) is one of {count} here, and its Vulkan \
-                 driver may open the others too"
-            ),
-            Self::NotSeen(driver) => write!(
-                formatter,
-                "the GPUs here can't be listed, or the only one isn't the display server's \
-                 ({driver})"
-            ),
-        }
-    }
-}
-
-/// The Vulkan drivers for the GPUs of the kernel driver `kernel_driver`.
-fn vulkan_drivers(kernel_driver: &str) -> Option<&'static [&'static str]> {
-    VULKAN_DRIVERS
-        .iter()
-        .find(|(kernel, _)| kernel.contains(&kernel_driver))
-        .map(|(_, vulkan)| *vulkan)
-}
-
-/// What to draw with. `compositor`: what the display server says about the
-/// GPU it draws on. `render_devices`: the kernel driver of every device here
-/// that can render, `None` for one whose driver can't be read.
-///
-/// A GPU only if it is the only one here, and the Vulkan driver for it is
-/// known. A Vulkan driver looks for its GPUs among all of them, and some
-/// open every one to ask whose it is (Mesa's for Intel since 26.1): that
-/// calls into the other GPU's kernel driver, and wakes a GPU that sleeps.
-/// Which driver does so changes between releases, so the popup counts on
-/// none (`docs/research/popup-rendering.md`).
-#[must_use]
-pub fn choose(
-    renderer: Renderer,
-    compositor: Compositor<'_>,
-    render_devices: &[Option<String>],
-) -> Drawing {
-    if renderer == Renderer::Cpu {
-        return Drawing::Cpu(Why::Asked);
-    }
-    let driver = match compositor {
-        Compositor::Silent => return Drawing::Cpu(Why::NoGpuNamed),
-        Compositor::Device(major, minor) => return Drawing::Cpu(Why::NoDriver { major, minor }),
-        Compositor::Gpu(driver) => driver,
-    };
-    if vulkan_drivers(driver).is_none() {
-        return Drawing::Cpu(Why::NoVulkanDriver(driver.to_owned()));
-    }
-    match render_devices {
-        [Some(only)] if only == driver => Drawing::Gpu(driver.to_owned()),
-        [] | [_] => Drawing::Cpu(Why::NotSeen(driver.to_owned())),
-        several => Drawing::Cpu(Why::NotAlone {
-            driver: driver.to_owned(),
-            count: several.len(),
-        }),
-    }
-}
-
 /// The variables the graphics loaders read, as the popup needs them to draw
-/// with `drawing`: a value, or `None` for one that mustn't be set.
-#[must_use]
-pub fn environment(drawing: &Drawing) -> Vec<(&'static str, Option<String>)> {
-    let drivers = match drawing {
-        Drawing::Cpu(_) => LAVAPIPE.to_owned(),
-        // Lavapipe too: what GPUI falls back to if the GPU's driver fails.
-        Drawing::Gpu(driver) => vulkan_drivers(driver)
-            .unwrap_or_default()
-            .iter()
-            .chain([&LAVAPIPE])
-            .copied()
-            .collect::<Vec<_>>()
-            .join(","),
-    };
-    vec![
-        // The Vulkan loader (1.3.234 or newer) loads only the drivers whose
-        // manifest's file name matches ...
-        ("VK_LOADER_DRIVERS_SELECT", Some(drivers)),
-        // ... among the drivers installed. A session that names its drivers
-        // itself, for games on one GPU, names no lavapipe: the selection
-        // would leave nothing, and no window.
-        ("VK_DRIVER_FILES", None),
-        ("VK_ICD_FILENAMES", None),
-        // No layer, implicit or asked for ...
-        ("VK_LOADER_LAYERS_DISABLE", Some("~all~".to_owned())),
-        // ... and none exempt from that: not allowed, not enabled over the
-        // disabling, and not added without a look at it.
-        ("VK_LOADER_LAYERS_ALLOW", None),
-        ("VK_LOADER_LAYERS_ENABLE", None),
-        ("VK_INSTANCE_LAYERS", None),
-        // libglvnd loads the vendor libraries listed here instead of the
-        // ones it finds: none.
-        ("__EGL_VENDOR_LIBRARY_FILENAMES", Some(String::new())),
-        // An EGL that isn't libglvnd's is Mesa's own: on the CPU, so that
-        // wgpu still prefers Vulkan to it.
-        ("LIBGL_ALWAYS_SOFTWARE", Some("true".to_owned())),
-    ]
-}
+/// on the CPU alone: a value, or `None` for one that mustn't be set.
+pub const ON_THE_CPU: [(&str, Option<&str>); 9] = [
+    // The Vulkan loader (1.3.234 or newer) loads only the drivers whose
+    // manifest's file name matches: Mesa's lavapipe, `lvp_icd.<arch>.json`
+    // everywhere ...
+    ("VK_LOADER_DRIVERS_SELECT", Some("lvp_icd.*")),
+    // ... among the drivers installed. A session that names its drivers
+    // itself, for games on one GPU, names no lavapipe: the selection would
+    // leave nothing, and no window.
+    ("VK_DRIVER_FILES", None),
+    ("VK_ICD_FILENAMES", None),
+    // No layer, implicit or asked for ...
+    ("VK_LOADER_LAYERS_DISABLE", Some("~all~")),
+    // ... and none exempt from that: not allowed, not enabled over the
+    // disabling, and not added without a look at it.
+    ("VK_LOADER_LAYERS_ALLOW", None),
+    ("VK_LOADER_LAYERS_ENABLE", None),
+    ("VK_INSTANCE_LAYERS", None),
+    // libglvnd loads the vendor libraries listed here instead of the ones
+    // it finds: none.
+    ("__EGL_VENDOR_LIBRARY_FILENAMES", Some("")),
+    // An EGL that isn't libglvnd's is Mesa's own: on the CPU, so that wgpu
+    // still prefers Vulkan to it.
+    ("LIBGL_ALWAYS_SOFTWARE", Some("true")),
+];
 
 /// What `variable` (a lookup in an environment) lacks of `wanted`: each
 /// variable that differs, with what it has to be.
 pub fn missing(
     variable: impl Fn(&str) -> Option<OsString>,
-    wanted: Vec<(&'static str, Option<String>)>,
-) -> Vec<(&'static str, Option<String>)> {
+    wanted: &[(&'static str, Option<&'static str>)],
+) -> Vec<(&'static str, Option<&'static str>)> {
     wanted
-        .into_iter()
-        .filter(|(name, value)| variable(name).as_deref() != value.as_deref().map(OsStr::new))
+        .iter()
+        .filter(|(name, value)| variable(name).as_deref() != value.map(OsStr::new))
+        .copied()
         .collect()
 }
 
@@ -263,44 +97,34 @@ pub fn started_again(marker: Option<&OsStr>, pid: u32) -> bool {
     marker.and_then(OsStr::to_str) == Some(pid.to_string().as_str())
 }
 
-/// Decides what to draw with ([`choose`]) and makes sure the graphics
-/// loaders will find the environment for it ([`environment`]). If this
-/// process's differs, the process is replaced by the same program with the
-/// same arguments in the right one, and this doesn't return; there it
-/// decides the same again and goes on. It starts again once: a popup that
-/// was started again and still finds another environment than it decides
-/// on gives up. To be called first: before anything is loaded that reads
-/// the variables, and before the process holds anything.
+/// For [`Renderer::Cpu`], makes sure the graphics loaders will find the
+/// environment to draw on the CPU alone ([`ON_THE_CPU`]). If this process's
+/// differs, the process is replaced by the same program with the same
+/// arguments in the right one, and this doesn't return; there it finds
+/// nothing to change and goes on. It starts again once: a popup that was
+/// started again and still finds another environment gives up. For the
+/// other renderers the environment is left as it is. To be called first:
+/// before anything is loaded that reads the variables, and before the
+/// process holds anything.
 ///
 /// # Errors
 ///
 /// Returns an error if the program can't be found or started again, or if
 /// starting it again didn't settle its environment.
-pub fn prepare(renderer: Renderer) -> Result<Drawing> {
-    let drawing = match renderer {
-        Renderer::Cpu => choose(renderer, Compositor::Silent, &[]),
-        Renderer::Gpu => {
-            let sysfs = Path::new(SYSFS);
-            let named = compositor_device().map(device_numbers);
-            let driver = named.and_then(|(major, minor)| kernel_driver(sysfs, major, minor));
-            let compositor = match (named, driver.as_deref()) {
-                (None, _) => Compositor::Silent,
-                (Some((major, minor)), None) => Compositor::Device(major, minor),
-                (Some(_), Some(driver)) => Compositor::Gpu(driver),
-            };
-            choose(renderer, compositor, &render_devices(sysfs))
-        }
-    };
-    let changes = missing(|name| std::env::var_os(name), environment(&drawing));
+pub fn prepare(renderer: Renderer) -> Result<()> {
+    if renderer != Renderer::Cpu {
+        return Ok(());
+    }
+    let changes = missing(|name| std::env::var_os(name), &ON_THE_CPU);
     if changes.is_empty() {
-        return Ok(drawing);
+        return Ok(());
     }
     let pid = std::process::id();
     if started_again(std::env::var_os(STARTED_AGAIN).as_deref(), pid) {
         let names: Vec<_> = changes.iter().map(|(name, _)| *name).collect();
         bail!(
-            "the graphics loaders' environment isn't the one to draw with ({drawing:?}), though \
-             the popup started itself again for it: {} differ",
+            "the graphics loaders' environment isn't the one to draw on the CPU with, though the \
+             popup started itself again for it: {} differ",
             names.join(", ")
         );
     }
@@ -326,149 +150,90 @@ pub fn prepare(renderer: Renderer) -> Result<Drawing> {
     )
 }
 
-/// Logs what the popup's window is drawn with, next to what was decided.
-/// Worth a warning: a GPU where the CPU was decided on (then a loader
-/// didn't take the environment, and loaded the drivers the popup is meant
-/// to stay away from), and the CPU where the configuration asks for the
-/// GPU, with the reason. This sees what draws the window, not what else a
-/// loader loaded.
-pub fn report(drawing: &Drawing, specs: Option<&GpuSpecs>) {
+/// What became of the renderer the popup was asked for, once its window is
+/// open and something draws it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// Drawn as asked: on a GPU, or on the CPU for [`Renderer::Cpu`].
+    AsAsked,
+    /// [`Renderer::Auto`] on the CPU: no GPU took the window.
+    NoGpu,
+    /// [`Renderer::Gpu`], and only a software renderer took the window. It
+    /// isn't shown.
+    OnlyTheCpu,
+    /// [`Renderer::Cpu`], and a GPU draws the window: a loader didn't keep
+    /// to lavapipe, and loaded the drivers the popup was to stay away from.
+    /// It isn't shown.
+    NotTheCpu,
+}
+
+/// What became of `renderer`, for a window drawn by a software renderer
+/// (`software`) or by a GPU.
+#[must_use]
+pub const fn outcome(renderer: Renderer, software: bool) -> Outcome {
+    match (renderer, software) {
+        (Renderer::Auto | Renderer::Gpu, false) | (Renderer::Cpu, true) => Outcome::AsAsked,
+        (Renderer::Auto, true) => Outcome::NoGpu,
+        (Renderer::Gpu, true) => Outcome::OnlyTheCpu,
+        (Renderer::Cpu, false) => Outcome::NotTheCpu,
+    }
+}
+
+/// Logs what the popup's window is drawn with (`specs`), and holds it
+/// against what was asked for.
+///
+/// # Errors
+///
+/// Returns an error if the window isn't to be shown: a software renderer
+/// draws it for [`Renderer::Gpu`], a GPU for [`Renderer::Cpu`], or there is
+/// no telling for either.
+pub fn check(renderer: Renderer, specs: Option<&GpuSpecs>) -> Result<()> {
+    let asked = renderer.name();
     let Some(specs) = specs else {
-        tracing::warn!("can't tell what the popup is drawn with");
-        return;
+        if renderer == Renderer::Auto {
+            tracing::warn!("can't tell what the popup is drawn with");
+            return Ok(());
+        }
+        bail!("can't tell what the window is drawn with, and renderer = \"{asked}\" has to know");
     };
-    let (renderer, driver) = (&specs.device_name, &specs.driver_name);
-    match (drawing, specs.is_software_emulated) {
-        (Drawing::Cpu(Why::Asked), true) => {
-            tracing::debug!(%renderer, %driver, "drawing on the CPU");
+    let (device, driver) = (&specs.device_name, &specs.driver_name);
+    match outcome(renderer, specs.is_software_emulated) {
+        Outcome::AsAsked if specs.is_software_emulated => {
+            tracing::debug!(%device, %driver, asked, "drawing on the CPU");
+            Ok(())
         }
-        (Drawing::Cpu(why), true) => {
-            tracing::warn!(%renderer, %driver, %why, "drawing on the CPU, not on a GPU");
+        Outcome::AsAsked => {
+            tracing::debug!(%device, %driver, asked, "drawing on a GPU");
+            Ok(())
         }
-        (Drawing::Cpu(_), false) => tracing::warn!(
-            %renderer,
-            %driver,
-            "drawing on a GPU: the graphics loaders didn't keep to the software renderer (the \
-             Vulkan loader does from 1.3.234 on, unless a settings file of the Vulkan \
-             configurator orders its devices)"
+        Outcome::NoGpu => {
+            tracing::info!(%device, %driver, asked, "drawing on the CPU: no GPU took the window");
+            Ok(())
+        }
+        Outcome::OnlyTheCpu => bail!(
+            "renderer = \"gpu\", and only the CPU would draw the window ({device}): no GPU here \
+             has a driver that takes it. With renderer = \"auto\" the popup draws on the CPU then"
         ),
-        (Drawing::Gpu(_), false) => {
-            tracing::debug!(%renderer, %driver, "drawing on the display server's GPU");
-        }
-        (Drawing::Gpu(kernel_driver), true) => tracing::warn!(
-            %renderer,
-            %driver,
-            %kernel_driver,
-            "drawing on the CPU: the Vulkan driver of the display server's GPU didn't take the \
-             window, or isn't installed"
+        Outcome::NotTheCpu => bail!(
+            "renderer = \"cpu\", and a GPU would draw the window ({device}): the graphics loaders \
+             didn't keep to Mesa's lavapipe. The Vulkan loader does from 1.3.234 on, unless a \
+             settings file of the Vulkan configurator orders its devices"
         ),
     }
 }
 
-/// The major and minor number of the device `device` (a `dev_t` as glibc
-/// packs it).
+/// What the popup needs to open its window with `renderer`, for the log
+/// when it can't: the one thing a desktop may lack.
 #[must_use]
-pub const fn device_numbers(device: u64) -> (u64, u64) {
-    let major = (device.wrapping_shr(32) & 0xffff_f000) | (device.wrapping_shr(8) & 0x0fff);
-    let minor = (device.wrapping_shr(12) & 0xffff_ff00) | (device & 0x00ff);
-    (major, minor)
-}
-
-/// The kernel driver of the character device `major`:`minor`, as `sysfs`
-/// (`/sys`) has it.
-#[must_use]
-pub fn kernel_driver(sysfs: &Path, major: u64, minor: u64) -> Option<String> {
-    driver_of(&sysfs.join(format!("dev/char/{major}:{minor}/device")))
-}
-
-/// The kernel driver of every device that can render, as `sysfs` (`/sys`)
-/// has them: the DRM render nodes, in the order of their drivers' names.
-/// `None` for a device whose driver can't be read: it counts all the same.
-/// Empty if they can't be listed.
-#[must_use]
-pub fn render_devices(sysfs: &Path) -> Vec<Option<String>> {
-    let Ok(nodes) = std::fs::read_dir(sysfs.join("class/drm")) else {
-        return Vec::new();
-    };
-    // One entry that can't be read could be a GPU: then none is known.
-    let Ok(nodes) = nodes.collect::<Result<Vec<_>, _>>() else {
-        return Vec::new();
-    };
-    let mut drivers: Vec<_> = nodes
-        .iter()
-        .filter(|node| node.file_name().to_string_lossy().starts_with("renderD"))
-        .map(|node| driver_of(&node.path().join("device")))
-        .collect();
-    drivers.sort();
-    drivers
-}
-
-/// The name of the driver bound to the sysfs device `device`.
-fn driver_of(device: &Path) -> Option<String> {
-    let driver = std::fs::read_link(device.join("driver")).ok()?;
-    Some(driver.file_name()?.to_str()?.to_owned())
-}
-
-/// The device the Wayland compositor draws on, as it tells every client
-/// (the main device of its dmabuf feedback). `None` without a compositor, or
-/// with one that doesn't say.
-fn compositor_device() -> Option<u64> {
-    let connection = Connection::connect_to_env().ok()?;
-    let (globals, mut queue) = registry_queue_init::<Probe>(&connection).ok()?;
-    let handle = queue.handle();
-    // Version 4 has the feedback.
-    let dmabuf: zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1 = globals.bind(&handle, 4..=4, ()).ok()?;
-    let feedback = dmabuf.get_default_feedback(&handle, ());
-    let mut probe = Probe { device: None };
-    queue.roundtrip(&mut probe).ok()?;
-    feedback.destroy();
-    dmabuf.destroy();
-    probe.device
-}
-
-/// What [`compositor_device`] learns from the compositor.
-struct Probe {
-    device: Option<u64>,
-}
-
-impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for Probe {
-    fn event(
-        _: &mut Self,
-        _: &wl_registry::WlRegistry,
-        _: wl_registry::Event,
-        _: &GlobalListContents,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1, ()> for Probe {
-    fn event(
-        _: &mut Self,
-        _: &zwp_linux_dmabuf_v1::ZwpLinuxDmabufV1,
-        _: zwp_linux_dmabuf_v1::Event,
-        (): &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-    }
-}
-
-impl Dispatch<zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1, ()> for Probe {
-    fn event(
-        probe: &mut Self,
-        _: &zwp_linux_dmabuf_feedback_v1::ZwpLinuxDmabufFeedbackV1,
-        event: zwp_linux_dmabuf_feedback_v1::Event,
-        (): &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        // A `dev_t`, as the compositor's C library has it.
-        if let zwp_linux_dmabuf_feedback_v1::Event::MainDevice { device } = event
-            && let Ok(bytes) = <[u8; 8]>::try_from(device.as_slice())
-        {
-            probe.device = Some(u64::from_ne_bytes(bytes));
+pub const fn needs(renderer: Renderer) -> &'static str {
+    match renderer {
+        Renderer::Auto => {
+            "the popup needs a GPU with a Vulkan or OpenGL driver, or Mesa's software renderer"
+        }
+        Renderer::Gpu => "renderer = \"gpu\" needs a GPU with a Vulkan or OpenGL driver",
+        Renderer::Cpu => {
+            "renderer = \"cpu\" draws with Mesa's software Vulkan driver, lavapipe, which has to \
+             be installed"
         }
     }
 }

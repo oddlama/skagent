@@ -22,9 +22,10 @@
 //! (see `skagent_popup::style`): how the popup looks is cosmetic, so a
 //! setting there that can't be used is skipped with a warning instead of
 //! stopping the agent. What it draws with isn't cosmetic, and is treated the
-//! same: an unusable `renderer` leaves the default, the CPU, which loads no
-//! GPU driver. home-manager generates the file from `services.skagent.keys`,
-//! `services.skagent.securityKeys` and `services.skagent.popup`.
+//! same: an unusable `renderer` leaves the default, `auto`, with which the
+//! popup works wherever it can. home-manager generates the file from
+//! `services.skagent.keys`, `services.skagent.securityKeys` and
+//! `services.skagent.popup`.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;

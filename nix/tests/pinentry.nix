@@ -212,6 +212,29 @@ pkgs.testers.runNixOSTest {
         """The graphics drivers loaded that tell: `<vulkan or egl>-<process>-<pid>` each."""
         return machine.succeed("ls ${trapDir}").split()
 
+    def touches() -> int:
+        """How often the security key was asked for a touch."""
+        return journal("testkey").count("touch requested")
+
+    def started_with() -> str:
+        """The arguments of the popup that is running."""
+        popup_pid = machine.succeed("pgrep -u alice -x skagent-pinentr").strip()
+        arguments = machine.succeed(f"tr '\\0' ' ' < /proc/{popup_pid}/cmdline").split()
+        return " ".join(arguments[1:])
+
+    def restart_agent(edit: str) -> None:
+        """Starts the agent again with its configuration changed by the sed script `edit`."""
+        machine.succeed("systemctl stop skagent")
+        machine.wait_until_fails("test -e ${socket}")
+        alice_ok(f"sed -i {shlex.quote(edit)} ${dir}/config.toml")
+        machine.succeed(
+            f"systemd-run --unit skagent --uid alice --setenv XDG_RUNTIME_DIR=${runtime}"
+            f" --setenv WAYLAND_DISPLAY={display} --setenv SKAGENT_PINENTRY_LOG=skagent_pinentry=debug"
+            " ${package}/bin/skagent serve --log skagent=debug --socket ${socket}"
+            " --config ${dir}/config.toml --popup ${pinentry}/bin/skagent-pinentry"
+        )
+        machine.wait_for_file("${socket}")
+
     machine.wait_for_unit("multi-user.target")
     machine.succeed(
         "systemd-run --unit testkey --setenv SKAGENT_TESTKEY_PIN=${pin}"
@@ -239,7 +262,9 @@ pkgs.testers.runNixOSTest {
         fingerprint = alice_ok("ssh-keygen -lf ~/id_sk.pub").split()[1]
         alice_ok(
             f"printf '[keys.\"%s\"]\\nemoji = \"🦊\"\\nlabel = \"github-work\"\\n"
-            f"[security-keys.12345678]\\nname = \"Desk 5C NFC\"\\n' '{fingerprint}' > ${dir}/config.toml"
+            f"[security-keys.12345678]\\nname = \"Desk 5C NFC\"\\n"
+            # On the CPU: this popup has to leave the drivers above alone.
+            f"[popup]\\nrenderer = \"cpu\"\\n' '{fingerprint}' > ${dir}/config.toml"
         )
         machine.succeed(
             "systemd-run --unit sway --uid alice --setenv XDG_RUNTIME_DIR=${runtime}"
@@ -397,8 +422,9 @@ pkgs.testers.runNixOSTest {
     with subtest("the popup takes colours, size and fonts from [popup]"):
         machine.succeed("systemctl stop skagent")
         machine.wait_until_fails("test -e ${socket}")
+        # More of the [popup] table the file ends with.
         alice_ok(
-            "printf '[popup]\\nrenderer = \"gpu\"\\nappearance = \"dark\"\\nscale = 1.25\\nfont = \"Comic Neue\"\\n"
+            "printf 'appearance = \"dark\"\\nscale = 1.25\\nfont = \"Comic Neue\"\\n"
             "[popup.dark]\\nsurface = \"#2e3440\"\\naccent = \"#88c0d0\"\\n' >> ${dir}/config.toml"
         )
         machine.succeed(
@@ -422,23 +448,43 @@ pkgs.testers.runNixOSTest {
         ).strip()
         assert top == "2E3440", top
         assert logged(mark, 'font="Comic Neue" instead="Inter"'), popup_lines()
-        # Asked to draw on the display server's GPU, it was started so. This
-        # compositor draws without one and names none: the CPU it is, with
-        # the reason, and still without another vendor's driver (below).
-        popup_pid = machine.succeed("pgrep -u alice -x skagent-pinentr").strip()
-        started = machine.succeed(f"tr '\\0' ' ' < /proc/{popup_pid}/cmdline")
-        assert started.strip().endswith("--renderer gpu"), started
-        assert logged(mark, "drawing on the CPU, not on a GPU"), popup_lines()[mark:]
-        assert logged(mark, "why=the display server doesn't say which GPU it draws on"), popup_lines()[mark:]
+        # What to draw with isn't part of the style: the popup was started
+        # with it.
+        assert started_with() == "--renderer cpu", started_with()
         type_keys("-k Escape")
         finished("styled", success=False)
         closed()
 
-    with subtest("the popup drew on the CPU, and loaded no other graphics driver"):
-        # Every popup of this test: several, with a PIN, a touch, a failure.
+    with subtest("on the CPU the popup loaded no other graphics driver"):
+        # Every popup so far: several, with a PIN, a touch, a failure.
         assert len([line for line in popup_lines() if "drawing on the CPU" in line]) >= 4, popup_lines()
-        assert logged(0, "drawing on the CPU renderer=llvmpipe"), popup_lines()
+        assert logged(0, "drawing on the CPU device=llvmpipe"), popup_lines()
         assert not logged(0, "drawing on a GPU"), popup_lines()
         assert not [name for name in trapped() if "pinentr" in name], trapped()
+
+    with subtest("without a setting the popup looks at every driver like any program, and draws on the CPU for lack of a GPU"):
+        restart_agent("/^renderer = /d")
+        mark = len(popup_lines())
+        start_sign("auto")
+        wait_until_shown(mark, "pin")
+        assert started_with() == "--renderer auto", started_with()
+        assert logged(mark, "drawing on the CPU: no GPU took the window"), popup_lines()[mark:]
+        # It asked for every device there is, so the stand-ins were loaded.
+        loaded = sorted({name.split("-")[0] for name in trapped() if "pinentr" in name})
+        assert loaded == ["egl", "vulkan"], trapped()
+        type_keys("-k Escape")
+        finished("auto", success=False)
+        closed()
+
+    with subtest("asked for a GPU the popup never draws on the CPU: it doesn't show, and the key isn't asked"):
+        restart_agent("s/^\\[popup\\]$/[popup]\\nrenderer = \"gpu\"/")
+        mark = len(popup_lines())
+        asked = touches()
+        start_sign("gpu")
+        finished("gpu", success=False)
+        closed()
+        assert logged(mark, 'renderer = \"gpu\", and only the CPU would draw the window'), popup_lines()[mark:]
+        assert not on_screen(mark), on_screen(mark)
+        assert touches() == asked, together()
   '';
 }
