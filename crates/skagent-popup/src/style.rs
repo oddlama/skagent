@@ -571,7 +571,7 @@ pub enum Renderer {
     #[default]
     Cpu,
     /// The GPU the display server draws on, if the popup can tell which
-    /// that is and can keep away from every other one; else the CPU.
+    /// that is and it is the only GPU here; else the CPU.
     Gpu,
 }
 

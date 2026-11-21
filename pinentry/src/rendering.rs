@@ -1,5 +1,6 @@
 //! What the popup's window is drawn with: the CPU, or on request the GPU
-//! the display server draws on. Never another GPU, and never its driver.
+//! the display server draws on, where that is the only GPU. Never another
+//! GPU, and never its driver.
 //!
 //! GPUI renders through wgpu, which asks the Vulkan loader and EGL for
 //! every device there is before it picks one. Asking loads every vendor's
@@ -26,8 +27,8 @@
 //! selection of drivers. The popup can't help that; it warns if its window
 //! is then drawn on a GPU ([`report`]).
 //!
-//! [`Renderer::Gpu`] falls back to the CPU wherever the popup can't be sure
-//! to stay with that one GPU ([`choose`]), and by itself where the GPU's
+//! [`Renderer::Gpu`] falls back to the CPU wherever there is a second GPU
+//! or the popup can't tell ([`choose`]), and by itself where the GPU's
 //! driver doesn't take the window: GPUI tries lavapipe next. What the
 //! window ends up drawn with is logged when it opens ([`report`]).
 
@@ -46,6 +47,9 @@ use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols::wp::linux_dmabuf::zv1::client::{
     zwp_linux_dmabuf_feedback_v1, zwp_linux_dmabuf_v1,
 };
+
+/// Where the kernel describes its devices.
+pub const SYSFS: &str = "/sys";
 
 /// Set to the popup's process id when it starts itself again, which keeps
 /// the id: a popup that finds its own there doesn't start a third time.
@@ -74,9 +78,22 @@ const VULKAN_DRIVERS: [(&[&str], &[&str]); 8] = [
 pub enum Drawing {
     /// On the CPU, with Mesa's lavapipe.
     Cpu(Why),
-    /// On the display server's GPU, the one of this kernel driver; on the
-    /// CPU if its Vulkan driver doesn't take the window.
+    /// On the display server's GPU, the only one here, the one of this
+    /// kernel driver; on the CPU if its Vulkan driver doesn't take the
+    /// window.
     Gpu(String),
+}
+
+/// What the display server says about the GPU it draws on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compositor<'a> {
+    /// Nothing: it isn't a Wayland compositor, or draws without a GPU.
+    Silent,
+    /// A device, by its major and minor number, whose kernel driver sysfs
+    /// doesn't have.
+    Device(u64, u64),
+    /// A GPU of this kernel driver.
+    Gpu(&'a str),
 }
 
 /// Why the popup draws on the CPU.
@@ -84,22 +101,31 @@ pub enum Drawing {
 pub enum Why {
     /// It was told to, or not told otherwise.
     Asked,
-    /// The display server didn't name the GPU it draws on (it isn't a
-    /// Wayland compositor, or draws without one), or the device it named
-    /// has no driver to be found.
+    /// The display server didn't name the GPU it draws on: it isn't a
+    /// Wayland compositor, or draws without one.
     NoGpuNamed,
+    /// The display server named a device whose kernel driver sysfs doesn't
+    /// have.
+    NoDriver {
+        /// The device's major number.
+        major: u64,
+        /// The device's minor number.
+        minor: u64,
+    },
     /// The display server's GPU has this kernel driver, which the popup
     /// knows no Vulkan driver for.
     NoVulkanDriver(String),
-    /// The Vulkan driver for this kernel driver would look at `count` GPUs,
-    /// not at the display server's alone: it could wake another one.
+    /// The display server's GPU is one of `count` here: its Vulkan driver
+    /// could open the others while it looks for its own, and wake one.
     NotAlone {
         /// The kernel driver of the display server's GPU.
         driver: String,
-        /// The GPUs its Vulkan driver serves here, as far as they can be
-        /// seen.
+        /// The devices here that can render.
         count: usize,
     },
+    /// The devices that can render can't be listed, or the only one isn't
+    /// the display server's: no telling what else is here.
+    NotSeen(String),
 }
 
 impl fmt::Display for Why {
@@ -109,14 +135,24 @@ impl fmt::Display for Why {
             Self::NoGpuNamed => {
                 formatter.write_str("the display server doesn't say which GPU it draws on")
             }
+            Self::NoDriver { major, minor } => write!(
+                formatter,
+                "sysfs has no kernel driver for the device the display server draws on \
+                 ({major}:{minor})"
+            ),
             Self::NoVulkanDriver(driver) => write!(
                 formatter,
                 "no Vulkan driver is known for the display server's GPU ({driver})"
             ),
             Self::NotAlone { driver, count } => write!(
                 formatter,
-                "the Vulkan driver for the display server's GPU ({driver}) serves {count} GPUs \
-                 here, not that one alone"
+                "the display server's GPU ({driver}) is one of {count} here, and its Vulkan \
+                 driver may open the others too"
+            ),
+            Self::NotSeen(driver) => write!(
+                formatter,
+                "the GPUs here can't be listed, or the only one isn't the display server's \
+                 ({driver})"
             ),
         }
     }
@@ -130,34 +166,40 @@ fn vulkan_drivers(kernel_driver: &str) -> Option<&'static [&'static str]> {
         .map(|(_, vulkan)| *vulkan)
 }
 
-/// What to draw with. `compositor`: the kernel driver of the GPU the
-/// display server draws on, if it named one. `render_devices`: the kernel
-/// driver of every device here that can render.
+/// What to draw with. `compositor`: what the display server says about the
+/// GPU it draws on. `render_devices`: the kernel driver of every device here
+/// that can render, `None` for one whose driver can't be read.
 ///
-/// A GPU only if the popup can stay with that one: the Vulkan driver for it
-/// is known, and serves no other device, which it would open as well.
+/// A GPU only if it is the only one here, and the Vulkan driver for it is
+/// known. A Vulkan driver looks for its GPUs among all of them, and some
+/// open every one to ask whose it is (Mesa's for Intel since 26.1): that
+/// calls into the other GPU's kernel driver, and wakes a GPU that sleeps.
+/// Which driver does so changes between releases, so the popup counts on
+/// none (`docs/research/popup-rendering.md`).
 #[must_use]
-pub fn choose(renderer: Renderer, compositor: Option<&str>, render_devices: &[String]) -> Drawing {
+pub fn choose(
+    renderer: Renderer,
+    compositor: Compositor<'_>,
+    render_devices: &[Option<String>],
+) -> Drawing {
     if renderer == Renderer::Cpu {
         return Drawing::Cpu(Why::Asked);
     }
-    let Some(driver) = compositor else {
-        return Drawing::Cpu(Why::NoGpuNamed);
+    let driver = match compositor {
+        Compositor::Silent => return Drawing::Cpu(Why::NoGpuNamed),
+        Compositor::Device(major, minor) => return Drawing::Cpu(Why::NoDriver { major, minor }),
+        Compositor::Gpu(driver) => driver,
     };
-    let Some(vulkan) = vulkan_drivers(driver) else {
+    if vulkan_drivers(driver).is_none() {
         return Drawing::Cpu(Why::NoVulkanDriver(driver.to_owned()));
-    };
-    let count = render_devices
-        .iter()
-        .filter(|other| vulkan_drivers(other) == Some(vulkan))
-        .count();
-    if count == 1 {
-        Drawing::Gpu(driver.to_owned())
-    } else {
-        Drawing::Cpu(Why::NotAlone {
+    }
+    match render_devices {
+        [Some(only)] if only == driver => Drawing::Gpu(driver.to_owned()),
+        [] | [_] => Drawing::Cpu(Why::NotSeen(driver.to_owned())),
+        several => Drawing::Cpu(Why::NotAlone {
             driver: driver.to_owned(),
-            count,
-        })
+            count: several.len(),
+        }),
     }
 }
 
@@ -236,10 +278,17 @@ pub fn started_again(marker: Option<&OsStr>, pid: u32) -> bool {
 /// starting it again didn't settle its environment.
 pub fn prepare(renderer: Renderer) -> Result<Drawing> {
     let drawing = match renderer {
-        Renderer::Cpu => choose(renderer, None, &[]),
+        Renderer::Cpu => choose(renderer, Compositor::Silent, &[]),
         Renderer::Gpu => {
-            let compositor = compositor_device().and_then(kernel_driver);
-            choose(renderer, compositor.as_deref(), &render_devices())
+            let sysfs = Path::new(SYSFS);
+            let named = compositor_device().map(device_numbers);
+            let driver = named.and_then(|(major, minor)| kernel_driver(sysfs, major, minor));
+            let compositor = match (named, driver.as_deref()) {
+                (None, _) => Compositor::Silent,
+                (Some((major, minor)), None) => Compositor::Device(major, minor),
+                (Some(_), Some(driver)) => Compositor::Gpu(driver),
+            };
+            choose(renderer, compositor, &render_devices(sysfs))
         }
     };
     let changes = missing(|name| std::env::var_os(name), environment(&drawing));
@@ -325,22 +374,33 @@ pub const fn device_numbers(device: u64) -> (u64, u64) {
     (major, minor)
 }
 
-/// The kernel driver of the character device `device`, from sysfs.
-fn kernel_driver(device: u64) -> Option<String> {
-    let (major, minor) = device_numbers(device);
-    driver_of(Path::new(&format!("/sys/dev/char/{major}:{minor}/device")))
+/// The kernel driver of the character device `major`:`minor`, as `sysfs`
+/// (`/sys`) has it.
+#[must_use]
+pub fn kernel_driver(sysfs: &Path, major: u64, minor: u64) -> Option<String> {
+    driver_of(&sysfs.join(format!("dev/char/{major}:{minor}/device")))
 }
 
-/// The kernel driver of every device that can render: the DRM render nodes.
-fn render_devices() -> Vec<String> {
-    let Ok(nodes) = std::fs::read_dir("/sys/class/drm") else {
+/// The kernel driver of every device that can render, as `sysfs` (`/sys`)
+/// has them: the DRM render nodes, in the order of their drivers' names.
+/// `None` for a device whose driver can't be read: it counts all the same.
+/// Empty if they can't be listed.
+#[must_use]
+pub fn render_devices(sysfs: &Path) -> Vec<Option<String>> {
+    let Ok(nodes) = std::fs::read_dir(sysfs.join("class/drm")) else {
         return Vec::new();
     };
-    nodes
-        .filter_map(Result::ok)
+    // One entry that can't be read could be a GPU: then none is known.
+    let Ok(nodes) = nodes.collect::<Result<Vec<_>, _>>() else {
+        return Vec::new();
+    };
+    let mut drivers: Vec<_> = nodes
+        .iter()
         .filter(|node| node.file_name().to_string_lossy().starts_with("renderD"))
-        .filter_map(|node| driver_of(&node.path().join("device")))
-        .collect()
+        .map(|node| driver_of(&node.path().join("device")))
+        .collect();
+    drivers.sort();
+    drivers
 }
 
 /// The name of the driver bound to the sysfs device `device`.

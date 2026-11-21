@@ -235,9 +235,10 @@ in
         description = ''
           What the popup draws with. `cpu`: Mesa's software renderer, and no
           GPU driver is loaded. `gpu`: the GPU the Wayland compositor draws
-          on, with that GPU's driver alone; the CPU where the popup can't
-          tell which GPU that is, or can't keep to it. Never another GPU: a
-          second one that sleeps is left asleep either way.
+          on, with that GPU's driver alone, if it is the machine's only GPU;
+          the CPU on a machine with two, and where the popup can't tell.
+          Never another GPU: a second one that sleeps is left asleep either
+          way.
         '';
       };
       appearance = mkOption {

@@ -25,10 +25,12 @@ yet unless a section says so.
   (`[popup] renderer = "gpu"`, which the agent passes on as `--renderer`:
   the popup has to know before it starts). The popup asks the Wayland
   compositor which device it draws on and lets the loader load that GPU's
-  Vulkan driver next to lavapipe, and no other. It stays on the CPU where it
-  can't keep to that one GPU: no compositor that names its device, no
-  Vulkan driver known for it, or a driver that serves a second GPU here and
-  would open that too.
+  Vulkan driver next to lavapipe, and no other. Only where that GPU is the
+  machine's only one: a Vulkan driver looks for its GPU among all of them,
+  and some open each to ask whose it is, which wakes one that sleeps
+  ([`research/popup-rendering.md`](research/popup-rendering.md)). It stays
+  on the CPU too with no compositor that names its device and with no
+  Vulkan driver known for it.
 - **Wayland first, compositor-agnostic.** A layer-shell overlay with exclusive
   keyboard focus where the compositor offers it (sway, Hyprland, niri, river,
   labwc, KDE), an ordinary window elsewhere. No compositor-specific code.

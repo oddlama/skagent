@@ -47,7 +47,7 @@ struct Cli {
     config: Option<PathBuf>,
 
     /// What to draw the window with: the CPU, or the GPU the display server
-    /// draws on where the popup can keep to that one. Default: cpu, with
+    /// draws on where that is the machine's only GPU. Default: cpu, with
     /// --preview what the configuration says (`[popup] renderer`).
     #[arg(long, value_enum)]
     renderer: Option<RendererArg>,
