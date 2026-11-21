@@ -270,7 +270,7 @@ pkgs.testers.runNixOSTest {
         before = (prompts(), touches())
         touch()
         out = alice_ok("skagent batch -- ./decrypt-all f1.age f2.age f3.age f4.age f5.age")
-        assert out.split() == [f"file-{number}" for number in range(1, 6)], out
+        assert decrypted(out) == [f"file-{number}" for number in range(1, 6)], out
         expect(before, 1, 1, "five files in a batch")
         asked = last_prompt()
         assert "Enter PIN for age identity (age1pq1" in asked, asked
@@ -331,7 +331,7 @@ pkgs.testers.runNixOSTest {
         before = (prompts(), touches())
         alice_ok("touch ~/go")
         status, out = finished()
-        assert status == 0 and out.split() == ["file-1", "file-2", "file-3"], out
+        assert status == 0 and decrypted(out) == ["file-1", "file-2", "file-3"], out
         expect(before, 0, 0, "the batch's further files")
         retry(lambda _last_try: kept_keys("skagent") == 0, timeout_seconds=5)
         # The same notification counted on, and went with the batch.
@@ -342,7 +342,7 @@ pkgs.testers.runNixOSTest {
         before = (prompts(), touches())
         touch()
         out = alice_ok("skagent batch -- ./orphan")
-        assert out.split() == ["file-1", "file-3"], out
+        assert decrypted(out) == ["file-1", "file-3"], out
         expect(before, 0, 1, "an orphaned process of the batch")
         assert alice_ok("cat ~/orphan-parent") == alice_ok("cat ~/tool-pid")
 
@@ -350,7 +350,7 @@ pkgs.testers.runNixOSTest {
         before = (prompts(), touches())
         touch()
         out = alice_ok("skagent batch -- ./at-once")
-        assert out.split() == ["file-1", "file-2", "file-3"], out
+        assert decrypted(out) == ["file-1", "file-2", "file-3"], out
         expect(before, 0, 1, "three decryptions at once")
 
     with subtest("a batch ends when its time is up, also while nobody asks"):
@@ -431,7 +431,7 @@ pkgs.testers.runNixOSTest {
         before = (prompts(), touches())
         alice_ok("touch ~/go")
         status, out = finished()
-        assert status == 0 and out.split() == ["file-1", "file-2", "file-3"], out
+        assert status == 0 and decrypted(out) == ["file-1", "file-2", "file-3"], out
         expect(before, 0, 0, "after closing the notification")
         retry(lambda _last_try: journal("skagent").count("closed the batch") == closed + 1, timeout_seconds=5)
         machine.sleep(1)
@@ -484,7 +484,7 @@ pkgs.testers.runNixOSTest {
         start_agent("skagent-popup", "--popup /run/current-system/sw/bin/fake-popup")
         touch()
         out = alice_ok("skagent batch --for 2m -- ./decrypt-all f1.age f2.age")
-        assert out.split() == ["file-1", "file-2"], out
+        assert decrypted(out) == ["file-1", "file-2"], out
         lines = machine.succeed("cat ${popupLog}").splitlines()
         shown = [json.loads(line) for line in lines if line.startswith("{")]
         states = [message["state"] for message in shown if message["type"] == "show"]
