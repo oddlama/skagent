@@ -51,6 +51,24 @@ fn on_the_cpu() -> Drawing {
     Drawing::Cpu(Why::Asked)
 }
 
+/// A session set up for games on the other GPU, with a debugging layer
+/// and an overlay forced on.
+fn a_gaming_session() -> Environment {
+    Environment::from([
+        ("VK_LOADER_DRIVERS_SELECT", OsString::from("nvidia*")),
+        ("VK_DRIVER_FILES", OsString::from("/x/nvidia_icd.json")),
+        ("VK_ICD_FILENAMES", OsString::from("/x/nvidia_icd.json")),
+        ("VK_LOADER_LAYERS_ALLOW", OsString::from("*")),
+        ("VK_LOADER_LAYERS_ENABLE", OsString::from("*overlay*")),
+        (
+            "VK_INSTANCE_LAYERS",
+            OsString::from("VK_LAYER_KHRONOS_validation"),
+        ),
+        ("LIBGL_ALWAYS_SOFTWARE", OsString::from("0")),
+        ("__EGL_VENDOR_LIBRARY_FILENAMES", OsString::from("/x.json")),
+    ])
+}
+
 #[test]
 fn an_ordinary_environment_lacks_every_setting() -> Result<()> {
     let lacks = lacking(&Environment::new(), &on_the_cpu());
@@ -67,16 +85,7 @@ fn an_ordinary_environment_lacks_every_setting() -> Result<()> {
 fn the_corrected_environment_lacks_nothing() -> Result<()> {
     // Started again in it, the popup goes on instead of starting once more.
     for drawing in [on_the_cpu(), Drawing::Gpu("i915".to_owned())] {
-        for start in [
-            Environment::new(),
-            Environment::from([
-                // A session set up for games on the other GPU.
-                ("VK_LOADER_DRIVERS_SELECT", OsString::from("nvidia*")),
-                ("VK_LOADER_LAYERS_ALLOW", OsString::from("*")),
-                ("LIBGL_ALWAYS_SOFTWARE", OsString::from("0")),
-                ("__EGL_VENDOR_LIBRARY_FILENAMES", OsString::from("/x.json")),
-            ]),
-        ] {
+        for start in [Environment::new(), a_gaming_session()] {
             let environment_now = corrected(start, &drawing);
             ensure!(
                 lacking(&environment_now, &drawing).is_empty(),
@@ -104,6 +113,29 @@ fn on_the_cpu_only_lavapipe_no_layer_and_no_egl_vendor() -> Result<()> {
     ensure!(value("LIBGL_ALWAYS_SOFTWARE") == Some("true"));
     // A layer allowed here would be exempt from the disabling.
     ensure!(value("VK_LOADER_LAYERS_ALLOW").is_none());
+    Ok(())
+}
+
+/// What a session tells the Vulkan loader past the popup's orders: a list
+/// of drivers of its own, which has no lavapipe and would leave the popup
+/// without a window, and layers the loader loads whatever is disabled.
+#[test]
+fn a_sessions_own_drivers_and_forced_layers_are_taken_away() -> Result<()> {
+    for drawing in [on_the_cpu(), Drawing::Gpu("amdgpu".to_owned())] {
+        let environment_now = corrected(a_gaming_session(), &drawing);
+        for name in [
+            "VK_DRIVER_FILES",
+            "VK_ICD_FILENAMES",
+            "VK_LOADER_LAYERS_ENABLE",
+            "VK_INSTANCE_LAYERS",
+            "VK_LOADER_LAYERS_ALLOW",
+        ] {
+            ensure!(
+                !environment_now.contains_key(name),
+                "{name} for {drawing:?}"
+            );
+        }
+    }
     Ok(())
 }
 

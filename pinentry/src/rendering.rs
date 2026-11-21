@@ -8,16 +8,23 @@
 //! a prompt appears, and a PIN prompt at the mercy of that driver
 //! (`docs/research/popup-rendering.md` has the day one took the popup down).
 //!
-//! The loaders take orders through their environment alone, read when they
-//! are loaded. So the popup makes sure of its own environment first thing
+//! The loaders take orders through their environment, read when they are
+//! loaded. So the popup makes sure of its own environment first thing
 //! ([`prepare`]), and starts itself again in the right one if it has to:
 //!
 //! - **Vulkan** finds Mesa's lavapipe, a CPU rasterizer, and with
 //!   [`Renderer::Gpu`] the driver of the display server's GPU. The loader
-//!   skips every other driver before it would load it.
+//!   skips every other driver before it would load it. It looks among the
+//!   drivers installed: a list of the session's own is taken away.
 //! - **No Vulkan layer** is loaded, whatever the system or the session
-//!   installed: overlays, capture, another vendor's device switching.
+//!   installed or asks for: overlays, capture, another vendor's device
+//!   switching.
 //! - **EGL** finds no vendor library, so wgpu has Vulkan alone.
+//!
+//! One order isn't in the environment: a settings file of the Vulkan
+//! configurator that orders the devices makes the loader ignore the
+//! selection of drivers. The popup can't help that; it warns if its window
+//! is then drawn on a GPU ([`report`]).
 //!
 //! [`Renderer::Gpu`] falls back to the CPU wherever the popup can't be sure
 //! to stay with that one GPU ([`choose`]), and by itself where the GPU's
@@ -167,12 +174,20 @@ pub fn environment(drawing: &Drawing) -> Vec<(&'static str, Option<String>)> {
     };
     vec![
         // The Vulkan loader (1.3.234 or newer) loads only the drivers whose
-        // manifest's file name matches.
+        // manifest's file name matches ...
         ("VK_LOADER_DRIVERS_SELECT", Some(drivers)),
+        // ... among the drivers installed. A session that names its drivers
+        // itself, for games on one GPU, names no lavapipe: the selection
+        // would leave nothing, and no window.
+        ("VK_DRIVER_FILES", None),
+        ("VK_ICD_FILENAMES", None),
         // No layer, implicit or asked for ...
         ("VK_LOADER_LAYERS_DISABLE", Some("~all~".to_owned())),
-        // ... and none exempt from that.
+        // ... and none exempt from that: not allowed, not enabled over the
+        // disabling, and not added without a look at it.
         ("VK_LOADER_LAYERS_ALLOW", None),
+        ("VK_LOADER_LAYERS_ENABLE", None),
+        ("VK_INSTANCE_LAYERS", None),
         // libglvnd loads the vendor libraries listed here instead of the
         // ones it finds: none.
         ("__EGL_VENDOR_LIBRARY_FILENAMES", Some(String::new())),
@@ -242,7 +257,7 @@ pub fn prepare(renderer: Renderer) -> Result<Drawing> {
 /// Worth a warning: a GPU where the CPU was decided on (then a loader
 /// didn't take the environment, and loaded the drivers the popup is meant
 /// to stay away from), and the CPU where the GPU's driver should have
-/// drawn.
+/// drawn. This sees what draws the window, not what else a loader loaded.
 pub fn report(drawing: &Drawing, specs: Option<&GpuSpecs>) {
     let Some(specs) = specs else {
         tracing::warn!("can't tell what the popup is drawn with");
@@ -260,7 +275,8 @@ pub fn report(drawing: &Drawing, specs: Option<&GpuSpecs>) {
             %renderer,
             %driver,
             "drawing on a GPU: the graphics loaders didn't keep to the software renderer (the \
-             Vulkan loader does from 1.3.234 on)"
+             Vulkan loader does from 1.3.234 on, unless a settings file of the Vulkan \
+             configurator orders its devices)"
         ),
         (Drawing::Gpu(_), false) => {
             tracing::debug!(%renderer, %driver, "drawing on the display server's GPU");
