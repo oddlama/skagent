@@ -4,11 +4,11 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 
 use anyhow::{Context as _, Result, ensure};
 use skagent_pinentry::rendering::{
-    Drawing, Renderer, Why, choose, device_numbers, environment, missing,
+    Drawing, Renderer, Why, choose, device_numbers, environment, missing, started_again,
 };
 
 type Environment = HashMap<&'static str, OsString>;
@@ -225,4 +225,16 @@ fn device_numbers_are_unpacked_as_glibc_packs_them() {
         device_numbers(0x1234_59ab_cde6_78f1),
         (0x1234_5678, 0x9abc_def1)
     );
+}
+
+/// A popup starts itself again once: it knows by its own process id in the
+/// environment, which an exec keeps. What another process left there
+/// doesn't count.
+#[test]
+fn a_popup_knows_that_it_started_itself_again() {
+    assert!(started_again(Some(OsStr::new("4711")), 4711));
+    assert!(!started_again(None, 4711));
+    assert!(!started_again(Some(OsStr::new("4712")), 4711));
+    assert!(!started_again(Some(OsStr::new("")), 4711));
+    assert!(!started_again(Some(OsStr::new("04711")), 4711));
 }

@@ -27,7 +27,7 @@ The crashes are the NVIDIA driver's: it doesn't survive a failed allocation whil
 
 ## what follows for skagent
 
-- **The popup draws on the CPU** (`pinentry/src/rendering.rs`), with Mesa's lavapipe, and nothing else is loaded. The loaders take this through their environment alone, read when they are loaded, so the popup starts itself again with it if it has to:
+- **The popup draws on the CPU** (`pinentry/src/rendering.rs`), with Mesa's lavapipe, and nothing else is loaded. The loaders take this through their environment, read when they are loaded, so the popup starts itself again with it if it has to, once (it leaves its process id in `SKAGENT_PINENTRY_STARTED_AGAIN`, and gives up if it finds its own there and the environment still differs):
   - `VK_LOADER_DRIVERS_SELECT=lvp_icd.*`: the Vulkan loader (1.3.234 or newer) skips every driver whose manifest's file name doesn't match, before it would open its library.
   - No `VK_DRIVER_FILES` and no `VK_ICD_FILENAMES`: either replaces the loader's search for drivers (`loader_get_data_files`), and the selection is made among what it names. A session that names a GPU's driver there, to pick one of two, names no lavapipe: nothing is left, and the popup has no window.
   - `VK_LOADER_LAYERS_DISABLE=~all~`, and no `VK_LOADER_LAYERS_ALLOW`: no layer is loaded either. NVIDIA's device-switching layer lives in the same library as its driver, and overlays or capture layers have no business in a PIN prompt.

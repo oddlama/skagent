@@ -47,6 +47,10 @@ use wayland_protocols::wp::linux_dmabuf::zv1::client::{
     zwp_linux_dmabuf_feedback_v1, zwp_linux_dmabuf_v1,
 };
 
+/// Set to the popup's process id when it starts itself again, which keeps
+/// the id: a popup that finds its own there doesn't start a third time.
+const STARTED_AGAIN: &str = "SKAGENT_PINENTRY_STARTED_AGAIN";
+
 /// Mesa's lavapipe, by its manifest's file name: `lvp_icd.<architecture>.json`
 /// everywhere.
 const LAVAPIPE: &str = "lvp_icd.*";
@@ -209,17 +213,27 @@ pub fn missing(
         .collect()
 }
 
+/// Whether the process `pid` is a popup that started itself again:
+/// `marker` is what its environment has for that, the id of the process
+/// that did. Another process's id there was inherited and means nothing.
+#[must_use]
+pub fn started_again(marker: Option<&OsStr>, pid: u32) -> bool {
+    marker.and_then(OsStr::to_str) == Some(pid.to_string().as_str())
+}
+
 /// Decides what to draw with ([`choose`]) and makes sure the graphics
 /// loaders will find the environment for it ([`environment`]). If this
 /// process's differs, the process is replaced by the same program with the
 /// same arguments in the right one, and this doesn't return; there it
-/// decides the same again and goes on. To be called first: before anything
-/// is loaded that reads the variables, and before the process holds
-/// anything.
+/// decides the same again and goes on. It starts again once: a popup that
+/// was started again and still finds another environment than it decides
+/// on gives up. To be called first: before anything is loaded that reads
+/// the variables, and before the process holds anything.
 ///
 /// # Errors
 ///
-/// Returns an error if the program can't be found or started again.
+/// Returns an error if the program can't be found or started again, or if
+/// starting it again didn't settle its environment.
 pub fn prepare(renderer: Renderer) -> Result<Drawing> {
     let drawing = match renderer {
         Renderer::Cpu => choose(renderer, None, &[]),
@@ -232,6 +246,15 @@ pub fn prepare(renderer: Renderer) -> Result<Drawing> {
     if changes.is_empty() {
         return Ok(drawing);
     }
+    let pid = std::process::id();
+    if started_again(std::env::var_os(STARTED_AGAIN).as_deref(), pid) {
+        let names: Vec<_> = changes.iter().map(|(name, _)| *name).collect();
+        bail!(
+            "the graphics loaders' environment isn't the one to draw with ({drawing:?}), though \
+             the popup started itself again for it: {} differ",
+            names.join(", ")
+        );
+    }
     let program = std::env::current_exe().context("finding the popup's own executable")?;
     let mut arguments = std::env::args_os();
     let mut again = Command::new(&program);
@@ -239,6 +262,7 @@ pub fn prepare(renderer: Renderer) -> Result<Drawing> {
         again.arg0(name);
     }
     again.args(arguments);
+    again.env(STARTED_AGAIN, pid.to_string());
     for (name, wanted) in changes {
         match wanted {
             Some(value) => again.env(name, value),
@@ -256,8 +280,9 @@ pub fn prepare(renderer: Renderer) -> Result<Drawing> {
 /// Logs what the popup's window is drawn with, next to what was decided.
 /// Worth a warning: a GPU where the CPU was decided on (then a loader
 /// didn't take the environment, and loaded the drivers the popup is meant
-/// to stay away from), and the CPU where the GPU's driver should have
-/// drawn. This sees what draws the window, not what else a loader loaded.
+/// to stay away from), and the CPU where the configuration asks for the
+/// GPU, with the reason. This sees what draws the window, not what else a
+/// loader loaded.
 pub fn report(drawing: &Drawing, specs: Option<&GpuSpecs>) {
     let Some(specs) = specs else {
         tracing::warn!("can't tell what the popup is drawn with");
@@ -269,7 +294,7 @@ pub fn report(drawing: &Drawing, specs: Option<&GpuSpecs>) {
             tracing::debug!(%renderer, %driver, "drawing on the CPU");
         }
         (Drawing::Cpu(why), true) => {
-            tracing::info!(%renderer, %driver, %why, "drawing on the CPU, not on a GPU");
+            tracing::warn!(%renderer, %driver, %why, "drawing on the CPU, not on a GPU");
         }
         (Drawing::Cpu(_), false) => tracing::warn!(
             %renderer,

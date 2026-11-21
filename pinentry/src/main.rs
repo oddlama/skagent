@@ -53,12 +53,15 @@ struct Cli {
     renderer: Option<RendererArg>,
 }
 
+/// `--theme`: the appearance to show, whatever the desktop's is.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum ThemeArg {
     Light,
     Dark,
 }
 
+/// `--renderer`: what the agent's configuration says to draw with
+/// ([`Renderer`], by its names there).
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum RendererArg {
     Cpu,

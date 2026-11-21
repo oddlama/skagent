@@ -18,7 +18,7 @@ yet unless a section says so.
   GPU driver, whatever the machine has: GPUI would load every vendor's to
   pick one, which wakes a sleeping second GPU and puts a PIN prompt at the
   mercy of that driver. It gives the graphics loaders their orders through
-  its own environment, and starts itself again with it if it has to
+  its own environment, and starts itself again with it, once, if it has to
   (`pinentry/src/rendering.rs`); the day this comes from is in
   [`research/popup-rendering.md`](research/popup-rendering.md).
 - **Or on the display server's GPU,** if the configuration asks for it
