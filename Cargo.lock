@@ -2065,6 +2065,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "signal-hook"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "49f7447afd772ca79ad17ae0a3972a6b0df0cb4b80990fd82707593e9e012a74"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
+
+[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2149,6 +2159,21 @@ dependencies = [
  "base64",
  "rustix",
  "skagent-age",
+ "skagent-secret",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
+name = "skagent-age-standalone"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rustix",
+ "signal-hook",
+ "skagent-age",
+ "skagent-age-plugin",
+ "skagent-fido",
  "skagent-secret",
  "tempfile",
  "zeroize",

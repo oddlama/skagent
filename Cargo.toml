@@ -43,6 +43,8 @@ soft-fido2-transport = "0.17"
 ssh-agent-lib = "0.6"
 subtle = "2"
 signature = "2.2"
+# Flags and the default action only: no iterator, no channel.
+signal-hook = { version = "0.4", default-features = false }
 tempfile = "3"
 toml = { version = "1.2", default-features = false, features = [
   "parse",

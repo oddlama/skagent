@@ -1,0 +1,26 @@
+[package]
+name = "skagent-age-standalone"
+description = "age-plugin-skagent for systems without the agent: asks the security key itself, and keeps nothing"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+# Goes into initrds: libfido2 and what the key takes, nothing of the agent's
+# (`checks.standalone-dependencies`).
+[dependencies]
+anyhow.workspace = true
+rustix = { workspace = true, features = ["event", "stdio"] }
+signal-hook.workspace = true
+skagent-age.workspace = true
+skagent-age-plugin.workspace = true
+skagent-fido.workspace = true
+skagent-secret.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
