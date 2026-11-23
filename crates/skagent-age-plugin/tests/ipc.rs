@@ -6,8 +6,8 @@ mod support;
 
 use std::io::Cursor;
 
-use anyhow::{Context as _, Result, ensure};
-use skagent_age_plugin::ipc::{self, Message};
+use anyhow::{Context as _, Result, bail, ensure};
+use skagent_age_plugin::ipc::{self, Message, Secret};
 
 fn written(message: &Message) -> Result<String> {
     let mut bytes = Vec::new();
@@ -142,5 +142,110 @@ fn telling_expects_ok_and_asking_takes_any_answer() -> Result<()> {
         &command,
     )?;
     ensure!(answer.tag == "fail");
+    Ok(())
+}
+
+/// What the client answers to `request-secret` for `secret`: `ok` with the
+/// secret as its body.
+fn answer(secret: &[u8]) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    ipc::write(&mut bytes, &Message::with_body("ok", &[], secret))?;
+    Ok(bytes)
+}
+
+fn request(client: Vec<u8>, max_bytes: usize) -> Result<(Secret, Vec<Message>, Cursor<Vec<u8>>)> {
+    let mut input = Cursor::new(client);
+    let mut out = Vec::new();
+    let secret = ipc::request_secret(&mut input, &mut out, "PIN of the key", max_bytes)?;
+    Ok((secret, support::output(&out)?, input))
+}
+
+#[test]
+fn a_secret_is_asked_for_with_its_prompt_and_comes_back_whole() -> Result<()> {
+    // Shorter than a line, a line exactly, and more than one.
+    for length in [0_usize, 1, 4, 6, 47, 48, 49, 63, 96, 100] {
+        let typed: Vec<u8> = (b'0'..=b'9').cycle().take(length).collect();
+        let (secret, asked, _) = request(answer(&typed)?, 128)?;
+        let Secret::Given(secret) = secret else {
+            bail!("{length} bytes: {secret:?}");
+        };
+        ensure!(secret.expose() == typed, "{length} bytes");
+        let [asked] = asked.as_slice() else {
+            bail!("asked {} times", asked.len());
+        };
+        ensure!(asked.tag == "request-secret" && asked.arguments.is_empty());
+        ensure!(*asked.body == *b"PIN of the key");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_secret_that_is_too_long_is_read_to_its_end_and_dropped() -> Result<()> {
+    // The next message is read from where the secret ended.
+    let mut client = answer(&[b'7'; 200])?;
+    client.extend_from_slice(b"-> ok\n\n");
+    let (secret, _, mut input) = request(client, 63)?;
+    ensure!(matches!(secret, Secret::TooLong), "{secret:?}");
+    let next = ipc::read(&mut input)?.context("the next message")?;
+    ensure!(next.tag == "ok" && next.body.is_empty());
+    // One byte too many is too many.
+    let (secret, _, _) = request(answer(&[b'7'; 64])?, 63)?;
+    ensure!(matches!(secret, Secret::TooLong), "{secret:?}");
+    let (secret, _, _) = request(answer(&[b'7'; 63])?, 63)?;
+    ensure!(matches!(secret, Secret::Given(_)), "{secret:?}");
+    Ok(())
+}
+
+#[test]
+fn a_client_that_cant_ask_or_a_user_who_cancels_gives_no_secret() -> Result<()> {
+    let (secret, _, mut input) = request(b"-> fail\n\n-> ok\n\n".to_vec(), 63)?;
+    ensure!(matches!(secret, Secret::Refused), "{secret:?}");
+    ensure!(ipc::read(&mut input)?.is_some(), "the next message");
+    Ok(())
+}
+
+#[test]
+fn an_answer_that_isnt_a_secret_is_refused_without_repeating_it() {
+    let full_line = "A".repeat(64);
+    let cases = [
+        ("nothing", String::new()),
+        ("another answer", "-> done\n\n".to_owned()),
+        ("ends before the body", "-> ok\n".to_owned()),
+        ("ends after a full line", format!("-> ok\n{full_line}\n")),
+        ("a line of 65 columns", format!("-> ok\n{full_line}A\n\n")),
+        ("padded base64", "-> ok\nU0VDUkVUMQ==\n".to_owned()),
+        ("not base64", "-> ok\nSECRET!!\n".to_owned()),
+        ("trailing bits", "-> ok\nU0VDUkVUMR\n".to_owned()),
+    ];
+    for (what, text) in cases {
+        let result = request(text.into_bytes(), 63);
+        assert!(result.is_err(), "{what} accepted");
+        let said = result
+            .err()
+            .map(|error| format!("{error:#}"))
+            .unwrap_or_default();
+        assert!(
+            !said.contains("SECRET") && !said.contains("U0VDUkVU"),
+            "{what}: {said}"
+        );
+    }
+}
+
+#[test]
+fn a_message_for_the_user_takes_ok_and_fail() -> Result<()> {
+    for reply in ["-> ok\n\n", "-> fail\n\n"] {
+        let mut out = Vec::new();
+        ipc::show(
+            &mut Cursor::new(reply.as_bytes().to_vec()),
+            &mut out,
+            "touch the key",
+        )?;
+        let shown = support::output(&out)?;
+        let [shown] = shown.as_slice() else {
+            bail!("{} messages", shown.len());
+        };
+        ensure!(shown.tag == "msg" && *shown.body == *b"touch the key");
+    }
+    ensure!(ipc::show(&mut Cursor::new(Vec::new()), &mut Vec::new(), "x").is_err());
     Ok(())
 }

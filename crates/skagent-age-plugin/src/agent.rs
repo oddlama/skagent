@@ -54,8 +54,28 @@ pub fn hung_up(pipe: impl std::os::fd::AsFd) -> bool {
             .is_some_and(|fd| fd.revents().intersects(PollFlags::HUP | PollFlags::ERR))
 }
 
-/// Where the agent is: `SKAGENT_AGE_SOCKET` if set; else its socket for age
-/// requests in `XDG_RUNTIME_DIR`, if `exists` says it is there; else
+/// A variable's value as a path, unless it is unset or empty.
+fn given(value: Option<&OsStr>) -> Option<PathBuf> {
+    value.filter(|value| !value.is_empty()).map(PathBuf::from)
+}
+
+/// The socket of an agent on this machine: `SKAGENT_AGE_SOCKET` if set;
+/// else the agent's socket for age requests in `XDG_RUNTIME_DIR`, if
+/// `exists` says it is there. `None` where no agent runs.
+#[must_use]
+pub fn local_socket(
+    age_socket: Option<&OsStr>,
+    runtime_dir: Option<&OsStr>,
+    exists: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    given(age_socket).or_else(|| {
+        given(runtime_dir)
+            .map(|directory| directory.join(AGE_SOCKET_NAME))
+            .filter(|path| exists(path))
+    })
+}
+
+/// Where the agent is: on this machine ([`local_socket`]), else
 /// `SSH_AUTH_SOCK`, which on a remote host is an agent forwarded from the
 /// machine that runs skagent.
 ///
@@ -68,14 +88,7 @@ pub fn socket_path(
     ssh_auth_sock: Option<&OsStr>,
     exists: impl Fn(&Path) -> bool,
 ) -> Result<PathBuf> {
-    let given = |value: Option<&OsStr>| value.filter(|value| !value.is_empty()).map(PathBuf::from);
-    if let Some(path) = given(age_socket) {
-        return Ok(path);
-    }
-    if let Some(path) = given(runtime_dir)
-        .map(|directory| directory.join(AGE_SOCKET_NAME))
-        .filter(|path| exists(path))
-    {
+    if let Some(path) = local_socket(age_socket, runtime_dir, exists) {
         return Ok(path);
     }
     given(ssh_auth_sock).context(

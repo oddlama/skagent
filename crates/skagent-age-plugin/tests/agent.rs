@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail, ensure};
 use skagent_age::wire::{Refusal, UNWRAP_EXTENSION, UnwrapReply, UnwrapRequest};
 use skagent_age::{FileKey, Identity};
-use skagent_age_plugin::agent::{Agent, Unwrap as _, hung_up, socket_path};
+use skagent_age_plugin::agent::{Agent, Unwrap as _, hung_up, local_socket, socket_path};
 
 fn os(text: &str) -> &OsStr {
     OsStr::new(text)
@@ -43,6 +43,26 @@ fn the_socket_for_age_requests_comes_before_a_forwarded_agent() -> Result<()> {
     ensure!(socket_path(None, runtime, None, missing).is_err());
     ensure!(socket_path(None, None, Some(os("")), there).is_err());
     Ok(())
+}
+
+/// Where an agent runs on this machine, which a forwarded one doesn't.
+#[test]
+fn an_agent_on_this_machine_is_found_by_its_socket_for_age_requests() {
+    let there = |_: &Path| true;
+    let missing = |_: &Path| false;
+    let runtime = Some(os("/run/user/1000"));
+    assert_eq!(
+        local_socket(Some(os("/tmp/given.sock")), runtime, missing),
+        Some(PathBuf::from("/tmp/given.sock"))
+    );
+    assert_eq!(
+        local_socket(None, runtime, there),
+        Some(PathBuf::from("/run/user/1000/skagent-age.sock"))
+    );
+    // No agent: an initrd, a rescue system.
+    assert_eq!(local_socket(None, runtime, missing), None);
+    assert_eq!(local_socket(None, None, there), None);
+    assert_eq!(local_socket(Some(os("")), Some(os("")), there), None);
 }
 
 fn request() -> Result<UnwrapRequest> {

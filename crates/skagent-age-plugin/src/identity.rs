@@ -1,6 +1,11 @@
 //! `identity-v1`: unwrapping file keys. The age client hands over the
 //! identities and every stanza of the files' headers; the plugin answers
 //! with the file keys the agent unwrapped.
+//!
+//! What the client hands over ([`collect`]) and how a refusal is told
+//! ([`error`]) are the protocol's, and shared with the plugin for systems
+//! without an agent (`skagent-age-standalone`). Whom to ask in which order
+//! isn't: [`run`] asks the agent identity by identity.
 
 use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
@@ -22,25 +27,63 @@ const NOTICE: &str =
 
 /// The stanzas of one file's header that are of our type.
 #[derive(Debug, Default)]
-struct File {
+pub struct File {
     /// The file's index, as the age client wrote it.
-    index: String,
+    pub index: String,
     /// Stanzas of this file seen so far, of any type.
     seen: usize,
-    stanzas: Vec<Stanza>,
+    /// The well-formed stanzas of our type, in the header's order.
+    pub stanzas: Vec<Stanza>,
     /// Stanzas of our type that are malformed: their position and why.
-    invalid: Vec<(usize, String)>,
+    pub invalid: Vec<(usize, String)>,
+}
+
+impl File {
+    /// Whether there is something to unwrap in this file. Tells the age
+    /// client what keeps it from being tried: a malformed stanza of ours,
+    /// which makes the file's header invalid, or more stanzas than skagent
+    /// takes. A file without a stanza of ours is nobody's fault.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the age client can't be told.
+    pub fn check(&self, input: &mut impl BufRead, output: &mut impl Write) -> Result<bool> {
+        if !self.invalid.is_empty() {
+            for (position, reason) in &self.invalid {
+                let about = ["stanza", self.index.as_str(), &position.to_string()];
+                error(input, output, &about, reason)?;
+            }
+            return Ok(false);
+        }
+        if self.stanzas.len() > MAX_STANZAS {
+            let reason = format!(
+                "the file has {} stanzas of this recipient type; skagent takes {MAX_STANZAS}",
+                self.stanzas.len()
+            );
+            error(input, output, &["internal"], &reason)?;
+            return Ok(false);
+        }
+        Ok(!self.stanzas.is_empty())
+    }
 }
 
 /// What phase 1 collected.
 #[derive(Debug, Default)]
-struct Collected {
+pub struct Collected {
     /// Each identity, or why it isn't one of ours.
-    identities: Vec<Result<Identity, String>>,
-    files: Vec<File>,
+    pub identities: Vec<Result<Identity, String>>,
+    /// The files, in the order the age client named them.
+    pub files: Vec<File>,
 }
 
-fn collect(input: &mut impl BufRead) -> Result<Collected> {
+/// Phase 1: reads what the age client hands over, up to its `done`.
+///
+/// # Errors
+///
+/// Returns an error if the age client breaks the protocol or stops before
+/// `done`. An identity or a stanza of ours that is malformed isn't one: it
+/// is kept with the reason, to be told in phase 2.
+pub fn collect(input: &mut impl BufRead) -> Result<Collected> {
     let mut collected = Collected::default();
     loop {
         let message = ipc::read(input)?.context("the age client stopped before `done`")?;
@@ -86,8 +129,15 @@ fn collect(input: &mut impl BufRead) -> Result<Collected> {
     }
 }
 
-/// Sends an `error` command; the age client answers `ok`.
-fn error(
+/// Sends an `error` command; the age client answers `ok`. `about`: what the
+/// error is about, `["identity", index]`, `["stanza", file, index]` or
+/// `["internal"]`.
+///
+/// # Errors
+///
+/// Returns an error if the age client can't be told or answers anything
+/// else.
+pub fn error(
     input: &mut impl BufRead,
     output: &mut impl Write,
     about: &[&str],
@@ -118,12 +168,7 @@ fn ask_agent(
         }
         if !*noticed && started.elapsed() >= NOTICE_AFTER {
             *noticed = true;
-            // `ok`, or `fail` if the client has nowhere to show it.
-            ipc::ask(
-                input,
-                output,
-                &Message::with_body("msg", &[], NOTICE.as_bytes()),
-            )?;
+            ipc::show(input, output, NOTICE)?;
         }
         Ok(())
     })
@@ -180,23 +225,7 @@ pub fn run(
 
     let mut noticed = false;
     'files: for file in collected.files {
-        if !file.invalid.is_empty() {
-            // A malformed stanza of ours: this file's header is invalid.
-            for (position, reason) in &file.invalid {
-                let about = ["stanza", file.index.as_str(), &position.to_string()];
-                error(input, output, &about, reason)?;
-            }
-            continue;
-        }
-        if file.stanzas.is_empty() {
-            continue;
-        }
-        if file.stanzas.len() > MAX_STANZAS {
-            let reason = format!(
-                "the file has {} stanzas of this recipient type; skagent takes {MAX_STANZAS}",
-                file.stanzas.len()
-            );
-            error(input, output, &["internal"], &reason)?;
+        if !file.check(input, output)? {
             continue;
         }
         for (position, identity) in &identities {

@@ -11,10 +11,14 @@ use std::io::{BufRead, Write};
 use anyhow::{Context as _, Result, bail, ensure};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
+use skagent_secret::SecretBuffer;
 use zeroize::Zeroizing;
 
 /// Columns of a full line of a stanza's body.
 const BODY_COLUMNS: usize = 64;
+
+/// Bytes a full line of a stanza's body decodes to.
+const BODY_LINE_BYTES: usize = 48;
 
 /// Longest line read. An identity of ours is under 2000 characters, as is a
 /// stanza's first line with its encapsulated key.
@@ -204,4 +208,122 @@ pub fn tell(input: &mut impl BufRead, output: &mut impl Write, command: &Message
         command.tag
     );
     Ok(())
+}
+
+/// Shows `text` to whoever runs the age client (`msg`). A client with
+/// nowhere to show it answers `fail`, which is no error.
+///
+/// # Errors
+///
+/// Returns an error if writing or reading fails, or the client answers
+/// nothing.
+pub fn show(input: &mut impl BufRead, output: &mut impl Write, text: &str) -> Result<()> {
+    ask(
+        input,
+        output,
+        &Message::with_body("msg", &[], text.as_bytes()),
+    )
+    .map(|_answer| ())
+}
+
+/// What the age client answered when it was asked for a secret.
+#[derive(Debug)]
+pub enum Secret {
+    /// What the user typed, in locked memory.
+    Given(SecretBuffer),
+    /// More bytes than were asked for at most. They were read to their end
+    /// and kept nowhere.
+    TooLong,
+    /// The client has nobody to ask, or the user cancelled (`fail`).
+    Refused,
+}
+
+/// Reads one line of a stanza's body into `line`, without its newline, and
+/// returns its length. Nothing of it goes to the heap.
+fn read_body_line(input: &mut impl BufRead, line: &mut [u8; BODY_COLUMNS]) -> Result<usize> {
+    let mut length = 0_usize;
+    loop {
+        let available = input.fill_buf().context("reading from the age client")?;
+        ensure!(
+            !available.is_empty(),
+            "the age client's input ends inside a stanza"
+        );
+        let (taken, done) = match available.iter().position(|&byte| byte == b'\n') {
+            Some(newline) => (newline, true),
+            None => (available.len(), false),
+        };
+        let end = length
+            .checked_add(taken)
+            .filter(|&end| end <= BODY_COLUMNS)
+            .with_context(|| format!("a body line of more than {BODY_COLUMNS} columns"))?;
+        let chunk = available.get(..taken).context("a line beyond the buffer")?;
+        line.get_mut(length..end)
+            .context("a line beyond its buffer")?
+            .copy_from_slice(chunk);
+        length = end;
+        // With its newline, if the line ends here.
+        input.consume(taken.saturating_add(usize::from(done)));
+        if done {
+            return Ok(length);
+        }
+    }
+}
+
+/// Asks the age client for a secret, a PIN for one (`request-secret`): the
+/// client shows `prompt` and answers what the user typed.
+///
+/// The answer goes from the client's lines into locked memory, at most
+/// `max_bytes` of it, a line at a time through buffers on the stack that
+/// are wiped: no copy of it is left on the heap by this function. What
+/// `input` keeps of the lines it handed out is `input`'s; a reader that
+/// wipes what was consumed keeps nothing.
+///
+/// # Errors
+///
+/// Returns an error if writing or reading fails, the client answers
+/// anything but `ok` or `fail`, the answer isn't canonical base64, or locked
+/// memory can't be had. No error carries any of the answer.
+pub fn request_secret(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    prompt: &str,
+    max_bytes: usize,
+) -> Result<Secret> {
+    write(
+        output,
+        &Message::with_body("request-secret", &[], prompt.as_bytes()),
+    )?;
+    let first = read_line(input)?.context("the age client closed its side instead of answering")?;
+    let given = match first.as_str() {
+        "-> ok" => true,
+        "-> fail" => false,
+        _ => bail!("the age client answered neither `ok` nor `fail` when asked for a secret"),
+    };
+    let mut secret = SecretBuffer::with_capacity(max_bytes)
+        .context("locked memory for the age client's answer")?;
+    let mut too_long = false;
+    loop {
+        let mut line = Zeroizing::new([0_u8; BODY_COLUMNS]);
+        let length = read_body_line(input, &mut line)?;
+        let encoded = line.get(..length).context("a line beyond its buffer")?;
+        let mut decoded = Zeroizing::new([0_u8; BODY_LINE_BYTES]);
+        // Full lines are 64 columns, so each decodes by itself.
+        let count = STANDARD_NO_PAD
+            .decode_slice(encoded, decoded.as_mut_slice())
+            .ok()
+            .context("the age client's answer isn't canonical base64")?;
+        let bytes = decoded.get(..count).context("more bytes than a line has")?;
+        if !too_long && secret.extend_from_slice(bytes).is_err() {
+            too_long = true;
+            secret.clear();
+        }
+        if length < BODY_COLUMNS {
+            break;
+        }
+    }
+    Ok(match (given, too_long) {
+        (false, _) => Secret::Refused,
+        (true, true) => Secret::TooLong,
+        (true, false) => Secret::Given(secret),
+    })
 }

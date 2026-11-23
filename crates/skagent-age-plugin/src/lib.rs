@@ -38,7 +38,11 @@ age-plugin-skagent is run by age (or rage) for identities of skagent:
 ";
 
 /// Fills `buffer` from the system's random number generator.
-fn random(buffer: &mut [u8]) -> Result<()> {
+///
+/// # Errors
+///
+/// Returns an error if the generator can't be read.
+pub fn random(buffer: &mut [u8]) -> Result<()> {
     let mut filled = 0_usize;
     while let Some(rest) = buffer.get_mut(filled..).filter(|rest| !rest.is_empty()) {
         let written = getrandom(rest, GetRandomFlags::empty())

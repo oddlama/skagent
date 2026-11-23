@@ -2149,6 +2149,7 @@ dependencies = [
  "base64",
  "rustix",
  "skagent-age",
+ "skagent-secret",
  "tempfile",
  "zeroize",
 ]
