@@ -328,6 +328,13 @@ impl Device {
         })
     }
 
+    /// Whether a PIN is set on the device, as it said when it was opened.
+    /// Asking takes no PIN.
+    #[must_use]
+    pub fn has_pin(&self) -> bool {
+        self.inner.has_pin()
+    }
+
     /// PIN attempts left. Reading it doesn't use one.
     ///
     /// # Errors

@@ -209,6 +209,13 @@ impl Device {
         unsafe { sys::fido_dev_supports_credman(self.raw.as_ptr()) }
     }
 
+    /// Whether the device said that a PIN is set when it was opened.
+    pub(crate) fn has_pin(&self) -> bool {
+        // SAFETY: reads a flag `fido_dev_open` set on our open device,
+        // without mutation.
+        unsafe { sys::fido_dev_has_pin(self.raw.as_ptr()) }
+    }
+
     /// The extensions the device lists in `authenticatorGetInfo`.
     pub(crate) fn extensions(&mut self) -> Result<Vec<String>, FidoError> {
         // SAFETY: creates an empty owned info object, or null on failure.
