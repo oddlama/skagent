@@ -206,6 +206,12 @@
                 package = config.packages.default;
                 testkey = config.packages.testkey;
               };
+              vm-age-standalone = import ./nix/tests/age-standalone.nix {
+                inherit pkgs;
+                package = config.packages.default;
+                standalone = config.packages.age-plugin-skagent-standalone;
+                testkey = config.packages.testkey;
+              };
               vm-age-check = import ./nix/tests/age-check.nix {
                 inherit pkgs ageCheck;
                 testkey = config.packages.testkey;
