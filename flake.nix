@@ -146,6 +146,26 @@
             default = lib.addMetaAttrs {
               mainProgram = "skagent";
             } config.nci.outputs.skagent.packages.release;
+            # age-plugin-skagent for systems without the agent (an initrd, a
+            # rescue system): it asks the security key itself. Not installed
+            # with the agent, whose own plugin has the same name: age finds a
+            # plugin by the name in the identity.
+            age-plugin-skagent-standalone =
+              let
+                crate = config.nci.outputs.skagent-age-standalone.packages.release;
+              in
+              pkgs.runCommand "age-plugin-skagent-standalone-${crate.version}"
+                {
+                  meta = {
+                    description = "age-plugin-skagent for systems without the agent: asks the security key itself";
+                    license = lib.licenses.mit;
+                    mainProgram = "age-plugin-skagent";
+                    platforms = lib.platforms.linux;
+                  };
+                }
+                ''
+                  install -Dm755 ${crate}/bin/skagent-age-standalone $out/bin/age-plugin-skagent
+                '';
             # Test-only virtual security key (links AGPL-3.0 soft-fido2).
             testkey = lib.addMetaAttrs {
               mainProgram = "skagent-testkey";
@@ -255,6 +275,7 @@
                   "skagent"
                   "skagent-age"
                   "skagent-age-plugin"
+                  "skagent-age-standalone"
                   "skagent-fido"
                   "skagent-fds"
                   "skagent-popup"
@@ -264,6 +285,28 @@
                   "soft-fido2"
                   "skagent-testkey"
                 ];
+              };
+              # The standalone plugin goes into initrds: nothing of the
+              # agent's in it, no runtime, no D-Bus, no command line parser.
+              standalone-dependencies = pkgs.callPackage ./nix/license-boundary.nix {
+                name = "standalone-dependencies";
+                what = "what only the agent needs";
+                cargoLock = ./Cargo.lock;
+                shippedCrates = [ "skagent-age-standalone" ];
+                forbiddenNames = [ "skagent" ];
+                forbiddenPrefixes = [
+                  "clap"
+                  "skagent-fds"
+                  "skagent-popup"
+                  "ssh-agent-lib"
+                  "tokio"
+                  "tracing"
+                  "zbus"
+                ];
+              };
+              plugin-libraries = pkgs.callPackage ./nix/plugin-libraries.nix {
+                plugin = "${config.packages.default}/bin/age-plugin-skagent";
+                standalone = lib.getExe config.packages.age-plugin-skagent-standalone;
               };
             };
 
