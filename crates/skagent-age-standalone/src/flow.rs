@@ -1,12 +1,22 @@
 //! `identity-v1` without an agent: from what the age client hands over to
 //! the file key, asking the security key itself.
 //!
-//! The flow goes key first. The age client may name many identities (the
-//! lines of everyone who can open a file), and only the key's answers tell
-//! which of them it holds. So there is one PIN and one pass over the key's
-//! credentials, whatever the number of identities: each credential is
-//! derived once, which takes a touch, and its public key is compared with
-//! all the recipients named.
+//! The flow goes key first: one PIN, one pass over the key's credentials,
+//! each derived once, which takes a touch, and tried on the file's stanzas.
+//! The first that opens one gives the file key, whichever identity was
+//! named.
+//!
+//! That is because of how the age clients run a plugin. An identity file may
+//! hold the lines of everyone who can open a file, and age and rage both
+//! start the plugin once for each line, with that line alone and all of the
+//! file's stanzas; an `error` from a run ends the decryption, a run that
+//! says nothing lets the next line have its turn (age 1.3.1
+//! `plugin/client.go`, rage 0.12.1 `age/src/identity.rs`). Only the key's
+//! answer tells which identity the key holds, and it costs the PIN and a
+//! touch. A run that kept to the recipient its line names would ask for
+//! both again for every line until the right one came. So the first run
+//! settles it: the security key at hand either opens the file or it
+//! doesn't, and whatever the line names only words the refusal.
 //!
 //! Nothing outlives the run, and little outlives its step: the PIN is held
 //! from the listing to the last derivation and wiped before a person is
@@ -189,18 +199,19 @@ fn verified_pin<K: SecurityKey>(
 
 /// What one of the key's credentials is for a file.
 enum Derived {
-    /// The file key: the credential is an identity that was named, and
-    /// the file is encrypted to it.
+    /// The file key: the file is encrypted to this identity.
     Opens(FileKey),
-    /// The credential is an identity that was named, and none of the file's
-    /// stanzas is for it.
+    /// None of the file's stanzas is for this identity, which is one that
+    /// was named.
     Named,
-    /// Nobody named this identity.
+    /// None of the file's stanzas is for this identity, and nobody named
+    /// it.
     Unnamed,
 }
 
 /// Has `key` derive `credential`'s secret, which takes a touch, and tries
-/// it on `file` if it is one of the identities `named`.
+/// it on `file`'s stanzas. Whether it is one of the identities `named`
+/// only matters if it opens nothing, for what is said then.
 ///
 /// A touch that doesn't come isn't the end: the PIN is wiped and asked for
 /// again, which says what happened and waits for the person, and the same
@@ -232,16 +243,18 @@ fn derive<K: SecurityKey>(
         pin.clear();
         *pin = verified_pin(input, output, key, again)?.0;
     };
-    if !named.contains(&seed.recipient()?) {
-        return Ok(Derived::Unnamed);
+    if let Some(file_key) = seed.unwrap(&file.stanzas)? {
+        return Ok(Derived::Opens(file_key));
     }
-    Ok(seed
-        .unwrap(&file.stanzas)?
-        .map_or(Derived::Named, Derived::Opens))
+    Ok(if named.contains(&seed.recipient()?) {
+        Derived::Named
+    } else {
+        Derived::Unnamed
+    })
 }
 
 /// The file key of `file`, from the first of the key's `credentials` that
-/// is one of the identities `named` and opens one of the file's stanzas.
+/// opens one of the file's stanzas.
 fn file_key<K: SecurityKey>(
     input: &mut impl BufRead,
     output: &mut impl Write,
@@ -254,16 +267,20 @@ fn file_key<K: SecurityKey>(
     for credential in credentials {
         match derive(input, output, key, pin, credential, (named, file))? {
             Derived::Opens(file_key) => return Ok(file_key),
-            // A line that outlived its recipient, or a file and identities
-            // that don't belong together: another credential may fit.
+            // The key's next credential may be the one the file is for.
             Derived::Named => is_named = true,
             Derived::Unnamed => {}
         }
     }
+    // Told as an error, which ends the decryption: the age client would
+    // run the plugin again for the next identity line, and the same key
+    // would be asked for its PIN and its touches to say the same.
     Err(Stop::Told(if is_named {
+        // The line names an identity of this key: a line that outlived its
+        // recipient, or a file and identities that don't belong together.
         format!("the file isn't encrypted to the identity on {}", key.name())
     } else {
-        format!("none of the identities named is on {}", key.name())
+        format!("no age identity on {} opens this file", key.name())
     }))
 }
 

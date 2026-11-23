@@ -26,6 +26,15 @@ impl PluggedIn {
     }
 }
 
+/// Whether `error` is the security key's answer to a request, and not the
+/// end of waiting for one.
+fn answered(error: &anyhow::Error) -> bool {
+    !matches!(
+        error_kind(error),
+        None | Some(ErrorKind::Transport | ErrorKind::Other)
+    )
+}
+
 /// What the flow makes of a refusal by libfido2 or the key.
 fn failure(error: anyhow::Error) -> Failure {
     match error_kind(&error) {
@@ -57,9 +66,18 @@ impl SecurityKey for PluggedIn {
         pin: &SecretBuffer,
     ) -> Result<SecretBuffer, Failure> {
         // The salt of the agent's identities: the same key, by the same code.
-        self.device
-            .derive(credential, &batch_salt(), pin)
-            .map_err(failure)
+        let derived = self.device.derive(credential, &batch_salt(), pin);
+        if let Err(error) = &derived
+            && !answered(error)
+        {
+            // The wait ended on this side: a signal that is caught
+            // interrupts libfido2 where it waits for the key (`ppoll`),
+            // which looks like a device that stopped answering. The key
+            // still waits for its touch, and is told not to. One that
+            // waits for nothing ignores this.
+            let _nothing_pending = self.device.canceller().cancel();
+        }
+        derived.map_err(failure)
     }
 }
 

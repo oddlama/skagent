@@ -12,7 +12,7 @@
 //!
 //! - [`flow`]: `identity-v1`, from what the age client hands over to the
 //!   file key. Key first: one PIN, each of the key's credentials derived
-//!   once, compared with every recipient named.
+//!   once and tried on the file, whichever identity the client named.
 //! - [`key`]: what the flow needs of a security key, and which of the
 //!   plugged-in ones it takes. [`device`]: the real ones.
 //! - [`stdio`]: the age client's end, without buffers that keep a PIN.
@@ -50,9 +50,9 @@ where skagent itself doesn't run. It asks the security key directly and keeps no
   rage -d -i IDENTITY-FILE FILE    decrypt; asks for the security key's PIN, then for a touch
   age -e -i IDENTITY-FILE          encrypt to the identity; needs no security key
 
-IDENTITY-FILE comes from `skagent age identity`. With rage it may hold the identities of
-everyone the file is encrypted to; with age, one identity per file. Where skagent runs,
-its own age-plugin-skagent answers instead.
+IDENTITY-FILE comes from `skagent age identity`. It may hold the identities of everyone the
+file is encrypted to: the security key at hand opens the file if it holds one of them, for
+one PIN and one touch. Where skagent runs, its own age-plugin-skagent answers instead.
 ";
 
 /// What the age client is told where an agent runs, at `socket`.

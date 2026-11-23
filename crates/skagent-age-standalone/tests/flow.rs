@@ -112,8 +112,29 @@ fn one_pin_and_one_touch_open_a_file() -> Result<()> {
     Ok(())
 }
 
-/// The lines of everyone a file is for: only the key's answer tells which
-/// of them it holds, and it is asked once.
+/// age and rage run the plugin once for each identity line, with that line
+/// alone, and an error from a run ends the decryption. So the run for
+/// somebody else's line opens the file with the key at hand: one PIN and
+/// one touch, wherever the key's own line stands.
+#[test]
+fn the_key_at_hand_opens_the_file_whichever_identity_the_line_names() -> Result<()> {
+    let model = Model::holding(&[3]);
+    // The file is for three people; this run got the first one's line.
+    let client = with(file_for(&[1], &[1, 2, 3])?, &[typed(PIN), ok(), ok()]);
+    let ran = run(&client, &model)?;
+
+    ensure!(
+        ran.heads() == ["request-secret", "msg", "file-key 0", "done"],
+        "{:?}",
+        ran.heads()
+    );
+    let file_key = ran.written.get(2).context("no file key")?;
+    ensure!(*file_key.body == *FILE_KEY);
+    ensure!(asked(&model) == ["tries", "list", "derive 3"]);
+    Ok(())
+}
+
+/// A client that hands over every line at once gets the same.
 #[test]
 fn the_key_is_asked_once_however_many_identities_are_named() -> Result<()> {
     let model = Model::holding(&[3]);
@@ -291,8 +312,9 @@ fn a_key_without_an_identity_is_told_from_one_with_another() -> Result<()> {
     ensure!(ran.error()? == "YubiKey 12345678 holds no age identity of skagent's");
     ensure!(asked(&model) == ["tries", "list"], "a touch for nothing");
 
-    // Two identities on the key, neither of them named: a touch each to
-    // know.
+    // Two identities on the key, and the file is for neither: a touch each
+    // to know. It is an error, which ends the decryption: the client would
+    // ask the same key again for the next line.
     let model = Model::holding(&[7, 8]);
     let client = with(file_for(&[1, 2], &[1, 2])?, &[typed(PIN), ok(), ok(), ok()]);
     let ran = run(&client, &model)?;
@@ -301,7 +323,7 @@ fn a_key_without_an_identity_is_told_from_one_with_another() -> Result<()> {
         "{:?}",
         ran.heads()
     );
-    ensure!(ran.error()? == "none of the identities named is on YubiKey 12345678");
+    ensure!(ran.error()? == "no age identity on YubiKey 12345678 opens this file");
     ensure!(asked(&model) == ["tries", "list", "derive 7", "derive 8"]);
     Ok(())
 }
@@ -334,7 +356,8 @@ fn an_identity_that_is_named_and_opens_nothing_isnt_the_end() -> Result<()> {
         ran.heads()
     );
 
-    // Nothing opens: not the same failure as a key nobody named.
+    // Nothing opens: not the same failure as a key the file isn't for and
+    // nobody named.
     let model = Model::holding(&[1]);
     let client = with(file_for(&[1, 2], &[2, 9])?, &[typed(PIN), ok(), ok()]);
     let ran = run(&client, &model)?;

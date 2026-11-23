@@ -20,6 +20,11 @@ const STEP: Duration = Duration::from_millis(100);
 /// request on the key: systemd stops a unit's whole control group at once,
 /// so this process may be told to end together with the age client, before
 /// it could see the client go.
+///
+/// Caught, a signal doesn't end the process by itself, and it interrupts
+/// libfido2 where it waits for the key, in the thread that asked. That
+/// thread cancels the request then (`PluggedIn::derive`); the watch ends
+/// the process, also where no request was waiting.
 const ENDING: [i32; 2] = [SIGTERM, SIGINT];
 
 /// A thread that cancels the request on the security key once the age
