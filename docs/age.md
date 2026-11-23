@@ -296,8 +296,20 @@ one request still yield one key.
   the agent. A cached PIN with the touch at hand, and later a batch, say
   nothing.
 - It reports why a request failed, from the agent's reason code: cancelled,
-  timed out, agent locked, no identity, another identity, several
-  identities, not allowed on this connection.
+  timed out, agent locked, no identity, several identities, not allowed on
+  this connection.
+- **A line that isn't the agent's gets no answer.** An identity file may hold
+  the lines of several people (a team's `masterIdentities`), or a key file
+  after a skagent line. age and rage start the plugin once for each line and
+  take an `error` for the end of the decryption
+  ([`research/age.md`](research/age.md)): the lines after it never have
+  their turn. So for an identity that names a recipient the agent has no
+  identity for, or whose security key turned out to hold another one, the
+  plugin ends without a word, as for a file that isn't for the identity. The
+  client goes on, and says "no identity matched" if nothing does; why is in
+  the agent's log, and in its popup where a touch was asked for. An identity
+  without data (`-j skagent`) names nobody else's key, and an agent without
+  an identity for it still says so as an error.
 - When the age client goes away (its end of standard input closes), it stops
   waiting, which the agent takes as a cancel.
 - It switches core dumps off but stays dumpable: the agent recognizes it by
@@ -712,11 +724,3 @@ What it showed on a YubiKey 5.8 is in
 2. **Popup.** The design of the decrypt and batch screens, and whether a
    running batch should have a place of its own on screen instead of a
    notification.
-3. **Identity files with several lines, through the agent.** The clients run
-   the plugin once per line, and its `error` ends the decryption
-   ([`research/age.md`](research/age.md)). The agent's plugin answers a line
-   the agent has no identity for with an `error`, so a file with the lines of
-   several people (a team's `masterIdentities`, say) stops at the first line
-   that isn't the agent's own, with age and with rage. Ending such a run
-   without a word would let the next line try, and lose the reason when no
-   line fits. Not decided.

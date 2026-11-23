@@ -140,6 +140,8 @@ fn identities_are_tried_in_order_until_one_fits() -> Result<()> {
     Ok(())
 }
 
+/// With an identity that names no recipient (`-j skagent`), which is
+/// nobody else's line.
 #[test]
 fn a_refusal_is_told_and_ends_the_run_unless_another_identity_may_fit() -> Result<()> {
     let (_, recipient) = support::identity(1)?;
@@ -188,6 +190,65 @@ fn a_refusal_is_told_and_ends_the_run_unless_another_identity_may_fit() -> Resul
             "{refusal:?}"
         );
         ensure!(!written.iter().any(|message| message.tag == "file-key"));
+    }
+    Ok(())
+}
+
+/// age and rage run the plugin once for each line of an identity file and
+/// stop at an `error`. A line that names somebody else's key gets none, so
+/// the agent's own line after it has its turn.
+#[test]
+fn an_identity_that_isnt_the_agents_is_answered_with_nothing() -> Result<()> {
+    let (_, recipient) = support::identity(1)?;
+    let (_, message) = stanza(&recipient, "0", 1)?;
+    let named = Identity::Named(recipient);
+    for refusal in [Refusal::NoIdentity, Refusal::AnotherIdentity] {
+        // A run of its own, as the clients start it.
+        let client = [add_identity(&named), message.clone(), done()];
+        let mut agent =
+            ScriptedAgent::answering(vec![Scripted::Reply(UnwrapReply::Refused(refusal))]);
+        let written = run(&client, &mut agent)?;
+        ensure!(
+            written.iter().map(head).collect::<Vec<_>>() == ["done"],
+            "{refusal:?}: {:?}",
+            written.iter().map(head).collect::<Vec<_>>()
+        );
+
+        // And in one run with the next line, which the agent has a key for.
+        let client = [
+            add_identity(&named),
+            add_identity(&named),
+            message.clone(),
+            done(),
+            ok(),
+        ];
+        let mut agent = ScriptedAgent::answering(vec![
+            Scripted::Reply(UnwrapReply::Refused(refusal)),
+            Scripted::Reply(file_key(b"YELLOW SUBMARINE")?),
+        ]);
+        let written = run(&client, &mut agent)?;
+        ensure!(
+            written.iter().map(head).collect::<Vec<_>>() == ["file-key 0", "done"],
+            "{refusal:?}"
+        );
+    }
+    // Everything else the agent refuses is told, also for such an identity.
+    for refusal in [
+        Refusal::Cancelled,
+        Refusal::TimedOut,
+        Refusal::Locked,
+        Refusal::NotAllowed,
+        Refusal::Failed,
+        Refusal::Ambiguous,
+    ] {
+        let client = [add_identity(&named), message.clone(), done(), ok()];
+        let mut agent =
+            ScriptedAgent::answering(vec![Scripted::Reply(UnwrapReply::Refused(refusal))]);
+        let written = run(&client, &mut agent)?;
+        ensure!(
+            written.iter().map(head).collect::<Vec<_>>() == ["error identity 0", "done"],
+            "{refusal:?}"
+        );
     }
     Ok(())
 }

@@ -6,6 +6,13 @@
 //! ([`error`]) are the protocol's, and shared with the plugin for systems
 //! without an agent (`skagent-age-standalone`). Whom to ask in which order
 //! isn't: [`run`] asks the agent identity by identity.
+//!
+//! age and rage start the plugin once for each line of an identity file,
+//! with that line alone, and take an `error` for the end of the decryption:
+//! the lines after it never get their turn. So an identity that names a
+//! recipient the agent has no key for is answered with nothing, like a file
+//! that isn't for it. It may be someone else's line in a file with the
+//! lines of everyone a secret is for, and the agent's own may come next.
 
 use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
@@ -174,6 +181,19 @@ fn ask_agent(
     })
 }
 
+/// Whether the agent's `refusal` only says that `identity` isn't one of its
+/// own: it names a recipient, and the agent has no identity for that one, or
+/// found the security key to hold another. Such a line gets no `error`,
+/// which would keep the age client from trying the lines after it. Why
+/// nothing fit, the agent's log has (and its popup, after a touch).
+///
+/// An identity without data (`-j skagent`) names nobody else's key: an agent
+/// that has none for it is told as the error it is.
+const fn names_another_key(identity: &Identity, refusal: Refusal) -> bool {
+    matches!(identity, Identity::Named(_))
+        && matches!(refusal, Refusal::NoIdentity | Refusal::AnotherIdentity)
+}
+
 /// Whether a refusal ends the whole run: nothing else would go better.
 const fn ends_the_run(refusal: Refusal) -> bool {
     match refusal {
@@ -196,7 +216,8 @@ const fn ends_the_run(refusal: Refusal) -> bool {
 ///
 /// Returns an error if the age client breaks the protocol or goes away, or
 /// the agent can't be asked at all. What the agent refuses is told to the
-/// client as an `error` and isn't one here.
+/// client as an `error` and isn't one here; an identity that isn't the
+/// agent's is answered with nothing.
 pub fn run(
     input: &mut impl BufRead,
     output: &mut impl Write,
@@ -242,6 +263,8 @@ pub fn run(
                 }
                 // Not for this identity; the next one may fit.
                 UnwrapReply::NoMatch => {}
+                // Not the agent's identity; the next line may be.
+                UnwrapReply::Refused(refusal) if names_another_key(identity, refusal) => {}
                 UnwrapReply::Refused(refusal) => {
                     let about = ["identity", &position.to_string()];
                     error(input, output, &about, refusal.message())?;

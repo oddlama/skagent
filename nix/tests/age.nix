@@ -372,19 +372,48 @@ pkgs.testers.runNixOSTest {
         # knows. The derivation says it isn't, and no stanza is tried.
         alice_ok("skagent age identity $(age-keygen -y ~/native.key) > ~/foreign.txt")
         status, out = decrypt("age", "~/other.age", "-i ~/foreign.txt")
-        assert status != 0 and "holds another age identity" in out, out
-        assert "for-someone-else" not in out, out
+        assert status != 0 and "for-someone-else" not in out, out
+        # The plugin answers a line that isn't the agent's with nothing, so
+        # age could go on to the next line. Why nothing fit is in the log.
+        assert "no identity matched" in out and "holds another age identity" not in out, out
+        assert "is another one than the one named" in journal("skagent")
         expect(before, 1, 1, "the PIN the load took wasn't used")
         assert "matched=" not in journal("skagent").split("found age identities")[-1]
         # That told the agent which identity the key holds: the next request
         # for the other one fits nothing, and costs no touch.
         assert alice_ok("skagent age list").strip() == recipient
         status, out = alice("age -d -i ~/foreign.txt ~/other.age")
-        assert status != 0 and "knows no age identity" in out, out
+        assert status != 0 and "no identity matched" in out and "knows no age identity" not in out, out
+        assert "refused to decrypt reason=no age identity fits the request" in journal("skagent")
         expect(before, 1, 1, "a request that fits no identity asked or touched")
         status, out = decrypt("age", "~/age.age")
         assert (status, out.strip()) == (0, "from-age"), out
         expect(before, 1, 2, "decrypting after a load")
+
+    with subtest("an identity file with the lines of several people: the agent's own has its turn after the others"):
+        # age and rage run the plugin once for each line and stop at an
+        # error. Somebody else's line, first here, gets none.
+        alice_ok("cat ~/foreign.txt ~/id.txt > ~/everyone.txt")
+        for client in ["age", "rage"]:
+            before = (prompts(), touches())
+            status, out = decrypt(client, "~/both.age", "-i ~/everyone.txt")
+            assert (status, out.strip()) == (0, "for-both"), (client, out)
+            expect(before, 0, 1, f"{client} with somebody else's line first")
+        # So has a key file that comes after such a line.
+        before = (prompts(), touches())
+        status, out = alice("age -d -i ~/foreign.txt -i ~/native.key ~/other.age")
+        assert (status, out.strip()) == (0, "for-someone-else"), out
+        expect(before, 0, 0, "a line that isn't the agent's asked or touched")
+        # A machine that doesn't know yet which identity its key holds: the
+        # first line costs a touch to find out, the agent's own the one that
+        # decrypts.
+        stop_agent("skagent")
+        alice_ok("rm -rf ~/.local/state/skagent")
+        start_agent("skagent")
+        assert "Found 1 age identity(ies)." in alice_ok("skagent load --socket ${socket}")
+        status, out, taken = touched_as_asked("age -d -i ~/everyone.txt ~/both.age")
+        assert (status, out.strip().splitlines()[-1], taken) == (0, "for-both", 2), (out, taken)
+        assert alice_ok("skagent age list").strip() == recipient
 
     with subtest("with two identities, a request has to name one"):
         before = (prompts(), touches())
