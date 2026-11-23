@@ -436,6 +436,31 @@ Batches need Linux 6.5 or newer. [`docs/age.md`](docs/age.md) shows the
 settings for agenix-rekey.
 
 <details>
+<summary>Decrypting where skagent doesn't run, like an initrd</summary>
+
+`age-plugin-skagent-standalone` (a package of this flake) is the same plugin
+without the agent: it asks the security key itself. It is meant for an initrd
+that unlocks a disk or a rescue system, with the identity files you already
+have:
+
+```console
+$ rage -d -i identities.txt secret.age
+```
+
+- **One PIN and one touch** per file. The age client asks for the PIN, rage
+  through `PINENTRY_PROGRAM`; nothing is cached.
+- **`identities.txt` can hold the lines of everyone** the file is encrypted
+  to. The security key that is plugged in opens the file if it holds one of
+  them.
+- **One security key at a time:** with two plugged in it asks for no PIN.
+- **It spares your PIN tries:** with fewer than 3 left it doesn't ask, and
+  after a missed touch it asks for the PIN again instead of holding it.
+- **Not next to skagent:** where the agent runs, its own plugin answers, and
+  this one refuses.
+
+</details>
+
+<details>
 <summary>Decrypting on a remote host, through a forwarded agent</summary>
 
 With `ssh -A`, age on a remote host can decrypt with the security key in your

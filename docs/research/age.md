@@ -35,6 +35,20 @@ SSH keys used as recipients (`ssh-ed25519`) are classic.
 - **One file per process.** `identity-v1` can carry several files, but the command line tools decrypt one per run. Sparing the user work across files is up to the agent.
 - **Encrypting to an identity** (`-e -i`) asks the plugin through `recipient-v1`. A plugin without it needs the recipient given with `-r`.
 
+## how the clients run an identity plugin
+
+Read in age 1.3.1 (`plugin/client.go`, `age.go`, `cmd/age/tui.go`) and rage 0.12.1 (`age/src/identity.rs`, `protocol.rs`, `plugin.rs`, `cli_common.rs`), and seen with both in `checks.vm-age-standalone`.
+
+- **Once for each identity line.** An identity file may hold several lines of one plugin. Both clients start the plugin for one line at a time, with that line as its only `add-identity` and all of the file's stanzas:
+  - age: `Identity.Unwrap` sends one `add-identity`; `Decrypt` goes through the identities in turn.
+  - rage: `IdentityFileEntry::into_identity` builds one plugin identity per entry (`IdentityPluginV1::from_parts(plugin, vec![i], …)`), and `obtain_payload_key` goes through them with `find_map`. The plugin code underneath could take every line at once (`IdentityPluginV1::new` filters a list by plugin name); the command line never gives it more than one. Reading that code alone gives the wrong picture, and did.
+- **An `error` ends the decryption.** age takes any error but "incorrect identity" for fatal ("any other error will be considered fatal", `age.go`), and a plugin's `error` is one. rage's `unwrap_stanzas` returns `Some(Err(…))` for a run with errors and no file key, which `find_map` stops at. A run that ends with `done` alone, no file key and no error, lets the next line have its turn.
+- **So a plugin can't say "not this line, and here is why".** It either ends everything or says nothing. For the agent's plugin that means: an identity file with the lines of several people stops at the first line the agent has no identity for (`error`, "skagent knows no age identity for this"), although a later line is the agent's own. Seen with age and with rage on a file for three people, the agent's line last: no touch, no file; with its line first, the file opens. Not changed yet; see `docs/age.md`, open questions. The standalone plugin doesn't keep to the line's name at all (`docs/age.md`, the standalone plugin).
+- **What a plugin may ask the user:**
+  - `request-secret`: rage asks through a pinentry, `$PINENTRY_PROGRAM` or else the `pinentry` on `PATH`, else on the terminal; it sets a timeout of 30 s, passes the plugin's text as the description, and refuses an empty answer and asks again. age asks on the terminal (`/dev/tty`), and fails without one.
+  - `msg`: rage prints it to stderr, age to the terminal.
+  - `confirm`: rage asks the `pinentry` on `PATH`, not `$PINENTRY_PROGRAM`, and without one asks y/n on the terminal in a loop. age asks on the terminal.
+
 ## tools
 
 - **nixpkgs' `age`** ships `age-plugin-pq`, `age-plugin-tag` and `age-plugin-tagpq` next to `age`, `age-keygen` and `age-inspect`.

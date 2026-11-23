@@ -125,7 +125,10 @@ Agreed before any code.
 - **The private key is derived at decryption time, in the agent.** FIDO2 has
   no decryption, and no security key does ML-KEM. The agent decapsulates and
   hands out the file key, nothing else. The plugin never holds a secret: the
-  only cryptography it does is encrypting to an identity's public key.
+  only cryptography it does is encrypting to an identity's public key. The
+  one exception is a plugin of its own for systems without an agent, which
+  derives in its own process and is never installed next to the agent's
+  ([the standalone plugin](#the-standalone-plugin)).
 - **An identity carries its public key.** So `-i` works for encrypting too,
   without the agent and without the security key.
 - **One touch, one file key.** Outside a batch, a request gets at most one
@@ -302,7 +305,101 @@ one request still yield one key.
   same. The file key it passes on is in the age client's memory just the same.
 - A binary of its own, built from the same Cargo package as the agent and so
   always installed next to it. It doesn't link libfido2, and a check keeps it
-  that way.
+  that way (`checks.plugin-libraries`).
+
+## the standalone plugin
+
+`skagent-age-standalone`, packaged as `age-plugin-skagent-standalone` and
+installed under the plugin's name, `age-plugin-skagent`: for systems where no
+agent runs and none should. What it was asked for is an initrd that unlocks a
+LUKS volume. The volume's key is encrypted with age to everyone who may unlock
+the machine and kept in the LUKS header with their identity lines; the initrd
+runs `rage -d` with those lines, and whoever is there plugs in a security key.
+
+- **Why not the agent there.** What the agent adds to the derivation is for a
+  desktop session: the PIN cache, batches, who asks, lock and sleep, the
+  popup. At boot there is one process, one decryption and a person at the
+  console.
+- **Why not a script there.** `fido2-assert` and HKDF would do, and would be
+  a second place that has to know the salt and the labels. The standalone
+  plugin derives with the agent's code (`Device::derive`, `batch_salt`,
+  `Seed`): one implementation of the key. What is written twice is the way
+  to it, since the agent's goes through its signer, its state and tokio.
+- **The same identities and files.** Nothing is created with it: identities
+  come from `skagent age new` on a desktop.
+
+What it does for a file, in one run (`flow.rs`):
+
+1. **Refuses next to an agent.** With `$SKAGENT_AGE_SOCKET` set or the
+   agent's socket in `$XDG_RUNTIME_DIR`, it tells the age client that the
+   agent's plugin has to answer, whatever it was asked. That is against a
+   wrong order in `PATH`, not against anyone: whoever can open the key's
+   device and knows the PIN needs no plugin.
+2. **One security key.** Only devices that could hold an identity count
+   (CTAP2, a PIN, credProtect, hmac-secret and credential management, all
+   read without a PIN), so a U2F token is no obstacle. With several it stops
+   before it asks: the PIN would go to a key on a guess, and a wrong guess
+   costs that key a try. There is no pairing check: nothing here remembers a
+   pairing.
+3. **The PIN,** through the age client (`request-secret`), in one line that
+   has to say everything: "PIN of YubiKey 12345678 (8 tries left), then touch
+   it". rage shows it with a pinentry and age on the terminal; what a plugin
+   says besides (`msg`) reaches nobody behind a boot splash or over SSH.
+   - With fewer than 3 tries left it doesn't ask: the counter is the key's,
+     for its SSH keys too, and a boot console is where typos happen.
+   - A wrong PIN is asked for again, with the tries left. Every PIN is typed
+     by a person; none is tried twice.
+   - An answer no PIN has the length of never reaches the key.
+   - Three wrong PINs in a row (the key takes none until replugged) and a
+     blocked PIN end the run, each with its own words.
+4. **The credentials,** listed with the PIN, which checks it before any
+   touch. credProtect 3 hides them without it, and an identity string
+   carries no credential id.
+5. **A touch for each credential,** which is derived once and tried on the
+   file's stanzas. The first that opens one gives the file key, whichever
+   identity was named.
+6. **A missed touch:** the PIN is wiped and asked for again, saying why, and
+   the same credential is tried once more. Not the protocol's `confirm`: rage
+   doesn't take that to `$PINENTRY_PROGRAM`, and the plugin would hold a
+   verified PIN while the question is open.
+
+- **Why the name on the line doesn't decide.** The clients start a plugin
+  once for each identity line, and an `error` ends the decryption
+  ([`research/age.md`](research/age.md)). Only the key's answer tells which
+  identity it holds, for the PIN and a touch. A run that kept to its line's
+  recipient, as the agent does, would cost both for every line before the
+  right one. So the first run settles it for the security key at hand, and
+  an identity file with everyone's lines takes one PIN and one touch. If
+  nothing opens, that is an `error`, which keeps the client from asking the
+  same key again; it says "the file isn't encrypted to the identity on this
+  key" where the line names an identity of the key, else "no age identity on
+  this key opens this file". The agent keeps to the name: it knows its
+  identities before it asks a key.
+- **An identity without data** (`-j skagent`) is refused.
+- **Nothing outlives the run.** No PIN cache, no batches, no state. The PIN
+  is held from the listing to the last derivation, and wiped before a person
+  is waited for again. The process is hardened like the agent's
+  (`harden_process`, which the agent's plugin can't use), the PIN goes from
+  the client's lines straight into locked memory, and standard input is read
+  through a reader that wipes what it handed out.
+- **Letting go of the key.** When the age client goes away, or on SIGTERM
+  and SIGINT (systemd stops a unit's processes at once), the request on the
+  key is cancelled: the key stops blinking, and whoever asks next doesn't
+  find it busy.
+- **What it lacks next to the agent,** besides the cache: no check of who
+  asks, which at boot is nobody else; no pairing check, so the one device
+  that qualifies gets the typed PIN; and the PIN crosses the age client and
+  its pinentry, which don't lock memory. As everywhere here, a PIN that was
+  seen and one hijacked touch lose the identity for good.
+- **Version 1 identities are read at boot.** An initrd keeps the plugin it
+  was built with. Identity strings of version 1 and the derivation's labels
+  have to stay readable and unchanged for as long as such an initrd may
+  meet them.
+- **Small.** libfido2 and the C runtime (`checks.plugin-libraries`), nothing
+  of the agent's among its crates (`checks.standalone-dependencies`).
+- **Tests:** the flow against a key that isn't one
+  (`crates/skagent-age-standalone/tests`), and `checks.vm-age-standalone`
+  with rage, age and the virtual key. Not yet: a real security key.
 
 ## agent protocol
 
@@ -615,3 +712,11 @@ What it showed on a YubiKey 5.8 is in
 2. **Popup.** The design of the decrypt and batch screens, and whether a
    running batch should have a place of its own on screen instead of a
    notification.
+3. **Identity files with several lines, through the agent.** The clients run
+   the plugin once per line, and its `error` ends the decryption
+   ([`research/age.md`](research/age.md)). The agent's plugin answers a line
+   the agent has no identity for with an `error`, so a file with the lines of
+   several people (a team's `masterIdentities`, say) stops at the first line
+   that isn't the agent's own, with age and with rage. Ending such a run
+   without a word would let the next line try, and lose the reason when no
+   line fits. Not decided.
